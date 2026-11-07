@@ -2,8 +2,10 @@ package com.yk1z.yayamsg.glasskit
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
@@ -24,12 +26,22 @@ import android.view.ViewTreeObserver
  * onDraw 管线：
  * 1. 捕获：GlassCaptureEngine 按 backdropTag 找背景视图，采玻璃覆盖区（失败画兜底底色）；
  * 2. 模糊：API 31+ 且画布硬件加速 → RenderNode + RenderEffect.createBlurEffect；
- *    API 26–30 / 软件画布 / 透镜路径 → 降采样 1/4 + 双线性放大近似（H2 单档语义）；
- * 3. 透镜（it.3 与模糊协同）：API 33+ 且 lensScale>0 且 refraction/dispersion>0 →
- *    降采样模糊位图作 BitmapShader 喂 RuntimeShader（uRefractionPx / uDispersionPx 已乘
- *    lensScale）；降采样系数随模糊半径自适应（lensDownsampleFactor）：blurScale=0 →
- *    factor=1 全分辨率清晰折射（无锯齿），blurScale↑ → factor↑ 强糊；模糊与透镜不再互斥，
- *    四面板对 blurScale / lensScale 同时有可见响应；非透镜面板走纯模糊路径不变；
+ *    API 26–30 / 软件画布 → 固定档降采样 1/6 + 双线性放大近似（H2 单档语义，纯模糊路径不变）；
+ * 3. 透镜（it.4 真模糊化输入，QA Round 1 回修版）：API 33+ 且 lensScale>0 且
+ *    refraction/dispersion>0 → 透镜输入位图 =「固定适度降采样 1/4 + 小图 CPU
+ *    box blur ×3 迭代近似高斯（stack blur，IntArray 逐像素）」（见
+ *    obtainLensInputShader）：先把采集结果缩到 1/4 小图，再在小图坐标系内以
+ *    radius = blurRadiusPx / 4 做三盒高斯近似，模糊后经 BitmapShader 放大喂
+ *    RuntimeShader（uRefractionPx / uDispersionPx 已乘 lensScale）——先模糊后放大，
+ *    无硬边、无锯齿。⚠️ 首版 BlurMaskFilter 方案已被 QA 证伪并废弃：
+ *    BlurMaskFilter 只作用于绘制图元的 alpha 遮罩（几何边缘），不模糊位图内容
+ *    （管线顺序 geometry→mask→maskFilter→×shader color），外扩 pad 后可见区
+ *    全在遮罩内部，模糊零视觉贡献。⚠️ it.3 的「降采样系数随模糊半径自适应
+ *    （lensDownsampleFactor）」同样已废弃为锯齿源：降采样+双线性放大本质产出
+ *    锯齿而非高斯，factor 变化只是锯齿块变大。blurScale≈0（blurRadiusPx<0.5）
+ *    时跳过模糊，直接零拷贝绑定全分辨率 capture（清晰折射观感对齐 it.3）；
+ *    模糊与透镜不互斥，四面板对 blurScale / lensScale 同时有可见响应；
+ *    非透镜面板走纯模糊路径不变；
  * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
  * 5. 压暗：#000 @ dimmingAlpha；
  * 6. 高光：1dp #FFF @0.14 描边；
@@ -37,6 +49,12 @@ import android.view.ViewTreeObserver
  *
  * 重绘触发：背景视图挂 OnPreDrawListener（返回 true 不拦截绘制），33ms 节流
  * （≈30fps），postInvalidateDelayed 排队；onDetachedFromWindow 清理。
+ * it.4 重绘触发改造：① PreDraw 检测面板 onScreen 位置变化 → 立即 invalidate 绕过
+ * 节流（拖动/滚动时 capture offset 与面板框逐帧对齐，修复「拖动内容抖动」）；
+ * ② 自激励环打断——自身 postInvalidate 引发的 traversal 不再续期（修复静止期
+ * 无限重绘，15s 静止实测 5872 行日志 ~50fps/面板）；③ 透镜输入双缓冲 ping-pong
+ * （UI 每帧变异位图 vs RenderThread BitmapShader 采样的跨帧竞态根除，修复
+ * 「静止时遮挡/不遮挡切换」闪烁——竞态本身日志不可见，属静态分析定论）。
  * QA Round 1 修复：attach 幂等重挂（E1）、observer 实例缓存防 dead 滞留（E2）、
  * backdrop 晚挂载有限重试（E3）、NaN 拦截（S4）、alpha floor 取整（S1）、
  * RenderEffect 缓存复用（S2）。
@@ -65,16 +83,18 @@ class GlassKitView(context: Context) : View(context) {
         const val BLUR_DOWNSAMPLE: Int = 6
 
         /**
-         * it.3 透镜输入自适应降采样基准 K（dp）：透镜输入位图降采样系数
-         * factor = round(blurRadiusPx / (K × density))，即「每 K dp 模糊半径降一档」。
-         * 选值依据：blurDp=14 × blurScale=1 → factor=round(5.6)=6，与旧固定档
-         * BLUR_DOWNSAMPLE=6 观感衔接（Hero 默认档无回退）；blurScale=0 → factor=1
-         * （全分辨率清晰折射，消除 AGSL 双线性放大的锯齿）；blurScale=2.5 →
-         * factor 顶格 MAX_LENS_DOWNSAMPLE（强糊）。
+         * it.4 透镜输入固定降采样档（常量，不再随模糊半径变化——it.3 的
+         * lensDownsampleFactor 自适应设计已废弃为锯齿源，见类头注释）。
+         * 1/4 是「小图 CPU box blur 成本」与「放大后细节保留」的折中档：
+         * hero 1264 宽 → 小图 ~316 宽，box blur 半径 ~12px，单帧成本可控。
          */
-        const val LENS_DOWNSAMPLE_K_DP: Float = 2.5f
-        /** it.3：透镜输入降采样系数上限（blurScale 拉满时的强糊档）。 */
-        const val MAX_LENS_DOWNSAMPLE: Int = 10
+        const val LENS_DOWNSAMPLE: Int = 4
+
+        /**
+         * it.4-R2：透镜输入 box blur 半径上限（小图坐标系 px，QA 回修规格钳制值）。
+         * radius = round(blurRadiusPx / LENS_DOWNSAMPLE)，三盒迭代的 sigma = radius/2。
+         */
+        const val MAX_LENS_BLUR_RADIUS: Int = 60
         /** 重绘节流间隔（ms，≈30fps）。 */
         const val FRAME_INTERVAL_MS: Long = 33L
         /** 捕获失败兜底底色：半透明白灰。 */
@@ -270,10 +290,48 @@ class GlassKitView(context: Context) : View(context) {
 
     /** 采集位图缓存（尺寸随视图 / 降采样档变化重建）。 */
     private var captureBitmap: Bitmap? = null
-    /** 近似模糊的小位图缓存（宽高 = 视图 / 降采样档）。 */
+    /** 近似模糊的小位图缓存（宽高 = 视图 / 降采样档；纯模糊路径专用）。 */
     private var smallBlurBitmap: Bitmap? = null
     /** it.3：小位图当前降采样系数（缓存按 (w,h,factor) 三元组判断重建）。 */
     private var smallBlurFactor: Int = 0
+
+    /**
+     * it.4：透镜输入位图双缓冲（ping-pong）——闪烁根因修复。
+     * 单缓冲时 UI 线程每帧 eraseColor+重绘位图，而 RenderThread 的 BitmapShader
+     * 仍在采样同一位图 → 跨帧竞态采样到全透明/半擦除帧 → 玻璃间歇变透明
+     * （用户反馈「遮挡和不遮挡之间切换」）。双缓冲后第 N 帧写入的位图与第 N-1 帧
+     * 被 RenderThread 采样的位图恒不同实例，竞态根除。
+     */
+    private val lensInputBuffers: Array<Bitmap?> = arrayOfNulls(2)
+    /** it.4：双缓冲各自的 BitmapShader（绑定各自位图实例，位图重建时一并重建）。 */
+    private val lensShaderInputs: Array<BitmapShader?> = arrayOfNulls(2)
+    /** it.4：本帧写入的双缓冲槽位（0/1 交替）。 */
+    private var lensInputSlot: Int = 0
+
+    /* ------- it.4-R2（QA 回修）：小图 CPU box blur 缓冲与复用对象（零每帧分配） ------- */
+
+    /** 各槽位像素缓冲（box blur 原地读写），尺寸随槽位位图复用。 */
+    private val lensPixelBuffers: Array<IntArray?> = arrayOfNulls(2)
+    /** box blur 水平/垂直 pass 的临时缓冲（UI 单线程使用，尺寸复用）。 */
+    private var lensBlurTempBuffer: IntArray? = null
+    /** 各槽位复用 Canvas（绑定槽位位图实例，位图重建时一并重建）。 */
+    private val lensCanvases: Array<Canvas?> = arrayOfNulls(2)
+    /** 三盒半径缓存（boxesForGauss 结果，radius 不变时复用）。 */
+    private var lensBoxSizes: IntArray? = null
+    private var lensBoxRadius: Int = -1
+    /** 复用的输出/源缩放矩阵（避免每帧分配 Matrix）。 */
+    private val lensMatrix: Matrix = Matrix()
+    /** 复用的透镜输出 Paint（shader 每次 draw 重设）。 */
+    private val lensPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    /** 复用的降采样源矩形（避免每帧分配 RectF）。 */
+    private val lensSrcRect: RectF = RectF()
+    /**
+     * blurScale≈0 清晰路径：零拷贝绑定全分辨率 capture 的 BitmapShader
+     * （QA 观察项修复——恢复 it.3 全分辨率清晰折射观感）。capture 位图实例
+     * 变化（尺寸重建）时重建；localMatrix 每帧重设（capture 可能超宽降采样）。
+     */
+    private var lensSharpShader: BitmapShader? = null
+    private var lensSharpShaderCapture: Bitmap? = null
 
     /** API 31+ RenderNode 模糊路径的复用节点。 */
     private var blurRenderNode: RenderNode? = null
@@ -284,16 +342,40 @@ class GlassKitView(context: Context) : View(context) {
     private var blurEffectWidth: Int = -1
     private var blurEffectHeight: Int = -1
 
-    /** API 33+ 透镜 RuntimeShader 缓存（位图实例变化时重建，uniform 每次 draw 重设）。 */
+    /** API 33+ 透镜 RuntimeShader 缓存（源码静态，惰性创建；uBlurred / uniform 每次 draw 重设）。 */
     private var lensRuntimeShader: RuntimeShader? = null
-    private var lensShaderBitmap: Bitmap? = null
-    /** it.3：shader 缓存对应的源位图尺寸——动态 factor 下小位图实例复用但尺寸会变，
-     *  仅按实例同一性判断会导致 scaleX/scaleY 过期，须一并比对尺寸。 */
-    private var lensShaderSourceWidth: Int = -1
-    private var lensShaderSourceHeight: Int = -1
+
+    /** it.4：上次绘制时面板的 onScreen 坐标基线（PreDraw 位置变化检测用）。 */
+    private val lastDrawnLocation: IntArray = IntArray(2)
+    /** it.4：lastDrawnLocation 是否已初始化（首帧恒视为「位置已变化」）。 */
+    private var hasLastDrawnLocation: Boolean = false
+    /** it.4：位置检测复用缓冲（PreDraw 高频路径，避免每次分配 IntArray）。 */
+    private val preDrawLocation: IntArray = IntArray(2)
+    /**
+     * it.4：自激励重绘环打断标记。自身 postInvalidate 引发的 traversal 不再续期——
+     * 修复静止期无限 30~50fps 重绘（15s 静止日志 5872 行实测），功耗与竞态暴露窗口双降。
+     * 外部刺激（backdrop 重绘 / prop 变更 / 面板位移）不设标记，照常调度。
+     */
+    private var selfInvalidationPending: Boolean = false
 
     private val preDrawListener = ViewTreeObserver.OnPreDrawListener {
-        scheduleThrottledInvalidate()
+        // it.4 修复（抖动）：面板 onScreen 位置变化（拖动 / 滚动）→ 立即 invalidate
+        // 绕过 33ms 节流——重绘帧内 onDraw 用 getLocationOnScreen 现值采集，内容与
+        // 面板框逐帧对齐；旧逻辑下未重跑 onDraw 的帧按旧位图在新位置重放，
+        // 内容相对面板框瞬移（120Hz 真机上每两帧一跳即「拖动抖动」）。
+        getLocationOnScreen(preDrawLocation)
+        val moved = !hasLastDrawnLocation ||
+            preDrawLocation[0] != lastDrawnLocation[0] ||
+            preDrawLocation[1] != lastDrawnLocation[1]
+        if (moved) {
+            invalidate()
+        } else if (selfInvalidationPending) {
+            // it.4 修复（闪烁伴生）：本次 traversal 由自身 postInvalidate 触发
+            // （静止自激励环）→ 不再续期，静止后自然停绘
+            selfInvalidationPending = false
+        } else {
+            scheduleThrottledInvalidate()
+        }
         true // 恒返回 true：只监听，不拦截背景树自身的绘制
     }
 
@@ -330,6 +412,9 @@ class GlassKitView(context: Context) : View(context) {
         // E2 修复：不跨窗口持有 backdrop 视图引用（重挂载时 resolveTarget 会从
         // 注册表重新解析，早退分支依赖的 targetView 重建后依然正确）
         targetView = null
+        // it.4：重置位置基线与自激励标记（重新 attach 后首帧按「位置已变化」处理）
+        hasLastDrawnLocation = false
+        selfInvalidationPending = false
         super.onDetachedFromWindow()
     }
 
@@ -436,12 +521,15 @@ class GlassKitView(context: Context) : View(context) {
         attachedObserver = null
     }
 
-    /** 33ms 节流：到点直接 invalidate，未到点用 postInvalidateDelayed 排队到下一拍。 */
+    /** 33ms 节流：到点直接 invalidate，未到点用 postInvalidateDelayed 排队到下一拍。
+     *  it.4：自激励环打断——本方法设置的 selfInvalidationPending 会让「由本调用引发的
+     *  traversal」的 PreDraw 不再续期（见 preDrawListener）。 */
     private fun scheduleThrottledInvalidate() {
         val now = SystemClock.uptimeMillis()
         val elapsed = now - lastInvalidateAt
         if (elapsed >= FRAME_INTERVAL_MS) {
             lastInvalidateAt = now
+            selfInvalidationPending = true
             postInvalidate()
         } else {
             postInvalidateDelayed(FRAME_INTERVAL_MS - elapsed)
@@ -454,13 +542,30 @@ class GlassKitView(context: Context) : View(context) {
         smallBlurBitmap?.recycle()
         smallBlurBitmap = null
         smallBlurFactor = 0
+        // it.4：双缓冲与各自 BitmapShader 一并释放（shader 强引用位图，
+        // 不清会持有已 recycle 位图，RenderThread 采样有崩溃风险）
+        for (i in lensInputBuffers.indices) {
+            lensInputBuffers[i]?.let { if (!it.isRecycled) it.recycle() }
+            lensInputBuffers[i] = null
+            lensShaderInputs[i] = null
+            // it.4-R2：像素缓冲 / Canvas 随槽位位图一并失效
+            lensPixelBuffers[i] = null
+            lensCanvases[i] = null
+        }
+        lensInputSlot = 0
+        // it.4-R2：box blur 临时缓冲与三盒半径缓存一并失效
+        lensBlurTempBuffer = null
+        lensBoxSizes = null
+        lensBoxRadius = -1
+        // it.4-R2：清晰路径 shader 持有 capture 位图引用，一并失效
+        lensSharpShader = null
+        lensSharpShaderCapture = null
+        // it.4：RuntimeShader 经 setInputShader 持有 BitmapShader → 位图引用链，
+        // 位图已释放，shader 缓存一并失效（重建成本 = 一次 AGSL 解析，可忽略）
+        lensRuntimeShader = null
         blurRenderNode = null
         // S2 修复：尺寸变化路径同样释放 RenderEffect 缓存
         releaseBlurEffect()
-        lensRuntimeShader = null
-        lensShaderBitmap = null
-        lensShaderSourceWidth = -1
-        lensShaderSourceHeight = -1
     }
 
     /** S2 修复：释放 RenderEffect 缓存（detach / 尺寸变化时调用）。 */
@@ -490,6 +595,11 @@ class GlassKitView(context: Context) : View(context) {
         val h = height
         if (w <= 0 || h <= 0) return
 
+        // it.4：记录本帧 onScreen 位置基线（PreDraw 位置变化检测用；layout 已完成，
+        // 此处取值即本帧最终位置）
+        getLocationOnScreen(lastDrawnLocation)
+        hasLastDrawnLocation = true
+
         // ⑦ 圆角裁剪：所有层（含采集 / 模糊 / tint / 压暗 / 描边）统一走 clip
         val cornerRadiusPx = cornerRadiusDp * density
         if (cornerRadiusPx > 0f) {
@@ -516,10 +626,9 @@ class GlassKitView(context: Context) : View(context) {
             val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
             if (lensActive) {
-                // it.3 协同：透镜输入降采样系数随模糊半径自适应——模糊与透镜同时生效，
-                // 四面板对 blurScale / lensScale 均有可见响应（不再互斥跳过模糊）
-                val factor = lensDownsampleFactor(blurRadiusPx)
-                drawLensLayer(canvas, capture, w, h, cornerRadiusPx, factor)
+                // it.4-R2：透镜输入真模糊化——固定 1/4 降采样 + 小图 CPU box blur ×3
+                //（it.3 的自适应降采样近似已废弃为锯齿源，见类头注释）
+                drawLensLayer(canvas, capture, w, h, cornerRadiusPx, blurRadiusPx)
             } else if (blurRadiusPx >= 0.5f) {
                 drawBlurredLayer(canvas, capture, blurRadiusPx)
             } else {
@@ -646,22 +755,18 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     /**
-     * it.3：透镜输入降采样系数——随模糊半径自适应，实现「模糊与透镜协同」。
-     * factor = clamp(round(blurRadiusPx / (LENS_DOWNSAMPLE_K_DP × density)), 1, MAX)。
-     * blurScale=0 → blurRadiusPx≈0 → factor=1（全分辨率清晰折射，无锯齿）；
-     * blurDp=14 × blurScale=1 → factor=6（与旧固定档观感衔接）；blurScale=2.5 → 强糊顶格。
+     * it.4 起废弃：透镜输入降采样系数随模糊半径自适应的设计（原
+     * factor = clamp(round(blurRadiusPx / (K × density)), 1, MAX)）已从管线移除——
+     * 「降采样+双线性放大」本质产出锯齿而非高斯，factor 变化只是锯齿块变大
+     * （用户真机反馈：「模糊倍率有效果，但不是模糊效果而是锯齿的数量在变化」）。
+     * 透镜输入现走固定 LENS_DOWNSAMPLE 档 + 小图 CPU box blur ×3（obtainLensInputShader）。
      */
-    private fun lensDownsampleFactor(blurRadiusPx: Float): Int {
-        if (blurRadiusPx < 0.5f) return 1
-        val raw = Math.round(blurRadiusPx / (LENS_DOWNSAMPLE_K_DP * density))
-        return raw.coerceIn(1, MAX_LENS_DOWNSAMPLE)
-    }
 
     /**
-     * ③ 透镜路径（API 33+）：模糊结果（小位图）作 BitmapShader 喂 RuntimeShader，
-     * uRefractionPx / uDispersionPx 乘 lensScale，一次 drawRect 逐像素求值。
-     * it.3：输入位图降采样系数由调用方按模糊半径计算传入；factor ≤ 1 时直接使用
-     * 全分辨率采集位图（清晰折射，无降采样放大锯齿）。
+     * ③ 透镜路径（API 33+）：it.4-R2 真模糊输入——「1/4 降采样 + 小图 CPU
+     * box blur ×3 近似高斯」（见 obtainLensInputShader），模糊结果经双缓冲
+     * BitmapShader 喂 RuntimeShader，uRefractionPx / uDispersionPx 乘 lensScale，
+     * 一次 drawRect 逐像素求值。lensPaint 为复用实例（QA GC churn 顺带修）。
      */
     private fun drawLensLayer(
         canvas: Canvas,
@@ -669,25 +774,266 @@ class GlassKitView(context: Context) : View(context) {
         w: Int,
         h: Int,
         cornerRadiusPx: Float,
-        downsampleFactor: Int,
+        blurRadiusPx: Float,
     ) {
-        // 透镜输入用降采样近似模糊位图（软件位图才能喂 BitmapShader；
-        // RenderEffect 离屏出位图需 HardwareRenderer/ImageReader，登记为未来增强）
-        val small = obtainSmallBlurBitmap(w, h, capture, downsampleFactor) ?: return
-        val shader = obtainLensShader(small, w, h, cornerRadiusPx) ?: return
+        val lensShaderInput = obtainLensInputShader(w, h, capture, blurRadiusPx)
+        val shader = obtainLensShader(lensShaderInput, w, h, cornerRadiusPx) ?: return
         val refraction = refractionPx * lensScale
         val dispersion = dispersionPx * lensScale
         shader.setFloatUniform("uRefractionPx", refraction)
         shader.setFloatUniform("uDispersionPx", dispersion)
-        val lensPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         lensPaint.shader = shader
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), lensPaint)
     }
 
     /**
+     * it.4-R2（QA 回修）：透镜输入 =「固定 1/4 降采样 + 小图 CPU box blur ×3
+     * 迭代近似高斯」+ 双缓冲。
+     *
+     * 首版 BlurMaskFilter 方案被 QA 证伪废弃：BlurMaskFilter 只作用于绘制图元的
+     * alpha 遮罩（Skia 管线 geometry→mask→maskFilter→×shader color），不参与
+     * shader 采样的位图内容；外扩 pad 绘制后可见区全部落在遮罩内部（coverage
+     * ≈99.5%），模糊输出全在位图外不可见区，视觉零贡献——等价于纯 1/4 双线性
+     * 降采样放大。回修为标准 CPU 三盒高斯近似（Ivan Kutskir fast-gaussian：
+     * boxesForGauss(sigma, 3)，每盒水平 + 垂直各一次 O(n) 滑窗）：
+     * - radius（小图坐标系）= round(blurRadiusPx / LENS_DOWNSAMPLE)，钳 1–60；
+     *   sigma = radius / 2（对齐 Skia「radius≈2σ」口径，hero 默认档 sigma≈6）。
+     * - 像素走 ARGB IntArray，先预乘（premultiply）再模糊后反预乘，杜绝
+     *   半透明像素通道串色的暗边；滑窗边界 clamp（不引入透明 padding，
+     *   天然无边缘透明衰减，首版 CLAMP 外扩 pad 方案一并废弃）。
+     * - blur 在槽位位图副本（IntArray）上原地完成，本帧写入槽位 (slot+1)%2，
+     *   与 RenderThread 正在采样的上一帧槽位恒不同实例——双缓冲竞态防护不变。
+     * - blurRadiusPx < 0.5（blurScale≈0）：跳过整条降采样+模糊管线，零拷贝绑定
+     *   全分辨率 capture（localMatrix 映射回视图坐标；capture 超宽降采样时
+     *   为 ~1.04× 轻微放大，观感对齐 it.3 清晰折射）。已知的理论暴露：
+     *   RenderThread 采样 captureBitmap 与下一帧 capture() 变异跨帧竞态——与
+     *   raw/RenderNode 路径既有暴露等价，非本回修引入。
+     * 纯模糊路径（drawBlurredLayer 固定 1/6 档）行为不动，不经此处。
+     *
+     * @return 本帧输入的 BitmapShader（模糊路径 = 新写入槽位；清晰路径 = capture
+     *         零拷贝），已设好位图→视图坐标放大矩阵；null = 位图/缓冲创建失败。
+     */
+    private fun obtainLensInputShader(
+        w: Int,
+        h: Int,
+        capture: Bitmap,
+        blurRadiusPx: Float,
+    ): BitmapShader? {
+        // ---- blurScale≈0：全分辨率清晰折射（零拷贝，QA 观察项恢复） ----
+        if (blurRadiusPx < 0.5f) {
+            var sharp = lensSharpShader
+            if (sharp == null || lensSharpShaderCapture !== capture) {
+                sharp = BitmapShader(capture, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+                lensSharpShader = sharp
+                lensSharpShaderCapture = capture
+            }
+            // capture 位图可能超宽降采样（>1080 宽时 captureScale<1），映射回视图坐标
+            lensMatrix.setScale(
+                w.toFloat() / capture.width.toFloat(),
+                h.toFloat() / capture.height.toFloat(),
+            )
+            sharp.setLocalMatrix(lensMatrix)
+            return sharp
+        }
+
+        // ---- 模糊路径：1/4 降采样 → box blur ×3 ----
+        val sw = Math.max(1, w / LENS_DOWNSAMPLE)
+        val sh = Math.max(1, h / LENS_DOWNSAMPLE)
+        // ping-pong：切到「非上一帧采样中」的槽位再写入
+        lensInputSlot = (lensInputSlot + 1) % 2
+        val slot = lensInputSlot
+        var small = lensInputBuffers[slot]
+        if (small == null || small.width != sw || small.height != sh) {
+            if (small != null && !small.isRecycled) small.recycle()
+            small = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+            lensInputBuffers[slot] = small
+            // 位图实例更换：该槽位的 BitmapShader / Canvas / 像素缓冲一并重建
+            lensShaderInputs[slot] = null
+            lensCanvases[slot] = null
+            lensPixelBuffers[slot] = null
+            lensBlurTempBuffer = null
+        }
+        var smallCanvas = lensCanvases[slot]
+        if (smallCanvas == null) {
+            smallCanvas = Canvas(small)
+            lensCanvases[slot] = smallCanvas
+        }
+        // 复用位图先清空上一帧内容（采集结果可能含透明区域，避免残影）
+        small.eraseColor(Color.TRANSPARENT)
+        lensSrcRect.set(0f, 0f, sw.toFloat(), sh.toFloat())
+        smallCanvas.drawBitmap(capture, null, lensSrcRect, capturePaint)
+
+        // CPU 三盒高斯近似（原地像素 blur，IntArray 复用零分配）
+        val radius = Math.round(blurRadiusPx / LENS_DOWNSAMPLE).coerceIn(1, MAX_LENS_BLUR_RADIUS)
+        var pixels = lensPixelBuffers[slot]
+        if (pixels == null || pixels.size != sw * sh) {
+            pixels = IntArray(sw * sh)
+            lensPixelBuffers[slot] = pixels
+            lensBlurTempBuffer = IntArray(sw * sh)
+        }
+        small.getPixels(pixels, 0, sw, 0, 0, sw, sh)
+        boxBlurPixels(pixels, sw, sh, radius)
+        small.setPixels(pixels, 0, sw, 0, 0, sw, sh)
+
+        // 输出侧 BitmapShader：绑定本帧位图，放大矩阵每帧重设（复用 Matrix）
+        var input = lensShaderInputs[slot]
+        if (input == null) {
+            input = BitmapShader(small, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            lensShaderInputs[slot] = input
+        }
+        lensMatrix.setScale(
+            w.toFloat() / sw.toFloat(),
+            h.toFloat() / sh.toFloat(),
+        )
+        input.setLocalMatrix(lensMatrix)
+        return input
+    }
+
+    /**
+     * it.4-R2：CPU 三盒高斯近似（原地）。sigma = radius / 2（对齐 Skia
+     * 「blur radius ≈ 2σ」口径，与 it.2 用户认可的 RenderEffect 真高斯观感衔接；
+     * 如观感偏差可调此系数）。预乘 → 逐盒（水平滑窗 + 垂直滑窗）→ 反预乘。
+     * 复杂度 O(6·n)（3 盒 × H/V 各一次线性滑窗），hero 小图 ~33k 像素，
+     * 单帧 ~20 万次整型累加，UI 线程成本可忽略。
+     */
+    private fun boxBlurPixels(pixels: IntArray, w: Int, h: Int, radius: Int) {
+        val sigma = (radius / 2f).coerceAtLeast(0.5f)
+        var boxes = lensBoxSizes
+        if (boxes == null || lensBoxRadius != radius) {
+            boxes = boxesForGauss(sigma, 3)
+            lensBoxSizes = boxes
+            lensBoxRadius = radius
+        }
+        val temp = lensBlurTempBuffer ?: return
+        premultiplyPixels(pixels)
+        for (box in boxes) {
+            val r = (box - 1) / 2
+            if (r < 1) continue
+            boxBlurH(pixels, temp, w, h, r)
+            boxBlurV(temp, pixels, w, h, r)
+        }
+        unpremultiplyPixels(pixels)
+    }
+
+    /** 三盒尺寸计算（Ivan Kutskir fast-gaussian：3 盒卷积近似 sigma 高斯）。 */
+    private fun boxesForGauss(sigma: Float, n: Int): IntArray {
+        val nF = n.toFloat()
+        val wIdeal = Math.sqrt(12.0 * sigma * sigma / nF + 1.0)
+        var wl = Math.floor(wIdeal).toInt()
+        if (wl % 2 == 0) wl--
+        val wu = wl + 2
+        val mIdeal =
+            (12.0 * sigma * sigma - nF * wl * wl - 4 * wl - nF) / (-4.0 * wl - 4.0)
+        val m = Math.round(mIdeal).toInt()
+        val sizes = IntArray(n)
+        for (i in 0 until n) {
+            sizes[i] = if (i < m) wl else wu
+        }
+        return sizes
+    }
+
+    /** ARGB → 预乘 alpha（原地；a=0 直接清零，a=255 跳过乘法）。 */
+    private fun premultiplyPixels(pixels: IntArray) {
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val a = p ushr 24 and 0xFF
+            if (a == 0xFF) continue
+            if (a == 0) {
+                pixels[i] = 0
+                continue
+            }
+            val r = ((p shr 16) and 0xFF) * a / 255
+            val g = ((p shr 8) and 0xFF) * a / 255
+            val b = (p and 0xFF) * a / 255
+            pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+
+    /** 预乘 ARGB → 非预乘（原地；除法向上钳 255 防溢出）。 */
+    private fun unpremultiplyPixels(pixels: IntArray) {
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val a = p ushr 24 and 0xFF
+            if (a == 0xFF || a == 0) continue
+            var r = ((p shr 16) and 0xFF) * 255 / a
+            var g = ((p shr 8) and 0xFF) * 255 / a
+            var b = (p and 0xFF) * 255 / a
+            if (r > 255) r = 255
+            if (g > 255) g = 255
+            if (b > 255) b = 255
+            pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+
+    /**
+     * 水平 box blur（O(n) 滑窗，边界 clamp 取最近有效像素——不引入透明
+     * padding，避免盒卷积在边缘向透明衰减）。src → dst，预乘 ARGB。
+     */
+    private fun boxBlurH(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
+        val win = r + r + 1
+        for (y in 0 until h) {
+            val row = y * w
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            var sa = 0
+            for (i in -r..r) {
+                val c = src[row + i.coerceIn(0, w - 1)]
+                sa += c ushr 24 and 0xFF
+                sr += (c shr 16) and 0xFF
+                sg += (c shr 8) and 0xFF
+                sb += c and 0xFF
+            }
+            for (x in 0 until w) {
+                dst[row + x] =
+                    (sa / win shl 24) or (sr / win shl 16) or (sg / win shl 8) or (sb / win)
+                // 滑窗推进：右进 (x+r+1)，左出 (x-r)，越界 clamp 到行内首/尾像素
+                val addC = src[row + (x + r + 1).coerceIn(0, w - 1)]
+                val remC = src[row + (x - r).coerceIn(0, w - 1)]
+                sa += (addC ushr 24 and 0xFF) - (remC ushr 24 and 0xFF)
+                sr += ((addC shr 16) and 0xFF) - ((remC shr 16) and 0xFF)
+                sg += ((addC shr 8) and 0xFF) - ((remC shr 8) and 0xFF)
+                sb += (addC and 0xFF) - (remC and 0xFF)
+            }
+        }
+    }
+
+    /**
+     * 垂直 box blur（O(n) 滑窗，列步进 w，边界 clamp）。src → dst，预乘 ARGB。
+     */
+    private fun boxBlurV(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
+        val win = r + r + 1
+        for (x in 0 until w) {
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            var sa = 0
+            for (i in -r..r) {
+                val c = src[(i.coerceIn(0, h - 1)) * w + x]
+                sa += c ushr 24 and 0xFF
+                sr += (c shr 16) and 0xFF
+                sg += (c shr 8) and 0xFF
+                sb += c and 0xFF
+            }
+            for (y in 0 until h) {
+                dst[y * w + x] =
+                    (sa / win shl 24) or (sr / win shl 16) or (sg / win shl 8) or (sb / win)
+                val addC = src[(y + r + 1).coerceIn(0, h - 1) * w + x]
+                val remC = src[(y - r).coerceIn(0, h - 1) * w + x]
+                sa += (addC ushr 24 and 0xFF) - (remC ushr 24 and 0xFF)
+                sr += ((addC shr 16) and 0xFF) - ((remC shr 16) and 0xFF)
+                sg += ((addC shr 8) and 0xFF) - ((remC shr 8) and 0xFF)
+                sb += (addC and 0xFF) - (remC and 0xFF)
+            }
+        }
+    }
+
+    /**
      * 降采样小位图缓存：宽高 = 视图 / factor，含采集内容的等比缩小。
-     * it.3：缓存按 (w, h, factor) 三元组判断重建（动态 factor 下同一视图尺寸可对应
-     * 多档位图尺寸）；factor ≤ 1 时跳过拷贝直接返回全分辨率采集位图。
+     * it.4 起仅纯模糊路径（drawBlurredLayer 固定 BLUR_DOWNSAMPLE 档）使用；
+     * 透镜输入已改走 obtainLensInputShader（1/4 + CPU box blur ×3 近似高斯）。
+     * it.3 缓存键 (w, h, factor) 三元组逻辑保留（参数化 factor 不变）；
+     * factor ≤ 1 时跳过拷贝直接返回全分辨率采集位图。
      */
     private fun obtainSmallBlurBitmap(w: Int, h: Int, capture: Bitmap, factor: Int): Bitmap? {
         if (factor <= 1) return capture
@@ -742,38 +1088,28 @@ class GlassKitView(context: Context) : View(context) {
         return effect
     }
 
-    /** RuntimeShader 缓存：位图实例变化时重建（避免每帧解析 AGSL），uniform 每次 draw 重设。 */
+    /**
+     * it.4：RuntimeShader 缓存——源码静态，惰性创建一次；uBlurred 输入（双缓冲
+     * BitmapShader，逐帧 setInputShader 切换到本帧槽位）与全部 uniform 每次 draw 重设。
+     * 原 it.3「位图实例/尺寸变化即重建 RuntimeShader」逻辑随双缓冲改造移除
+     * （shader 本体无位图状态，无需随位图重建）。
+     */
     private fun obtainLensShader(
-        small: Bitmap,
+        bitmapShader: BitmapShader?,
         w: Int,
         h: Int,
         cornerRadiusPx: Float,
     ): RuntimeShader? {
+        if (bitmapShader == null) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
         var shader = lensRuntimeShader
-        // it.3：动态 factor 下小位图实例可能复用但尺寸已变（scaleX/scaleY 随之变化），
-        // 缓存命中须同时满足实例同一 + 尺寸一致
-        if (shader == null || lensShaderBitmap !== small ||
-            lensShaderSourceWidth != small.width || lensShaderSourceHeight != small.height
-        ) {
-            shader = GlassLensShader.create(
-                blurSource = small,
-                viewWidthPx = w.toFloat(),
-                viewHeightPx = h.toFloat(),
-                refractionPx = 1f, // 占位：每次 draw 用 setFloatUniform 覆盖
-                dispersionPx = 0f,
-                cornerRadiusPx = cornerRadiusPx,
-                scaleX = w.toFloat() / small.width.toFloat(),
-                scaleY = h.toFloat() / small.height.toFloat(),
-            )
+        if (shader == null) {
+            shader = GlassLensShader.createRuntimeShader()
             lensRuntimeShader = shader
-            lensShaderBitmap = small
-            lensShaderSourceWidth = small.width
-            lensShaderSourceHeight = small.height
-        } else {
-            shader.setFloatUniform("uSize", w.toFloat(), h.toFloat())
-            shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)
         }
+        shader.setInputShader("uBlurred", bitmapShader)
+        shader.setFloatUniform("uSize", w.toFloat(), h.toFloat())
+        shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)
         return shader
     }
 }

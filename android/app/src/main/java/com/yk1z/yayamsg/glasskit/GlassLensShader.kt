@@ -1,10 +1,6 @@
 package com.yk1z.yayamsg.glasskit
 
-import android.graphics.Bitmap
-import android.graphics.BitmapShader
-import android.graphics.Matrix
 import android.graphics.RuntimeShader
-import android.graphics.Shader
 import android.os.Build
 import androidx.annotation.RequiresApi
 
@@ -12,11 +8,15 @@ import androidx.annotation.RequiresApi
  * GlassKit AGSL 透镜着色器（引擎重写清单 §一 / §二.3，仅 API 33+）。
  *
  * Shader 契约（与 GlassKitView 喂参一一对应）：
- * - uniform shader uBlurred        ：模糊后的背景位图（BitmapShader, CLAMP）
+ * - uniform shader uBlurred        ：模糊后的背景位图（BitmapShader, CLAMP；
+ *                                    it.4 起由视图侧双缓冲逐帧 setInputShader 切换，
+ *                                    放大矩阵在 BitmapShader 的 localMatrix 上）
  * - uniform float2 uSize           ：玻璃面板尺寸（px，本地坐标系）
  * - uniform float uRefractionPx    ：折射位移幅度（px，已乘 lensScale）
  * - uniform float uDispersionPx    ：色散位移幅度（px，已乘 lensScale）
  * - uniform float uCornerRadiusPx  ：圆角半径（px）
+ * it.4：shader 本体无位图状态（输入与 uniform 逐帧重设），RuntimeShader 实例可
+ * 惰性缓存复用，不再随位图/尺寸重建。
  *
  * 实现：
  * - SDF 圆角矩形：sdRoundRect(p, b, r)，内部为负、边界为 0、外部为正；
@@ -85,40 +85,10 @@ half4 main(float2 fragCoord) {
 """.trim()
 
     /**
-     * 构建透镜 RuntimeShader（仅 API 33+ 可调，调用方必须先判 Build.VERSION）。
-     *
-     * @param blurSource   模糊后的背景位图（尺寸可以小于视图，用矩阵放大对齐）
-     * @param viewWidthPx  玻璃面板宽（px）
-     * @param viewHeightPx 玻璃面板高（px）
-     * @param refractionPx 折射位移（px，调用方已乘 lensScale）
-     * @param dispersionPx 色散位移（px，调用方已乘 lensScale）
-     * @param cornerRadiusPx 圆角半径（px）
-     * @param scaleX blurSource → 视图宽的放大系数（= viewWidthPx / bitmapWidthPx）
-     * @param scaleY blurSource → 视图高的放大系数（= viewHeightPx / bitmapHeightPx）
+     * 构建透镜 RuntimeShader 实例（仅 API 33+ 可调，调用方必须先判 Build.VERSION）。
+     * it.4：仅负责解析 AGSL 源码；uBlurred 输入由调用方逐帧 setInputShader 注入
+     * （双缓冲槽位切换），全部 float uniform 由调用方每次 draw 重设。
      */
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    fun create(
-        blurSource: Bitmap,
-        viewWidthPx: Float,
-        viewHeightPx: Float,
-        refractionPx: Float,
-        dispersionPx: Float,
-        cornerRadiusPx: Float,
-        scaleX: Float,
-        scaleY: Float,
-    ): RuntimeShader {
-        val bitmapShader = BitmapShader(blurSource, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-        if (scaleX != 1f || scaleY != 1f) {
-            val matrix = Matrix()
-            matrix.setScale(scaleX, scaleY)
-            bitmapShader.setLocalMatrix(matrix)
-        }
-        val shader = RuntimeShader(SHADER_SOURCE)
-        shader.setInputShader("uBlurred", bitmapShader)
-        shader.setFloatUniform("uSize", viewWidthPx, viewHeightPx)
-        shader.setFloatUniform("uRefractionPx", refractionPx)
-        shader.setFloatUniform("uDispersionPx", dispersionPx)
-        shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)
-        return shader
-    }
+    fun createRuntimeShader(): RuntimeShader = RuntimeShader(SHADER_SOURCE)
 }
