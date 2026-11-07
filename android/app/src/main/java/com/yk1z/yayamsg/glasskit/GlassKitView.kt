@@ -25,8 +25,11 @@ import android.view.ViewTreeObserver
  * 1. 捕获：GlassCaptureEngine 按 backdropTag 找背景视图，采玻璃覆盖区（失败画兜底底色）；
  * 2. 模糊：API 31+ 且画布硬件加速 → RenderNode + RenderEffect.createBlurEffect；
  *    API 26–30 / 软件画布 / 透镜路径 → 降采样 1/4 + 双线性放大近似（H2 单档语义）；
- * 3. 透镜：API 33+ 且 lensScale>0 且 refraction/dispersion>0 → BitmapShader(模糊结果)
- *    喂 RuntimeShader（uRefractionPx / uDispersionPx 已乘 lensScale）；否则直接画模糊位图；
+ * 3. 透镜（it.3 与模糊协同）：API 33+ 且 lensScale>0 且 refraction/dispersion>0 →
+ *    降采样模糊位图作 BitmapShader 喂 RuntimeShader（uRefractionPx / uDispersionPx 已乘
+ *    lensScale）；降采样系数随模糊半径自适应（lensDownsampleFactor）：blurScale=0 →
+ *    factor=1 全分辨率清晰折射（无锯齿），blurScale↑ → factor↑ 强糊；模糊与透镜不再互斥，
+ *    四面板对 blurScale / lensScale 同时有可见响应；非透镜面板走纯模糊路径不变；
  * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
  * 5. 压暗：#000 @ dimmingAlpha；
  * 6. 高光：1dp #FFF @0.14 描边；
@@ -60,6 +63,18 @@ class GlassKitView(context: Context) : View(context) {
          * （obtainSmallBlurBitmap 共用本档，AGSL 侧有 scaleX/scaleY 补偿）。
          */
         const val BLUR_DOWNSAMPLE: Int = 6
+
+        /**
+         * it.3 透镜输入自适应降采样基准 K（dp）：透镜输入位图降采样系数
+         * factor = round(blurRadiusPx / (K × density))，即「每 K dp 模糊半径降一档」。
+         * 选值依据：blurDp=14 × blurScale=1 → factor=round(5.6)=6，与旧固定档
+         * BLUR_DOWNSAMPLE=6 观感衔接（Hero 默认档无回退）；blurScale=0 → factor=1
+         * （全分辨率清晰折射，消除 AGSL 双线性放大的锯齿）；blurScale=2.5 →
+         * factor 顶格 MAX_LENS_DOWNSAMPLE（强糊）。
+         */
+        const val LENS_DOWNSAMPLE_K_DP: Float = 2.5f
+        /** it.3：透镜输入降采样系数上限（blurScale 拉满时的强糊档）。 */
+        const val MAX_LENS_DOWNSAMPLE: Int = 10
         /** 重绘节流间隔（ms，≈30fps）。 */
         const val FRAME_INTERVAL_MS: Long = 33L
         /** 捕获失败兜底底色：半透明白灰。 */
@@ -255,8 +270,10 @@ class GlassKitView(context: Context) : View(context) {
 
     /** 采集位图缓存（尺寸随视图 / 降采样档变化重建）。 */
     private var captureBitmap: Bitmap? = null
-    /** 近似模糊的小位图缓存（宽高 = 视图 / BLUR_DOWNSAMPLE）。 */
+    /** 近似模糊的小位图缓存（宽高 = 视图 / 降采样档）。 */
     private var smallBlurBitmap: Bitmap? = null
+    /** it.3：小位图当前降采样系数（缓存按 (w,h,factor) 三元组判断重建）。 */
+    private var smallBlurFactor: Int = 0
 
     /** API 31+ RenderNode 模糊路径的复用节点。 */
     private var blurRenderNode: RenderNode? = null
@@ -270,6 +287,10 @@ class GlassKitView(context: Context) : View(context) {
     /** API 33+ 透镜 RuntimeShader 缓存（位图实例变化时重建，uniform 每次 draw 重设）。 */
     private var lensRuntimeShader: RuntimeShader? = null
     private var lensShaderBitmap: Bitmap? = null
+    /** it.3：shader 缓存对应的源位图尺寸——动态 factor 下小位图实例复用但尺寸会变，
+     *  仅按实例同一性判断会导致 scaleX/scaleY 过期，须一并比对尺寸。 */
+    private var lensShaderSourceWidth: Int = -1
+    private var lensShaderSourceHeight: Int = -1
 
     private val preDrawListener = ViewTreeObserver.OnPreDrawListener {
         scheduleThrottledInvalidate()
@@ -432,11 +453,14 @@ class GlassKitView(context: Context) : View(context) {
         captureBitmap = null
         smallBlurBitmap?.recycle()
         smallBlurBitmap = null
+        smallBlurFactor = 0
         blurRenderNode = null
         // S2 修复：尺寸变化路径同样释放 RenderEffect 缓存
         releaseBlurEffect()
         lensRuntimeShader = null
         lensShaderBitmap = null
+        lensShaderSourceWidth = -1
+        lensShaderSourceHeight = -1
     }
 
     /** S2 修复：释放 RenderEffect 缓存（detach / 尺寸变化时调用）。 */
@@ -492,7 +516,10 @@ class GlassKitView(context: Context) : View(context) {
             val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
             if (lensActive) {
-                drawLensLayer(canvas, capture, w, h, cornerRadiusPx)
+                // it.3 协同：透镜输入降采样系数随模糊半径自适应——模糊与透镜同时生效，
+                // 四面板对 blurScale / lensScale 均有可见响应（不再互斥跳过模糊）
+                val factor = lensDownsampleFactor(blurRadiusPx)
+                drawLensLayer(canvas, capture, w, h, cornerRadiusPx, factor)
             } else if (blurRadiusPx >= 0.5f) {
                 drawBlurredLayer(canvas, capture, blurRadiusPx)
             } else {
@@ -592,7 +619,8 @@ class GlassKitView(context: Context) : View(context) {
                 canvas.isHardwareAccelerated,
             )
             // API 26–30 降级：1/6 降采样 + 双线性放大（近似模糊，H2 单档语义）
-            val small = obtainSmallBlurBitmap(w, h, capture) ?: return
+            // 纯模糊路径保持固定档 BLUR_DOWNSAMPLE 行为不变（it.3 仅透镜路径自适应）
+            val small = obtainSmallBlurBitmap(w, h, capture, BLUR_DOWNSAMPLE) ?: return
             canvas.drawBitmap(
                 small,
                 null,
@@ -618,8 +646,22 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     /**
+     * it.3：透镜输入降采样系数——随模糊半径自适应，实现「模糊与透镜协同」。
+     * factor = clamp(round(blurRadiusPx / (LENS_DOWNSAMPLE_K_DP × density)), 1, MAX)。
+     * blurScale=0 → blurRadiusPx≈0 → factor=1（全分辨率清晰折射，无锯齿）；
+     * blurDp=14 × blurScale=1 → factor=6（与旧固定档观感衔接）；blurScale=2.5 → 强糊顶格。
+     */
+    private fun lensDownsampleFactor(blurRadiusPx: Float): Int {
+        if (blurRadiusPx < 0.5f) return 1
+        val raw = Math.round(blurRadiusPx / (LENS_DOWNSAMPLE_K_DP * density))
+        return raw.coerceIn(1, MAX_LENS_DOWNSAMPLE)
+    }
+
+    /**
      * ③ 透镜路径（API 33+）：模糊结果（小位图）作 BitmapShader 喂 RuntimeShader，
      * uRefractionPx / uDispersionPx 乘 lensScale，一次 drawRect 逐像素求值。
+     * it.3：输入位图降采样系数由调用方按模糊半径计算传入；factor ≤ 1 时直接使用
+     * 全分辨率采集位图（清晰折射，无降采样放大锯齿）。
      */
     private fun drawLensLayer(
         canvas: Canvas,
@@ -627,10 +669,11 @@ class GlassKitView(context: Context) : View(context) {
         w: Int,
         h: Int,
         cornerRadiusPx: Float,
+        downsampleFactor: Int,
     ) {
-        // 透镜输入统一用降采样近似模糊位图（软件位图才能喂 BitmapShader；
+        // 透镜输入用降采样近似模糊位图（软件位图才能喂 BitmapShader；
         // RenderEffect 离屏出位图需 HardwareRenderer/ImageReader，登记为未来增强）
-        val small = obtainSmallBlurBitmap(w, h, capture) ?: return
+        val small = obtainSmallBlurBitmap(w, h, capture, downsampleFactor) ?: return
         val shader = obtainLensShader(small, w, h, cornerRadiusPx) ?: return
         val refraction = refractionPx * lensScale
         val dispersion = dispersionPx * lensScale
@@ -641,15 +684,21 @@ class GlassKitView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), lensPaint)
     }
 
-    /** 降采样小位图缓存：视图 / BLUR_DOWNSAMPLE，含采集内容的等比缩小。 */
-    private fun obtainSmallBlurBitmap(w: Int, h: Int, capture: Bitmap): Bitmap? {
-        val sw = Math.max(1, w / BLUR_DOWNSAMPLE)
-        val sh = Math.max(1, h / BLUR_DOWNSAMPLE)
+    /**
+     * 降采样小位图缓存：宽高 = 视图 / factor，含采集内容的等比缩小。
+     * it.3：缓存按 (w, h, factor) 三元组判断重建（动态 factor 下同一视图尺寸可对应
+     * 多档位图尺寸）；factor ≤ 1 时跳过拷贝直接返回全分辨率采集位图。
+     */
+    private fun obtainSmallBlurBitmap(w: Int, h: Int, capture: Bitmap, factor: Int): Bitmap? {
+        if (factor <= 1) return capture
+        val sw = Math.max(1, w / factor)
+        val sh = Math.max(1, h / factor)
         var small = smallBlurBitmap
-        if (small == null || small.width != sw || small.height != sh) {
+        if (small == null || small.width != sw || small.height != sh || smallBlurFactor != factor) {
             if (small != null && !small.isRecycled) small.recycle()
             small = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
             smallBlurBitmap = small
+            smallBlurFactor = factor
         }
         // 复用位图先清空上一帧内容（采集结果可能含透明区域，避免残影）
         small.eraseColor(Color.TRANSPARENT)
@@ -702,7 +751,11 @@ class GlassKitView(context: Context) : View(context) {
     ): RuntimeShader? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
         var shader = lensRuntimeShader
-        if (shader == null || lensShaderBitmap !== small) {
+        // it.3：动态 factor 下小位图实例可能复用但尺寸已变（scaleX/scaleY 随之变化），
+        // 缓存命中须同时满足实例同一 + 尺寸一致
+        if (shader == null || lensShaderBitmap !== small ||
+            lensShaderSourceWidth != small.width || lensShaderSourceHeight != small.height
+        ) {
             shader = GlassLensShader.create(
                 blurSource = small,
                 viewWidthPx = w.toFloat(),
@@ -715,6 +768,8 @@ class GlassKitView(context: Context) : View(context) {
             )
             lensRuntimeShader = shader
             lensShaderBitmap = small
+            lensShaderSourceWidth = small.width
+            lensShaderSourceHeight = small.height
         } else {
             shader.setFloatUniform("uSize", w.toFloat(), h.toFloat())
             shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)

@@ -3,6 +3,7 @@ package com.yk1z.yayamsg.glasskit
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.util.Log
 import android.util.SparseArray
 import android.view.View
 import java.lang.ref.WeakReference
@@ -14,7 +15,7 @@ import java.lang.ref.WeakReference
  * 1. 静态注册表：SparseArray<tag → WeakReference<View>>，key 为 GlassKitBackdrop
  *    原生视图的 getId()（由 GlassKitBackdropManager 在 onAfterUpdateTransaction 注册）。
  * 2. capture(targetView, glassView, outBitmap)：把 targetView 子树绘制到 outBitmap，
- *    仅采集 glassView 覆盖的区域（canvas 预平移对齐玻璃偏移，省内存）。
+ *    仅采集 glassView 覆盖的区域（canvas 预变换对齐玻璃偏移，省内存）。
  *
  * 线程约束：register / unregister / capture 均在 UI 线程调用（ViewManager 生命周期
  * 与 onDraw 都在主线程），内部 synchronized 仅作兜底防御。
@@ -25,7 +26,13 @@ object GlassCaptureEngine {
     /** 捕获位图宽度上限（px）：超过按比例降采样，防 OOM（任务书约束 ≤1080 宽）。 */
     const val MAX_CAPTURE_WIDTH_PX: Int = 1080
 
+    /** 降采样分支一次性诊断日志 tag（logcat: adb logcat -s GlassKitCapture）。 */
+    private const val CAPTURE_LOG_TAG: String = "GlassKitCapture"
+
     private val registry = SparseArray<WeakReference<View>>()
+
+    /** 降采样分支一次性日志去重（仅首次命中打一条，防随帧刷屏）。 */
+    private var loggedDownscaleOnce: Boolean = false
 
     /** 注册背景容器（同一 tag 重复注册以后者为准，弱引用不阻止 GC）。 */
     @Synchronized
@@ -56,11 +63,11 @@ object GlassCaptureEngine {
      * 采集 targetView 子树中 glassView 覆盖的区域到 outBitmap。
      *
      * 坐标对齐：用双方 getLocationOnScreen 差值算出玻璃在背景坐标系内的偏移
-     * (offsetX, offsetY)，canvas 预平移对齐后绘制整棵背景子树，outBitmap 的
+     * (offsetX, offsetY)，canvas 先缩放再平移对齐玻璃偏移，outBitmap 的
      * (0,0) 即玻璃左上角对应的背景内容。裁剪在变换之后进行（见方法内修复注释）。
      *
      * 降采样：outBitmap 尺寸由调用方按 MAX_CAPTURE_WIDTH_PX 预算好；本方法按
-     * 「位图坐标 = scale × (背景坐标 − offset)」的关系先平移缩放再裁剪。
+     * 「位图坐标 = scale × (背景坐标 − offset)」的关系先缩放再平移（it.3 修正矩阵顺序）。
      *
      * @return false 表示无法采集（视图未布局 / 尺寸为 0 / 参数不一致），调用方应画兜底底色。
      */
@@ -87,24 +94,32 @@ object GlassCaptureEngine {
         if (offsetX + glassWidth <= 0f || offsetY + glassHeight <= 0f) return false
         if (offsetX >= targetView.width || offsetY >= targetView.height) return false
 
+        // it.3 降级后的诊断日志：仅在首次命中「captureScale < 1 降采样分支」时打一条
+        //（该分支曾因旧矩阵顺序产生 offset×(1−scale) 的整体错位，保留分支可见性），
+        // 不随帧刷屏。
+        if (!loggedDownscaleOnce && captureScaleX < 1f) {
+            loggedDownscaleOnce = true
+            Log.i(
+                CAPTURE_LOG_TAG,
+                "capture downscale active scale=($captureScaleX,$captureScaleY)" +
+                    " glassWH=${glassWidth}x$glassHeight offset=($offsetX,$offsetY)",
+            )
+        }
+
         // 复用位图先清空上一帧内容（背景可能含透明区域，避免残影）
         outBitmap.eraseColor(Color.TRANSPARENT)
         val canvas = Canvas(outBitmap)
         canvas.save()
         try {
-            // ⚠️ 修复（capture 空内容根因，真机 logcat probe 实证 2026-11-07）：
-            // Canvas 的初始 clip 恒为位图边界 (0,0,bw,bh)（设备空间）。旧实现
-            // 「先在背景坐标系 clipRect(offset…) 再平移缩放」——该矩形与位图边界
-            // 几乎必然无交集（offset 是玻璃在背景中的屏幕位置，y 通常数百像素起，
-            // 而位图高度只有玻璃自身高度）→ clip 求交后画布为空 → targetView.draw
-            // 全部被裁掉 → capture 位图恒全透明（capture() 仍返回 true）→ 模糊 /
-            // 透镜全部输入空内容，面板呈「透明无效果」假象。
-            // 修正顺序：先平移缩放（把玻璃覆盖区左上角对齐到画布原点并缩放到位图
-            // 尺寸），再在带变换的坐标系里 clip 玻璃覆盖区矩形（此时该矩形经矩阵
-            // 变换后恰好就是位图边界，交集正确）。映射关系：
-            //   背景坐标 q → 位图坐标 scale × (q − offset)，与原设计一致。
-            canvas.translate(-offsetX, -offsetY)
+            // ⚠️ it.3 矩阵顺序修正：位图坐标 = scale × (背景坐标 − offset)。
+            // Canvas 变换为后调用先作用（pre-concat）：先 scale 再 translate ⇒
+            // M = S · T，背景坐标 q → scale × (q − offset)——玻璃左上角（背景坐标
+            // = offset）精确映射到位图 (0,0)。旧实现「先 translate 后 scale」得
+            // scale × q − offset，与正确映射差 offset × (scale − 1)：captureScale < 1
+            // （玻璃宽超 MAX_CAPTURE_WIDTH_PX）时内容整体错位，scale=1 时两者等价。
+            // clip 仍在背景坐标系进行：该矩形经矩阵映射后恰为位图边界，交集正确。
             canvas.scale(captureScaleX, captureScaleY)
+            canvas.translate(-offsetX, -offsetY)
             canvas.clipRect(offsetX, offsetY, offsetX + glassWidth, offsetY + glassHeight)
             targetView.draw(canvas)
         } finally {
