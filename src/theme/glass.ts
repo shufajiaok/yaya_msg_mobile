@@ -61,12 +61,15 @@ export interface ScaleRange {
  * ② 四倍率区间（照抄 04 §2.4 GlassSettings.kt）。
  * glowScale 依据 04 §2.7 X4「滑块下限应设 >0」收口为 0.05：登记的滑块区间仍为 0–2，
  * 但可写下限 >0，避免柔光三团 alpha 全灭、背景变纯色而触发铁律③ 反例。
+ *
+ * it.5：default 固化为用户真机验收拍板的调参结果（仍可经滑块实时调节）：
+ * blur 0.10 / tint 1.00 / lens 2.00 / glow 1.75。
  */
 export const SCALE_RANGES: Record<GlassScaleKey, ScaleRange> = {
-  blurScale: { min: 0, max: 2.5, default: 1 },
+  blurScale: { min: 0, max: 2.5, default: 0.1 },
   tintScale: { min: 0, max: 3, default: 1 },
-  lensScale: { min: 0, max: 2, default: 1 },
-  glowScale: { min: 0.05, max: 2, default: 1 },
+  lensScale: { min: 0, max: 2, default: 2 },
+  glowScale: { min: 0.05, max: 2, default: 1.75 },
 } as const;
 
 /** glowScale 有效下限（X4） */
@@ -261,7 +264,7 @@ export const useGlassStore = create<GlassState>()(
           lensScale: patch.lensScale === undefined ? state.lensScale : clampScale('lensScale', patch.lensScale),
           glowScale: patch.glowScale === undefined ? state.glowScale : clampScale('glowScale', patch.glowScale),
         })),
-      /** 四倍率回到 1 */
+      /** 四倍率回到默认值（it.5 固化：blur 0.10 / tint 1.00 / lens 2.00 / glow 1.75） */
       reset: () => set({ ...DEFAULT_SCALES, activeReasons: [] }),
     }),
     {
@@ -274,6 +277,13 @@ export const useGlassStore = create<GlassState>()(
         lensScale: state.lensScale,
         glowScale: state.glowScale,
       }),
+      /**
+       * it.5：v0（无版本，default 全 1 时代的散存值）→ v1。
+       * 四倍率 default 已固化为真机验收拍板值，旧持久化值与新基线不符时
+       * 一次性覆盖为新 default（用户指令「设为默认值」），此后照常随滑块持久化。
+       */
+      version: 1,
+      migrate: () => ({ ...DEFAULT_SCALES }),
     },
   ),
 );
