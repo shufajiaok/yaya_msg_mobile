@@ -226,3 +226,36 @@
 | --- | --- |
 | `000ef8a` | 本轮代码 commit：E1/E2/E3 + S1/S2/S4/S7（glasskit/ 2 Kotlin + TSX 注释，3 文件 / +127 −17） |
 | 本 commit | docs：本节留档 + `引擎重写清单.md` / `E2-v277迁移清单.md` 归档 |
+
+## 引擎 E1 · QA Round 2 回归（2026-11-07）
+
+> QA 对 QA R1 修复（`000ef8a`）做回归验证：**6/7 PASS、0 阻断**，主场景修复（E1 重挂、E2 主路径、E3 重试、S1/S2/S4/S7）全部确认生效；剩 1 项一般级 **F1**（E2 场景①残余泄漏）需最终修复，另带出 2 项建议级顺手修 **F2** / **F3**。路由 Engineer 有限增量：只动 `GlassKitView.kt` + 本文件，1 个代码 commit + 1 个 docs commit，**未 push**（断网）。
+
+### QA R2 回归结论
+
+- 回归范围 `5449ca1` 前序修复：`git diff --name-only ccfe379..000ef8a` = 3 文件，无越界；QA R1 六项修复静态断言全部命中。
+- E1（attach 幂等重挂）、E2（主路径 observer 缓存移除）、E3（有限重试）主场景行为正确；残余缺陷仅在 E2 的**边界时序**下复现（见 F1 泄漏时序）。
+
+### F1 · E2 场景①残余泄漏（一般级，本轮必修）
+
+- **泄漏时序**：glass attach 时 backdrop 尚未 attach → listener 挂在 backdrop 的**子 ViewTreeObserver** → backdrop attach 后子 observer merge 进窗口根 observer、子 observer 变 dead（此时 `attachedObserver.isAlive=false`）→ **backdrop 先卸载**（glass 仍 attached）→ 之后 glass detach：`detachPreDraw` 中 cached dead 不命中第一步 → 降级第二步 `targetView?.viewTreeObserver`——此场景下 targetView 就是已卸载的 backdrop 本身，其 observer 同样 dead/无效 → merge 拷贝进根 observer 的 listener 滞留，glass View 被强引用泄漏至窗口销毁。
+- **修法**：`detachPreDraw` 降级链补**第三步**——当 cached dead 且 targetView 的 observer 不可达/无效时，用 **glass 自身 `viewTreeObserver`**（glass 在 attach 期间它就是窗口根 observer）调用 `removeOnPreDrawListener(listener)`。判空 + try 保护（onDetachedFromWindow 内访问自身 viewTreeObserver 合法但仍需防御）；三条路径任何一条成功移除即止，最后统一清空 `attachedObserver`。
+- **落点**：`GlassKitView.kt:295-360`（三级降级链重构；第三步 `:337-354`）。
+
+### F2 / F3 · 建议级顺手修（一并落）
+
+- **F2**：`backdropTag` setter 检测到 tag 值变化时把 E3 重试计数器 `pendingResolveRetries` 归零——换新 tag 重新获得完整 50 次重试预算，避免前一个 tag 耗尽的计数连累新 tag 的晚挂载重试提前停摆。落点 `GlassKitView.kt:70-76`。
+- **F3**：`dimmingAlpha` / `cornerRadiusDp` 两个 setter 补 `isFinite` 兜底（与 S4 的 `if (value.isFinite()) value else 0f` 同式），统一 NaN/Infinity 防护。落点 `GlassKitView.kt:130`（cornerRadiusDp）/ `:140`（dimmingAlpha）。
+
+### 自检证据
+
+- `git diff --name-only 5449ca1..HEAD` = 恰好 2 文件（`GlassKitView.kt` + 本文件），无越界；gradle / 依赖清单 / 页面 0 diff。
+- grep 断言命中：第三降级路径（`viewTreeObserver` 自身移除，`GlassKitView.kt:337` 附近「第三步（F1）」）、`backdropTag` setter 计数归零（`:76` `pendingResolveRetries = 0`）、两处新增 `isFinite`（`:130` / `:140`，连同既有 S4 共 4 处）。
+- **编译未执行**（无 JDK/Android SDK、断网），改动均为局部 Kotlin，语义经逐行核对；真机/编译验证留 CI 或工具链就绪后补跑。
+
+### commit 序列
+
+| commit | 内容 |
+| --- | --- |
+| `e80a3cd` | 本轮代码 commit：QA R2 F1/F2/F3 修复（`GlassKitView.kt`，1 文件 / +71 −18） |
+| 本 commit | docs：本节留档（纯追加，不覆盖历史） |
