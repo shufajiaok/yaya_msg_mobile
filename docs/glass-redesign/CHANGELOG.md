@@ -259,3 +259,10 @@
 | --- | --- |
 | `e80a3cd` | 本轮代码 commit：QA R2 F1/F2/F3 修复（`GlassKitView.kt`，1 文件 / +71 −18） |
 | 本 commit | docs：本节留档（纯追加，不覆盖历史） |
+
+## 玻璃测试页（2026-11-07，用户指令「先新开一个玻璃测试页保证能用」）
+- commit `0a20220`：新增 `src/screens/GlassTestScreen.tsx` + 路由注册（`navigation/index.tsx` / `types.ts`）+ 守卫基线 glass-api-access 0→13（批准接线：桥接层 12 + 测试页 1）。
+- 内容：GlassKitBackdrop 渐变+色块采集源、4 块参数各异的 GlassKitView（hero 14dp+折射色散 / chip 8dp 胶囊 / 工具条 12dp / clear+dimming0.35）、四倍率 ±0.1 步进实时联动、canBlur/canLens/API 档位显示、模糊总开关、返回主界面。
+- 临时首屏开关 `GLASS_TEST_FIRST = true`（navigation/index.tsx 顶部）：打开 App 直进测试页；验证完改回 false 恢复原首屏，路由常驻保留。
+- 守卫拦截实录：首版命中 2 处（blob 色 #7ca6ff 撞 Accent 禁色 → 改 #58a6ff；glass-api-access 新增 13 → 批准后更新基线），复跑 EXIT=0。
+- 局限：typecheck/编译未执行（依赖未安装+网络中断）；编译成品需网络恢复后 `npm install && cd android && gradlew assembleRelease`。
