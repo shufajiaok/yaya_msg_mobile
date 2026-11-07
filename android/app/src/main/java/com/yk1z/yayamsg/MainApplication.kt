@@ -20,6 +20,8 @@ import okhttp3.Interceptor
 import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
 
+import com.yk1z.yayamsg.glasskit.GlassKitPackage
+
 /** 与 src/api/bilibili.ts biliHeaders 一致的桌面 Chrome UA（B站风控按 UA 分端） */
 private const val BILI_DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
@@ -34,6 +36,7 @@ class MainApplication : Application(), ReactApplication {
               // Packages that cannot be autolinked yet can be added manually here, for example:
               add(LivePlayerPackage())
               add(PipPackage())
+              add(GlassKitPackage())
             }
 
           override fun getJSMainModuleName(): String = ".expo/.virtual-metro-entry"
