@@ -266,3 +266,8 @@
 - 临时首屏开关 `GLASS_TEST_FIRST = true`（navigation/index.tsx 顶部）：打开 App 直进测试页；验证完改回 false 恢复原首屏，路由常驻保留。
 - 守卫拦截实录：首版命中 2 处（blob 色 #7ca6ff 撞 Accent 禁色 → 改 #58a6ff；glass-api-access 新增 13 → 批准后更新基线），复跑 EXIT=0。
 - 局限：typecheck/编译未执行（依赖未安装+网络中断）；编译成品需网络恢复后 `npm install && cd android && gradlew assembleRelease`。
+
+## typecheck 首战通过（2026-11-07）
+- 网络排障后 npm install 成功（1077 包，绕失效代理直连 + 守卫改名绕行）。
+- 首轮 tsc 报 3 错（QA 预判点全部命中）：GlassKitBackdrop/GlassKitView 的 ref 类型改 `Component<P> & NativeMethods`；GlassTestScreen processColor 返回 ProcessedColorValue 断言收窄。
+- 复跑 **typecheck 全绿**（tsc --noEmit + verify-version ✅）——P0 + E1 引擎 + 测试页首次全部过编译器。

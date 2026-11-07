@@ -24,10 +24,10 @@
  *
  * ⚠️ 功能层叶子视图：无子节点（清单 §一 架构图）；页面零接线，P1 起使用。
  */
-import { forwardRef, useEffect, useState, type Ref } from 'react';
+import { forwardRef, useEffect, useState, type Component, type Ref } from 'react';
 import {
   AccessibilityInfo,
-  HostComponent,
+  NativeMethods,
   Platform,
   requireNativeComponent,
   type ViewProps,
@@ -64,8 +64,8 @@ export interface GlassKitViewProps extends ViewProps {
 
 const NATIVE_VIEW_NAME = 'GlassKitView';
 
-/** 原生宿主组件实例类型（findNodeHandle / measure 的输入）。 */
-type NativeViewInstance = HostComponent<GlassKitViewProps>;
+/** 原生宿主组件实例类型（requireNativeComponent ref 的真实类型）。 */
+type NativeViewInstance = Component<GlassKitViewProps> & NativeMethods;
 
 const NativeGlassKitView =
   Platform.OS === 'android'

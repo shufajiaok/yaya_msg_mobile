@@ -42,8 +42,9 @@ export const GLASS_TEST_ROUTE = 'GlassTest';
 
 const STEP = 0.1;
 
-/** tint 色值：契约要求 processColor 后的 Int（GlassKitView.tsx :8/:42）。 */
-const PANEL_TINT = processColor('#DCE6FF') ?? 0;
+/** tint 色值：契约要求 processColor 后的 Int（GlassKitView.tsx :8/:42）。
+ *  '#DCE6FF' 为普通 hex，processColor 返回 number，此处断言收窄。 */
+const PANEL_TINT = (processColor('#DCE6FF') as number) ?? 0;
 
 function clampScale(key: keyof typeof SCALE_RANGES, next: number): number {
   const range = SCALE_RANGES[key];

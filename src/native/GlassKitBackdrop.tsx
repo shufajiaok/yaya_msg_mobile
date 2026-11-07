@@ -10,8 +10,8 @@
  *
  * ⚠️ 本组件属「control 层挂载能力」，P1 起才由页面接线；本批零接线（清单 §四）。
  */
-import { forwardRef, type Ref } from 'react';
-import { HostComponent, Platform, requireNativeComponent, type ViewProps } from 'react-native';
+import { forwardRef, type Component, type Ref } from 'react';
+import { HostComponent, NativeMethods, Platform, requireNativeComponent, type ViewProps } from 'react-native';
 
 export interface GlassKitBackdropProps extends ViewProps {
   /** 被采集的背景内容（背景图 / 渐变层）。 */
@@ -20,8 +20,8 @@ export interface GlassKitBackdropProps extends ViewProps {
 
 const NATIVE_BACKDROP_NAME = 'GlassKitBackdrop';
 
-/** 原生宿主组件实例类型（findNodeHandle(ref.current) 的输入）。 */
-type NativeBackdropInstance = HostComponent<GlassKitBackdropProps>;
+/** 原生宿主组件实例类型（requireNativeComponent ref 的真实类型）。 */
+type NativeBackdropInstance = Component<GlassKitBackdropProps> & NativeMethods;
 
 const NativeGlassKitBackdrop =
   Platform.OS === 'android'
