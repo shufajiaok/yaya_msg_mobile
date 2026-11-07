@@ -35,6 +35,10 @@ import android.view.ViewTreeObserver
  * QA Round 1 修复：attach 幂等重挂（E1）、observer 实例缓存防 dead 滞留（E2）、
  * backdrop 晚挂载有限重试（E3）、NaN 拦截（S4）、alpha floor 取整（S1）、
  * RenderEffect 缓存复用（S2）。
+ * QA Round 2 修复：detachPreDraw 补第三降级路径——cached 与 targetView 的
+ * observer 均无效时用 glass 自身 viewTreeObserver 移除（E2 场景①残余泄漏，
+ * F1）；backdropTag 变更时重置 E3 重试计数（F2）；dimmingAlpha /
+ * cornerRadiusDp 补 isFinite 兜底（F3）。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -66,6 +70,10 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
+            // F2 修复：换新 tag = 全新的 backdrop 解析任务，重置 E3 有限重试
+            // 计数器，重新获得完整 50 次重试预算（否则前一个 tag 耗尽的计数
+            // 会连累新 tag 的晚挂载重试提前停摆）
+            pendingResolveRetries = 0
             resolveTarget()
             invalidate()
         }
@@ -118,16 +126,20 @@ class GlassKitView(context: Context) : View(context) {
     /** 圆角半径（dp）。 */
     var cornerRadiusDp: Float = 0f
         set(value) {
-            if (field == value) return
-            field = value
+            // F3 修复：NaN/Infinity 回退 0f（同 S4 refractionPx 式），统一 NaN 防护
+            val v = if (value.isFinite()) value else 0f
+            if (field == v) return
+            field = v
             invalidate()
         }
 
     /** 压暗层 alpha（#000，独立于 tint）。 */
     var dimmingAlpha: Float = 0f
         set(value) {
-            if (field == value) return
-            field = value
+            // F3 修复：NaN/Infinity 回退 0f（同 S4 refractionPx 式），统一 NaN 防护
+            val v = if (value.isFinite()) value else 0f
+            if (field == v) return
+            field = v
             invalidate()
         }
 
@@ -281,26 +293,67 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     private fun detachPreDraw() {
-        // E2 修复：优先用缓存的实际挂载实例移除。backdrop 先卸载时其 observer
-        // 已 merge 进根 observer 且 isAlive=false，仅查 target.viewTreeObserver
-        // 会静默失败 → listener 强引用 glass 泄漏到窗口销毁。
+        // E2 修复 + F1 修复：三级降级移除链（任何一级成功移除即止，最后统一
+        // 清空 attachedObserver 缓存，确保无残留引用）。
+        //
+        // F1 泄漏时序（QA Round 2 场景①残余）：glass attach 时 backdrop 尚未
+        // attach → listener 挂在 backdrop 的【子 ViewTreeObserver】上 → backdrop
+        // attach 后子 observer merge 进窗口根 observer、子 observer 变 dead
+        // （attachedObserver.isAlive=false）→ backdrop 先卸载（glass 仍 attached）
+        // → glass 后 detach：cached dead 不命中第一步；降级第二步里 targetView
+        // 就是已卸载的 backdrop 本身，其 observer 同样 dead/无效 → merge 时拷贝
+        // 进根 observer 的 listener 滞留，glass View 被强引用泄漏至窗口销毁。
+        // ⇒ 新增第三步：用 glass 自身 viewTreeObserver 移除——glass 在 attach
+        // 期间它就是窗口根 observer，merge 拷贝进根 observer 的 listener 可由此
+        // 摘除。
+        var removed = false
+
+        // 第一步：优先用缓存的实际挂载实例移除
         val cached = attachedObserver
-        if (cached != null) {
-            if (cached.isAlive) {
+        if (cached != null && cached.isAlive) {
+            try {
                 cached.removeOnPreDrawListener(preDrawListener)
-            } else {
-                // 缓存已 dead：合并后的存活 observer 再试一次（merge 时 listener
-                // 会被拷贝进目标 observer，这里通常能移除成功）
-                targetView?.viewTreeObserver
-                    ?.takeIf { it.isAlive }
-                    ?.removeOnPreDrawListener(preDrawListener)
+                removed = true
+            } catch (_: Exception) {
+                // 移除失败则落到下一级降级路径
             }
-        } else {
+        }
+
+        // 第二步：cached dead / 缺失时，用合并后的存活 observer 再试（merge 时
+        // listener 会被拷贝进目标 observer，backdrop 未卸载场景通常在此成功）
+        if (!removed) {
             targetView?.viewTreeObserver
                 ?.takeIf { it.isAlive }
-                ?.removeOnPreDrawListener(preDrawListener)
+                ?.let { observer ->
+                    try {
+                        observer.removeOnPreDrawListener(preDrawListener)
+                        removed = true
+                    } catch (_: Exception) {
+                        // 落到第三步
+                    }
+                }
         }
-        // E2 修复：detach 后清空缓存，确保无残留引用
+
+        // 第三步（F1）：targetView 的 observer 不可达/无效（backdrop 已先卸载）
+        // 时，用 glass 自身 viewTreeObserver 移除。onDetachedFromWindow 内访问
+        // 自身 viewTreeObserver 合法，但仍做判空 + try 防御，杜绝任何异常打断
+        // detach 清理链。
+        if (!removed) {
+            val selfObserver = try {
+                viewTreeObserver?.takeIf { it.isAlive }
+            } catch (_: Exception) {
+                null
+            }
+            selfObserver?.let { observer ->
+                try {
+                    observer.removeOnPreDrawListener(preDrawListener)
+                } catch (_: Exception) {
+                    // 全路径失败：listener 滞留与旧行为一致，不再抛出打断 detach
+                }
+            }
+        }
+
+        // E2/F1 修复：detach 后清空缓存，确保无残留引用
         attachedObserver = null
     }
 
