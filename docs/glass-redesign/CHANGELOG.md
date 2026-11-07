@@ -323,3 +323,24 @@
 - 守卫：glass-api-access 基线 13→14（桥接层 glowScale 订阅，批准更新），其余计数不变，EXIT=0；typecheck exit 0。
 
 **文件（7）：** `GlassKitView.kt` / `GlassKitManager.kt` / `GlassKitView.tsx` / `GlassSlider.tsx` / `GlassTestScreen.tsx` / `glass-guard.baseline.json` / `app.json` + `android/app/build.gradle`（版本位）。
+
+---
+
+## it.3 —— 透镜/模糊行为归一 + 采样矩阵顺序修复（2026-11-08，versionCode 2076002）
+
+**用户反馈（真机）：** 透镜对 hero 有效对其他无效、组件有两种行为模式、仍有锯齿、调模糊对 hero 无效、着色全有效、clear+压暗采样区域整体上移。
+
+**根因与修法：**
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 透镜只在 Hero 生效 | `lensActive` 依赖每面板 refractionPx/dispersionPx props，测试页只给 Hero 配了 | 四面板统一 refractionPx=10 / dispersionPx=6，行为归一 |
+| 2 | blurScale 对 Hero 无效 | 管线透镜与模糊互斥（if lensActive else blur） | 透镜输入位图降采样系数随模糊半径自适应：factor=clamp(round(radiusPx/(2.5dp×density)),1,10)；blurScale=0→factor 1 全分辨率清晰折射，拉高渐糊，二者协同 |
+| 3 | Hero 锯齿 | 透镜固定喂 1/6 降采样小图再放大 | 随 #2 解决（低糊档全分辨率，无放大阶梯） |
+| 4 | clear+压暗采样上移 | **capture 矩阵顺序 bug**：玻璃宽>1080 上限触发降采样（clear 1124px→scale≈0.961），旧「先 translate 后 scale」映射为 scale×q−offset，错位 = offset×(1−scale)，y=1373 时约 53px 且随拖动扩大；scale=1 小面板不受影响 → 吻合「hero 与其他不同」 | 改「先 scale 后 translate」，映射 scale×(q−offset)，玻璃左上角精确对齐位图 (0,0)；QA 独立推导闭合（pre-concat：M=S·T） |
+
+**验证：** QA 静态审查全项 PASS（矩阵数学推导 / 透镜因子边界 / factor≤1 快路径无污染 / 缓存键三元组 / 纯模糊路径回归 / guard 红线）；typecheck exit 0；guard 8 项全=基线；真机 pidof 存活、crash 缓冲空、versionCode 2076002 实装；偏移日志实证拖动/滚动跟随正确。视觉项按用户纪律移交肉眼验收。
+
+**留痕：** 本轮新增纪律——禁止拉真机截图做 AI 分析（含像素脚本），视觉验证一律转用户肉眼；日志/dumpsys/uiautomator 文本取证不受限。
+
+**收口备注：** 工程师交付的 GlassCaptureEngine.kt 出现整块缩进坍塌（Kotlin 不敏感缩进故构建仍过），主理人重排修复（纯格式零逻辑改动），重建 24s BUILD SUCCESSFUL。观察项：GlassTestScreen `fontSize: refractionPx ? 17 : 15` 的 15 分支成死分支（纯外观冗余）。
