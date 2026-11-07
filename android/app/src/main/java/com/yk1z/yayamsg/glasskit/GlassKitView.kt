@@ -601,7 +601,11 @@ class GlassKitView(context: Context) : View(context) {
         hasLastDrawnLocation = true
 
         // ⑦ 圆角裁剪：所有层（含采集 / 模糊 / tint / 压暗 / 描边）统一走 clip
-        val cornerRadiusPx = cornerRadiusDp * density
+        // it.5 修复：JS 侧惯用 radii.pill=999dp 表达胶囊 → cornerRadiusPx 远超半尺寸时
+        // AGSL sdRoundRect 判定整个视图在形外（SDF>0 → shader 全透明）→ 透镜层整块消失
+        //（胶囊无模糊/折射/透镜的根因）。钳到 min(w,h)/2 即标准胶囊语义，与 Skia
+        // clip 路径自带的钳制行为对齐；普通面板半径小于半尺寸，钳制零影响。
+        val cornerRadiusPx = minOf(cornerRadiusDp * density, minOf(w, h) / 2f)
         if (cornerRadiusPx > 0f) {
             clipRect.set(0f, 0f, w.toFloat(), h.toFloat())
             clipPath.reset()
