@@ -32,6 +32,9 @@ import android.view.ViewTreeObserver
  *
  * 重绘触发：背景视图挂 OnPreDrawListener（返回 true 不拦截绘制），33ms 节流
  * （≈30fps），postInvalidateDelayed 排队；onDetachedFromWindow 清理。
+ * QA Round 1 修复：attach 幂等重挂（E1）、observer 实例缓存防 dead 滞留（E2）、
+ * backdrop 晚挂载有限重试（E3）、NaN 拦截（S4）、alpha floor 取整（S1）、
+ * RenderEffect 缓存复用（S2）。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -50,6 +53,10 @@ class GlassKitView(context: Context) : View(context) {
         const val FRAME_INTERVAL_MS: Long = 33L
         /** 捕获失败兜底底色：半透明白灰。 */
         const val FALLBACK_COLOR: Int = 0x4DFFFFFF
+        /** E3 修复：backdrop 晚挂载时 resolveTarget 空结果的重试间隔（ms）。 */
+        const val TARGET_RETRY_DELAY_MS: Long = 100L
+        /** E3 修复：重试上限（50 次 ≈ 5s），防无限循环。 */
+        const val TARGET_RETRY_MAX: Int = 50
     }
 
     /* ---------------- props（GlassKitManager @ReactProp 一一对应） ---------------- */
@@ -90,16 +97,21 @@ class GlassKitView(context: Context) : View(context) {
     /** 折射位移基准（px；透镜时乘 lensScale）。 */
     var refractionPx: Float = 0f
         set(value) {
-            if (field == value) return
-            field = value
+            // S4 修复：NaN/Infinity 一律回退 0f，杜绝穿透进 RuntimeShader
+            //（onDraw 的 >0f 门挡不住 NaN：NaN > 0f == false 但 NaN 会喂给 uniform）
+            val v = if (value.isFinite()) value else 0f
+            if (field == v) return
+            field = v
             invalidate()
         }
 
     /** 色散位移基准（px；透镜时乘 lensScale）。 */
     var dispersionPx: Float = 0f
         set(value) {
-            if (field == value) return
-            field = value
+            // S4 修复：同 refractionPx，NaN/Infinity 回退 0f
+            val v = if (value.isFinite()) value else 0f
+            if (field == v) return
+            field = v
             invalidate()
         }
 
@@ -161,7 +173,9 @@ class GlassKitView(context: Context) : View(context) {
     private val strokePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.WHITE
-        alpha = Math.round(EDGE_HIGHLIGHT_ALPHA * 255f)
+        // S1 修复：floor 取整（round(0.14*255)=36 → 36/255≈0.1412 微超 0.14；
+        // floor=35 → 35/255≈0.1373 ≤ 0.14，alpha 契约恒不超出）
+        alpha = Math.floor(EDGE_HIGHLIGHT_ALPHA * 255f).toInt()
     }
     private val clipPath: Path = Path()
     private val clipRect: RectF = RectF()
@@ -177,6 +191,12 @@ class GlassKitView(context: Context) : View(context) {
     /** API 31+ RenderNode 模糊路径的复用节点。 */
     private var blurRenderNode: RenderNode? = null
 
+    /** S2 修复：RenderEffect 缓存（半径/尺寸变化才重建，避免每帧新建；detach 释放）。 */
+    private var blurEffect: RenderEffect? = null
+    private var blurEffectRadiusPx: Float = -1f
+    private var blurEffectWidth: Int = -1
+    private var blurEffectHeight: Int = -1
+
     /** API 33+ 透镜 RuntimeShader 缓存（位图实例变化时重建，uniform 每次 draw 重设）。 */
     private var lensRuntimeShader: RuntimeShader? = null
     private var lensShaderBitmap: Bitmap? = null
@@ -185,6 +205,15 @@ class GlassKitView(context: Context) : View(context) {
         scheduleThrottledInvalidate()
         true // 恒返回 true：只监听，不拦截背景树自身的绘制
     }
+
+    /** E2 修复：实际挂 OnPreDrawListener 的 ViewTreeObserver 实例缓存。
+     *  backdrop 先卸载时其 observer 会 merge 进根 observer 且 isAlive=false，
+     *  仅靠 target.viewTreeObserver 移除会静默失败 → listener 强引用本视图泄漏。 */
+    private var attachedObserver: ViewTreeObserver? = null
+
+    /** E3 修复：backdrop 晚挂载时 resolveTarget 空结果的有限重试计数。 */
+    private var pendingResolveRetries: Int = 0
+
     private var lastInvalidateAt: Long = 0L
 
     /** 硬件模糊能力：只按 SDK_INT 判（清单 §二.2 / 任务书「isHardwareAvailable」）。 */
@@ -195,11 +224,21 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // E1 修复：无条件重挂 PreDraw 监听。detach→re-attach 后 targetView 不变，
+        // resolveTarget 的 oldTarget===newTarget 早退分支会跳过 attach，
+        // 而 onDetachedFromWindow 已把 listener 摘掉 → 玻璃永不再跟随。
+        // attachPreDraw 自身幂等（挂前先安全移除），重复调用不产生重复 listener。
         resolveTarget()
+        attachPreDraw()
     }
 
     override fun onDetachedFromWindow() {
         detachPreDraw()
+        // S2 修复：RenderEffect 缓存随 detach 释放，不留跨窗口引用
+        releaseBlurEffect()
+        // E2 修复：不跨窗口持有 backdrop 视图引用（重挂载时 resolveTarget 会从
+        // 注册表重新解析，早退分支依赖的 targetView 重建后依然正确）
+        targetView = null
         super.onDetachedFromWindow()
     }
 
@@ -212,6 +251,17 @@ class GlassKitView(context: Context) : View(context) {
     /** 解析背景目标并挂 PreDraw 监听（幂等；onDraw 中目标缺失时也会惰性重试）。 */
     private fun resolveTarget() {
         val newTarget = if (backdropTag == View.NO_ID) null else GlassCaptureEngine.find(backdropTag)
+        // E3 修复：backdrop 晚于玻璃面板挂载时，目标缺失且无任何 invalidate 来源，
+        // 玻璃会永远卡兜底底色。这里给「有限重试」：100ms 延迟 invalidate 排队，
+        // 上限 TARGET_RETRY_MAX 次（≈5s），找到目标或超上限即停，不无限循环。
+        if (newTarget == null && backdropTag != View.NO_ID) {
+            if (pendingResolveRetries < TARGET_RETRY_MAX) {
+                pendingResolveRetries++
+                postInvalidateDelayed(TARGET_RETRY_DELAY_MS)
+            }
+        } else {
+            pendingResolveRetries = 0
+        }
         val oldTarget = targetView
         if (oldTarget === newTarget) return
         detachPreDraw()
@@ -219,17 +269,39 @@ class GlassKitView(context: Context) : View(context) {
         attachPreDraw()
     }
 
+    /** 挂 PreDraw 监听（幂等：挂前先安全移除再挂，支持 onAttachedToWindow 无条件调用）。 */
     private fun attachPreDraw() {
         val target = targetView ?: return
-        target.viewTreeObserver.addOnPreDrawListener(preDrawListener)
+        detachPreDraw()
+        val observer = target.viewTreeObserver
+        if (!observer.isAlive) return
+        observer.addOnPreDrawListener(preDrawListener)
+        // E2 修复：登记实际挂载的 observer 实例，detach 时优先用它移除
+        attachedObserver = observer
     }
 
     private fun detachPreDraw() {
-        val target = targetView ?: return
-        val observer = target.viewTreeObserver
-        if (observer.isAlive) {
-            observer.removeOnPreDrawListener(preDrawListener)
+        // E2 修复：优先用缓存的实际挂载实例移除。backdrop 先卸载时其 observer
+        // 已 merge 进根 observer 且 isAlive=false，仅查 target.viewTreeObserver
+        // 会静默失败 → listener 强引用 glass 泄漏到窗口销毁。
+        val cached = attachedObserver
+        if (cached != null) {
+            if (cached.isAlive) {
+                cached.removeOnPreDrawListener(preDrawListener)
+            } else {
+                // 缓存已 dead：合并后的存活 observer 再试一次（merge 时 listener
+                // 会被拷贝进目标 observer，这里通常能移除成功）
+                targetView?.viewTreeObserver
+                    ?.takeIf { it.isAlive }
+                    ?.removeOnPreDrawListener(preDrawListener)
+            }
+        } else {
+            targetView?.viewTreeObserver
+                ?.takeIf { it.isAlive }
+                ?.removeOnPreDrawListener(preDrawListener)
         }
+        // E2 修复：detach 后清空缓存，确保无残留引用
+        attachedObserver = null
     }
 
     /** 33ms 节流：到点直接 invalidate，未到点用 postInvalidateDelayed 排队到下一拍。 */
@@ -250,8 +322,18 @@ class GlassKitView(context: Context) : View(context) {
         smallBlurBitmap?.recycle()
         smallBlurBitmap = null
         blurRenderNode = null
+        // S2 修复：尺寸变化路径同样释放 RenderEffect 缓存
+        releaseBlurEffect()
         lensRuntimeShader = null
         lensShaderBitmap = null
+    }
+
+    /** S2 修复：释放 RenderEffect 缓存（detach / 尺寸变化时调用）。 */
+    private fun releaseBlurEffect() {
+        blurEffect = null
+        blurEffectRadiusPx = -1f
+        blurEffectWidth = -1
+        blurEffectHeight = -1
     }
 
     /* ---------------- 渲染管线 ---------------- */
@@ -304,7 +386,9 @@ class GlassKitView(context: Context) : View(context) {
         val finalTintAlpha = (tintAlpha * tintScale).coerceIn(0f, DEFAULT_TINT_ALPHA_MAX)
         if (tintColor != 0 && finalTintAlpha > 0f) {
             tintPaint.color = tintColor
-            tintPaint.alpha = Math.round(finalTintAlpha * 255f)
+            // S1 修复：floor 取整（round(0.12*255)=31 → 31/255≈0.1216 微超 0.12；
+            // floor=30 → 30/255≈0.1176 ≤ 0.12，H1 契约恒不超出）
+            tintPaint.alpha = Math.floor(finalTintAlpha * 255f).toInt()
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), tintPaint)
         }
 
@@ -356,9 +440,8 @@ class GlassKitView(context: Context) : View(context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && canvas.isHardwareAccelerated) {
             val node = obtainBlurRenderNode(w, h)
             val radius = blurRadiusPx.coerceAtLeast(0.5f)
-            node.setRenderEffect(
-                RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
-            )
+            // S2 修复：RenderEffect 走缓存，半径/尺寸不变时复用（原实现每帧新建）
+            node.setRenderEffect(obtainBlurEffect(radius, w, h))
             val recording = node.beginRecording()
             try {
                 recording.drawBitmap(capture, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), capturePaint)
@@ -428,6 +511,28 @@ class GlassKitView(context: Context) : View(context) {
             blurRenderNode = node
         }
         return node
+    }
+
+    /**
+     * S2 修复：RenderEffect 缓存。半径或视图尺寸不变时直接复用缓存实例，
+     * 仅在变化时新建（原实现每帧 createBlurEffect，高频分配压力）。
+     * 仅在 SDK_INT >= S 且硬件画布分支调用。
+     */
+    private fun obtainBlurEffect(radiusPx: Float, w: Int, h: Int): RenderEffect {
+        val cached = blurEffect
+        if (cached != null &&
+            blurEffectRadiusPx == radiusPx &&
+            blurEffectWidth == w &&
+            blurEffectHeight == h
+        ) {
+            return cached
+        }
+        val effect = RenderEffect.createBlurEffect(radiusPx, radiusPx, Shader.TileMode.CLAMP)
+        blurEffect = effect
+        blurEffectRadiusPx = radiusPx
+        blurEffectWidth = w
+        blurEffectHeight = h
+        return effect
     }
 
     /** RuntimeShader 缓存：位图实例变化时重建（避免每帧解析 AGSL），uniform 每次 draw 重设。 */

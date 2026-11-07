@@ -5,7 +5,7 @@
  * - blurDp        基准模糊半径 dp（原生最终半径 = blurDp × blurScale × density）
  * - tintAlpha     tint 基准 alpha（原生最终 alpha = min(tintAlpha × tintScale, 0.12)，
  *                 0.12 为 glass.ts H1 硬约束上界，原生侧 clamp）
- * - tintColor     tint 颜色（string 或 processColor 后的 number）
+ * - tintColor     tint 颜色（必须传数字：processColor 后的 Int；不接受色值字符串）
  * - refractionPx  折射位移基准 px（API 33+ 透镜，乘 lensScale）
  * - dispersionPx  色散位移基准 px（API 33+ 透镜，乘 lensScale）
  * - cornerRadiusDp 圆角半径 dp
@@ -39,7 +39,8 @@ export interface GlassKitViewProps extends ViewProps {
   blurDp?: number;
   /** tint 基准 alpha（原生按 H1 钳到 ≤0.12）。 */
   tintAlpha?: number;
-  /** tint 颜色（色值字符串或 processColor 后的数字）。 */
+  /** tint 颜色（必须传数字：processColor(色值) 后的 Int；原生按 Int 收口，
+   *  不要传色值字符串——桥接层虽会转换，但契约不做该兜底承诺）。 */
   tintColor?: string | number;
   /** 折射位移基准（px，仅 API 33+ 生效）。 */
   refractionPx?: number;

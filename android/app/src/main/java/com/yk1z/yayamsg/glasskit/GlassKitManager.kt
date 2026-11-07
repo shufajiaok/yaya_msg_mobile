@@ -38,7 +38,11 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.tintAlpha = value
     }
 
-    /** tint 颜色（RN Color 转换；JS 传 processColor 后的 Int 或色值字符串均可）。 */
+    /**
+     * tint 颜色。契约（QA Round 1 S7）：必须传**数字**——JS 侧 `processColor(色值)`
+     * 后的 ColorInt。桥接层 customType="Color" 虽会自动把色值字符串转 Int，
+     * 但原生契约按 Int 收口，JS 类型层不应再放行 string（见 GlassKitView.tsx 注释）。
+     */
     @ReactProp(name = "tintColor", customType = "Color", defaultInt = 0)
     fun setTintColor(view: GlassKitView, value: Int) {
         view.tintColor = value
