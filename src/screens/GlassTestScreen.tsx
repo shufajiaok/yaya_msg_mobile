@@ -1,7 +1,10 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.3）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.4）。
  *
- * it.3 行为归一：四块玻璃面板统一传 refractionPx/dispersionPx（透镜全开），
+ * it.4：透镜输入真模糊化（原生侧固定 1/4 降采样 + BlurMaskFilter 软件高斯，
+ * 废弃 it.3「降采样+双线性放大」近似——该近似产出锯齿而非高斯），状态行 it.4。
+ *
+ * it.3 行为归一（历史）：四块玻璃面板统一传 refractionPx/dispersionPx（透镜全开），
  * 配合引擎侧「模糊与透镜协同」，四面板对 blur/lens/tint/glow 四根滑块全部
  * 有可见响应——消除 it.2「hero 与其他控件两种行为模式」的问题。
  *
@@ -239,7 +242,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.3 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.4 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'RenderEffect 真高斯'} · 面板可拖动`}
