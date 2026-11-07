@@ -39,9 +39,10 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     }
 
     /**
-     * tint 颜色。契约（QA Round 1 S7）：必须传**数字**——JS 侧 `processColor(色值)`
-     * 后的 ColorInt。桥接层 customType="Color" 虽会自动把色值字符串转 Int，
-     * 但原生契约按 Int 收口，JS 类型层不应再放行 string（见 GlassKitView.tsx 注释）。
+     * tint 颜色。契约（2026-11-07 订正，真机 logcat + 像素取证）：旧架构 Paper 下
+     * JS 传**原始色值字符串**（如 '#DCE6FF'），桥接 customType="Color" 自动做唯一
+     * 一次 processColor——调用方预 processColor 的数字会被二次转换丢弃
+     * （normalizeColor(负 ColorInt) → null → prop 不下发，tintColor 恒 0）。
      */
     @ReactProp(name = "tintColor", customType = "Color", defaultInt = 0)
     fun setTintColor(view: GlassKitView, value: Int) {
@@ -100,6 +101,18 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "blurEnabled", defaultBoolean = true)
     fun setBlurEnabled(view: GlassKitView, value: Boolean) {
         view.blurEnabled = value
+    }
+
+    /** 柔光倍率（JS store 已按 0.05–2 钳制；作用于边缘高光宽/alpha）。 */
+    @ReactProp(name = "glowScale", defaultFloat = 1f)
+    fun setGlowScale(view: GlassKitView, value: Float) {
+        view.glowScale = value
+    }
+
+    /** 强制降采样模糊路径（模拟器 GPU RenderEffect 缺陷时由测试页开关开启）。 */
+    @ReactProp(name = "forceDownsample", defaultBoolean = false)
+    fun setForceDownsample(view: GlassKitView, value: Boolean) {
+        view.forceDownsample = value
     }
 
     override fun onDropViewInstance(view: GlassKitView) {
