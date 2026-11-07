@@ -249,6 +249,42 @@ class GlassKitView(context: Context) : View(context) {
             invalidate()
         }
 
+    /** it.6 柔光细化：描边亮度倍率（基准 alpha = 0.14 × glowScale × glowAlphaScale，clamp 0–1）。 */
+    var glowAlphaScale: Float = 1f
+        set(value) {
+            val v = if (value.isFinite()) value else 1f
+            if (field == v) return
+            field = v
+            invalidate()
+        }
+
+    /** it.6 柔光细化：描边宽度倍率（宽 = 1dp × glowScale × glowWidthScale，clamp 0.5–8dp）。 */
+    var glowWidthScale: Float = 1f
+        set(value) {
+            val v = if (value.isFinite()) value else 1f
+            if (field == v) return
+            field = v
+            invalidate()
+        }
+
+    /** it.6 柔光细化：顶缘高光加强倍率（视图上半描边 alpha 再乘本值，clamp 0–1 终值）。 */
+    var glowTopScale: Float = 1f
+        set(value) {
+            val v = if (value.isFinite()) value else 1f
+            if (field == v) return
+            field = v
+            invalidate()
+        }
+
+    /** it.6 柔光细化：底缘高光加强倍率（视图下半描边 alpha 再乘本值，clamp 0–1 终值）。 */
+    var glowBottomScale: Float = 1f
+        set(value) {
+            val v = if (value.isFinite()) value else 1f
+            if (field == v) return
+            field = v
+            invalidate()
+        }
+
     /** 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时由测试页开关开启）。 */
     var forceDownsample: Boolean = false
         set(value) {
@@ -661,13 +697,29 @@ class GlassKitView(context: Context) : View(context) {
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), dimmingPaint)
         }
 
-        // ⑥ 边缘高光：#FFF @0.14 × glowScale（柔光倍率接线：宽 1dp × glowScale
-        //    clamp 0.5–4dp，alpha clamp 0–1；描边宽度受圆角影响画在边界内）
+        // ⑥ 边缘高光：#FFF @0.14 基准（it.6 柔光细化——描边亮度/宽度、顶缘/底缘
+        //    加强均独立可调：宽 = 1dp × glowScale × glowWidthScale clamp 0.5–8dp；
+        //    alpha = 0.14 × glowScale × glowAlphaScale clamp 0–1；视图上半/下半分别
+        //    以 alpha × glowTopScale / glowBottomScale 描 stroke，侧缘上下对半分摊）
         if (cornerRadiusPx > 0f) {
             val glow = glowScale.coerceIn(0.05f, 2f)
-            strokePaint.strokeWidth = (EDGE_HIGHLIGHT_DP * glow).coerceIn(0.5f, 4f) * density
-            strokePaint.alpha = floor((EDGE_HIGHLIGHT_ALPHA * glow).coerceIn(0f, 1f) * 255f).toInt()
+            strokePaint.strokeWidth =
+                (EDGE_HIGHLIGHT_DP * glow * glowWidthScale.coerceIn(0.2f, 4f)).coerceIn(0.5f, 8f) * density
+            val baseAlpha = (EDGE_HIGHLIGHT_ALPHA * glow * glowAlphaScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
+            val topAlpha = (baseAlpha * glowTopScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
+            val bottomAlpha = (baseAlpha * glowBottomScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
+            // 上半：顶缘 + 侧缘上段
+            canvas.save()
+            canvas.clipRect(0f, 0f, w.toFloat(), h / 2f)
+            strokePaint.alpha = floor(topAlpha * 255f).toInt()
             canvas.drawPath(clipPath, strokePaint)
+            canvas.restore()
+            // 下半：底缘 + 侧缘下段
+            canvas.save()
+            canvas.clipRect(0f, h / 2f, w.toFloat(), h.toFloat())
+            strokePaint.alpha = floor(bottomAlpha * 255f).toInt()
+            canvas.drawPath(clipPath, strokePaint)
+            canvas.restore()
         }
     }
 

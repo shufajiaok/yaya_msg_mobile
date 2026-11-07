@@ -1,5 +1,5 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.5）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.6）。
  *
  * it.5：胶囊圆角修复（引擎侧 cornerRadiusPx 钳到 min(w,h)/2，radii.pill=999 不再
  * 令 SDF 全形外输出透明）+ 四倍率默认值固化（blur 0.10 / tint 1.00 / lens 2.00 /
@@ -184,6 +184,10 @@ function GlassPanel(props: {
   refractionPx?: number;
   dispersionPx?: number;
   dimmingAlpha?: number;
+  glowAlphaScale?: number;
+  glowWidthScale?: number;
+  glowTopScale?: number;
+  glowBottomScale?: number;
   blurEnabled: boolean;
   forceDownsample: boolean;
 }) {
@@ -199,6 +203,10 @@ function GlassPanel(props: {
         refractionPx={props.refractionPx}
         dispersionPx={props.dispersionPx}
         dimmingAlpha={props.dimmingAlpha}
+        glowAlphaScale={props.glowAlphaScale}
+        glowWidthScale={props.glowWidthScale}
+        glowTopScale={props.glowTopScale}
+        glowBottomScale={props.glowBottomScale}
         blurEnabled={props.blurEnabled}
         forceDownsample={props.forceDownsample}
       />
@@ -219,6 +227,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const [forceDown, setForceDown] = useState(false);
   const [radiusScale, setRadiusScale] = useState(1);
   const [sizeScale, setSizeScale] = useState(1);
+  // it.6 柔光细化四参数（本地调参态，不进持久化 store——与圆角/大小倍率同模式）
+  const [glowAlpha, setGlowAlpha] = useState(1);
+  const [glowWidth, setGlowWidth] = useState(1);
+  const [glowTop, setGlowTop] = useState(1);
+  const [glowBottom, setGlowBottom] = useState(1);
 
   const blurScale = useGlassStore((state) => state.blurScale);
   const tintScale = useGlassStore((state) => state.tintScale);
@@ -246,7 +259,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.5 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.6 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'RenderEffect 真高斯'} · 面板可拖动`}
@@ -262,6 +275,10 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             cornerRadiusDp={Math.round(radii.hero * radiusScale)}
             refractionPx={10}
             dispersionPx={6}
+            glowAlphaScale={glowAlpha}
+            glowWidthScale={glowWidth}
+            glowTopScale={glowTop}
+            glowBottomScale={glowBottom}
             blurEnabled={blurOn}
             forceDownsample={forceDown}
           />
@@ -307,6 +324,10 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             refractionPx={10}
             dispersionPx={6}
             dimmingAlpha={0.35}
+            glowAlphaScale={glowAlpha}
+            glowWidthScale={glowWidth}
+            glowTopScale={glowTop}
+            glowBottomScale={glowBottom}
             blurEnabled={blurOn}
             forceDownsample={forceDown}
           />
@@ -342,6 +363,34 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             value={glowScale}
             scaleKey="glowScale"
             onChange={(next) => useGlassStore.setState({ glowScale: clampScale('glowScale', next) })}
+          />
+          <SliderRow
+            label="描边亮度（0–3）"
+            value={glowAlpha}
+            min={0}
+            max={3}
+            onChange={(next) => setGlowAlpha(clampRange(next, 0, 3))}
+          />
+          <SliderRow
+            label="描边宽度（0–3）"
+            value={glowWidth}
+            min={0}
+            max={3}
+            onChange={(next) => setGlowWidth(clampRange(next, 0, 3))}
+          />
+          <SliderRow
+            label="顶缘加强（0–3）"
+            value={glowTop}
+            min={0}
+            max={3}
+            onChange={(next) => setGlowTop(clampRange(next, 0, 3))}
+          />
+          <SliderRow
+            label="底缘加强（0–3）"
+            value={glowBottom}
+            min={0}
+            max={3}
+            onChange={(next) => setGlowBottom(clampRange(next, 0, 3))}
           />
           <SliderRow
             label="圆角倍率（0–3）"

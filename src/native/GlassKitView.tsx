@@ -74,6 +74,14 @@ export interface GlassKitViewProps extends ViewProps {
   lensScale?: number;
   /** 柔光倍率覆盖（未传时取 store 的 glowScale；作用于边缘高光宽/alpha）。 */
   glowScale?: number;
+  /** it.6 描边亮度倍率（基准 alpha = 0.14 × glowScale × 本值）。 */
+  glowAlphaScale?: number;
+  /** it.6 描边宽度倍率（宽 = 1dp × glowScale × 本值，clamp 0.5–8dp）。 */
+  glowWidthScale?: number;
+  /** it.6 顶缘高光加强倍率（视图上半描边 alpha 再乘本值）。 */
+  glowTopScale?: number;
+  /** it.6 底缘高光加强倍率（视图下半描边 alpha 再乘本值）。 */
+  glowBottomScale?: number;
   /** 强制降采样模糊路径（模拟器调试开关；真机默认 false 走 RenderEffect 真高斯）。 */
   forceDownsample?: boolean;
   /** 模糊总开关（reduceTransparency 时本组件强制传 false）。 */
@@ -148,6 +156,10 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         tintScale={props.tintScale ?? tintScale}
         lensScale={props.lensScale ?? lensScale}
         glowScale={props.glowScale ?? glowScale}
+        glowAlphaScale={props.glowAlphaScale ?? 1}
+        glowWidthScale={props.glowWidthScale ?? 1}
+        glowTopScale={props.glowTopScale ?? 1}
+        glowBottomScale={props.glowBottomScale ?? 1}
         forceDownsample={props.forceDownsample ?? false}
         ref={ref as Ref<NativeViewInstance>}
       />

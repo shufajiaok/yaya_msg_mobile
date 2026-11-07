@@ -109,6 +109,30 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.glowScale = value
     }
 
+    /** it.6 柔光细化：描边亮度倍率。 */
+    @ReactProp(name = "glowAlphaScale", defaultFloat = 1f)
+    fun setGlowAlphaScale(view: GlassKitView, value: Float) {
+        view.glowAlphaScale = value
+    }
+
+    /** it.6 柔光细化：描边宽度倍率。 */
+    @ReactProp(name = "glowWidthScale", defaultFloat = 1f)
+    fun setGlowWidthScale(view: GlassKitView, value: Float) {
+        view.glowWidthScale = value
+    }
+
+    /** it.6 柔光细化：顶缘高光加强倍率。 */
+    @ReactProp(name = "glowTopScale", defaultFloat = 1f)
+    fun setGlowTopScale(view: GlassKitView, value: Float) {
+        view.glowTopScale = value
+    }
+
+    /** it.6 柔光细化：底缘高光加强倍率。 */
+    @ReactProp(name = "glowBottomScale", defaultFloat = 1f)
+    fun setGlowBottomScale(view: GlassKitView, value: Float) {
+        view.glowBottomScale = value
+    }
+
     /** 强制降采样模糊路径（模拟器 GPU RenderEffect 缺陷时由测试页开关开启）。 */
     @ReactProp(name = "forceDownsample", defaultBoolean = false)
     fun setForceDownsample(view: GlassKitView, value: Boolean) {
