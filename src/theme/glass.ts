@@ -4,12 +4,13 @@
 //       02-apple-liquid-glass-spec.md M7 / M9 / M18 / M23 / M24 / D1 / D9 / D18 / §4 可量化参数表。
 //
 // 本文件是「所有玻璃数值」的唯一出口：页面 / 组件不得内联玻璃底色、blur 半径、tint 或圆角。
-// P0 只建契约与骨架：resolveGlass / GlassSurface 不接入任何页面（P1 起接线，本轮零视觉变化）。
 // v2.1 已删除的八项旧参数（transparency / refractDp / refractMode / dispersion /
 // edgeWidthDp / edgeGlow / legacyBackdrop / scrim）除文档登记处外不得再出现（03 §13.3）。
+// 旧引擎收尾（独立分支决策）：resolveGlass / GlassSurface / glassSettings 死骨架已删除，
+// 活能力（四倍率 store / 降级 / H1 tint / childRadius / 预算）保留，待 UI 重写接 GlassKitView。
 
-import { createElement, useMemo, type ReactElement, type ReactNode } from 'react';
-import { Platform, View, type StyleProp, type ViewStyle } from 'react-native';
+import { useMemo } from 'react';
+import { Platform } from 'react-native';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -290,32 +291,9 @@ export const useGlassStore = create<GlassState>()(
 
 /**
  * ① 三段式 init / persist / reset（对齐 src/store/danmakuSettings.ts 的 zustand 写法，
- * 语义对应 04 §2.4 GlassSettings.kt:26-47）。
+ * 语义对应 04 §2.4 GlassSettings.kt:26-47）——已随旧引擎一并删除（独立分支决策）：
+ * glassSettings 全 src 零调用；持久化由 useGlassStore 的 zustand persist 中间件自动承担。
  */
-export const glassSettings = {
-  /** 冷启动读取 AsyncStorage（persist.rehydrate 等价 init(context)），并前置 API 双档降级 */
-  async init(): Promise<void> {
-    try {
-      await useGlassStore.persist.rehydrate();
-    } catch {
-      // 持久化不可用时退回默认四倍率，绝不阻塞启动
-      useGlassStore.setState({ ...DEFAULT_SCALES });
-    }
-    ensurePlatformDegradation();
-  },
-  /** 显式落盘：触发 persist 中间件写入，不改变任何 selector 值（不重建视图树） */
-  persist(): void {
-    useGlassStore.setState({});
-  },
-  /** 四倍率回到 1 并落盘 */
-  reset(): void {
-    useGlassStore.getState().reset();
-  },
-};
-
-export const initGlassSettings = (): Promise<void> => glassSettings.init();
-export const persistGlassSettings = (): void => glassSettings.persist();
-export const resetGlassSettings = (): void => glassSettings.reset();
 
 /* ------------------------------------------------------------------ *
  * 三、三项硬约束 H1 / H2 / H3
@@ -451,204 +429,14 @@ export function ensurePlatformDegradation(): void {
 }
 
 /* ------------------------------------------------------------------ *
- * 四、resolveGlass(kind) 七种分派（⑤ §3.6）
+ * 四、resolveGlass(kind) 七种分派（⑤ §3.6）——已随旧引擎一并删除（独立分支决策）：
+ * resolveGlass / GlassSurface / snapshot 全链路在 P0 全 src 零接线（死骨架），
+ * UI 重写后由 GlassKitView 原生引擎承接玻璃数值解析。
  * ------------------------------------------------------------------ */
-
-export interface GlassSnapshot extends GlassScales {
-  reasons: DegradeReason[];
-}
-
-export function snapshotGlass(): GlassSnapshot {
-  const state = useGlassStore.getState();
-  return {
-    blurScale: state.blurScale,
-    tintScale: state.tintScale,
-    lensScale: state.lensScale,
-    glowScale: state.glowScale,
-    reasons: state.activeReasons,
-  };
-}
-
-/** 组件用 selector 逐项订阅，改值不重建视图树（① 读取方式） */
-export function useGlassSnapshot(): GlassSnapshot {
-  const blurScale = useGlassStore((state) => state.blurScale);
-  const tintScale = useGlassStore((state) => state.tintScale);
-  const lensScale = useGlassStore((state) => state.lensScale);
-  const glowScale = useGlassStore((state) => state.glowScale);
-  const reasons = useGlassStore((state) => state.activeReasons);
-  return useMemo(
-    () => ({ blurScale, tintScale, lensScale, glowScale, reasons }),
-    [blurScale, tintScale, lensScale, glowScale, reasons],
-  );
-}
-
-export interface GlassSpec {
-  kind: GlassKind;
-  variant: GlassVariant;
-  layer: GlassLayer;
-  /** 已乘 blurScale 且过降级的最终模糊半径（dp）；0 = 不模糊 */
-  blurDp: number;
-  /** 已过 H1 上界 */
-  tintAlpha: number;
-  /** tabs 由 onDrawSurface 承载 tint，而非 1dp 描边（§3.6） */
-  tintOnSurface: boolean;
-  edgeHighlight: EdgeHighlight | null;
-  dimming: GlassDimming | null;
-  lens: GlassLens | null;
-  /** 1 = 正常；≥ 0.9 = 降级为高不透明实色 */
-  opacity: number;
-  degraded: boolean;
-  reasons: DegradeReason[];
-  note: string;
-}
-
-interface GlassKindDefinition {
-  readonly variant: GlassVariant;
-  readonly tintOnSurface: boolean;
-  readonly edgeHighlight: boolean;
-  readonly dimming: boolean;
-  readonly lens: boolean;
-  readonly opacity: number;
-  readonly note: string;
-}
-
-/** §3.6 分派表：kind → 变体 / 模糊 / 边缘光 / dimming / lens */
-export const GLASS_KIND_TABLE: Record<GlassKind, GlassKindDefinition> = {
-  compact: {
-    variant: 'regular', tintOnSurface: false, edgeHighlight: true, dimming: false, lens: false,
-    opacity: 1, note: 'glassCompact / GlassRoundButton / Chip；返回键胶囊、Pill、筛选 chip',
-  },
-  regular: {
-    variant: 'regular', tintOnSurface: false, edgeHighlight: true, dimming: false, lens: false,
-    opacity: 1, note: 'glassSurface / GlassTopBar；悬浮工具条、输入底坞',
-  },
-  large: {
-    variant: 'regular', tintOnSurface: false, edgeHighlight: true, dimming: false, lens: false,
-    opacity: 0.9, note: 'Sheet / Modal 高不透明膜层；大面积禁 lens；独立 window 不做真模糊（R14 / A5）',
-  },
-  tabs: {
-    variant: 'regular', tintOnSurface: true, edgeHighlight: false, dimming: false, lens: false,
-    opacity: 1, note: 'GlassBottomTabs bar；tint @0.10 由 onDrawSurface 承载（§3.6）',
-  },
-  detail: {
-    variant: 'regular', tintOnSurface: false, edgeHighlight: true, dimming: false, lens: false,
-    opacity: 1, note: 'GlassDetailBar；聊天输入底坞 / 播放器控制底坞',
-  },
-  media: {
-    variant: 'clear', tintOnSurface: false, edgeHighlight: true, dimming: true, lens: false,
-    opacity: 1, note: 'SurfaceView 采样不到，不做 backdrop blur；渐变 + #000@0.35 dimming 近似 clear（R3 / M7）',
-  },
-  indicator: {
-    variant: 'regular', tintOnSurface: false, edgeHighlight: false, dimming: false, lens: true,
-    opacity: 1, note: '唯一允许 lens：Dock 选中指示器，且必须是 bar 的兄弟节点（A2 / 铁律②）',
-  },
-} as const;
-
-export interface ResolveGlassOptions {
-  layer?: GlassLayer;
-  snapshot?: GlassSnapshot;
-}
-
-/** 合并六类降级策略（单一循环，单一路径） */
-function resolvePolicy(reasons: readonly DegradeReason[]): GlassPolicyMask {
-  let disableBlur = false;
-  let disableLens = false;
-  let forceOpaque = false;
-  let disableMotion = false;
-  const notes: string[] = [];
-  for (const reason of reasons) {
-    const policy = DEGRADE_POLICY[reason];
-    disableBlur = disableBlur || policy.disableBlur === true;
-    disableLens = disableLens || policy.disableLens === true;
-    forceOpaque = forceOpaque || policy.forceOpaque === true;
-    disableMotion = disableMotion || policy.disableMotion === true;
-    notes.push(policy.note);
-  }
-  return { disableBlur, disableLens, forceOpaque, disableMotion, note: notes.join('; ') };
-}
-
-/**
- * ⑤ resolveGlass(kind)：所有玻璃数值的唯一解析出口。
- * 四档 blurDp 统一乘 blurScale；tint 只经 resolveTintAlpha 过 H1；canBlur / canLens 双档生效。
- */
-export function resolveGlass(kind: GlassKind, options: ResolveGlassOptions = {}): GlassSpec {
-  if (!GLASS_KINDS.includes(kind)) {
-    throw new Error(`[glass] 未知 kind：${String(kind)}`);
-  }
-  const layer: GlassLayer = options.layer ?? 'control';
-  const snapshot = options.snapshot ?? snapshotGlass();
-  const definition = GLASS_KIND_TABLE[kind];
-
-  const reasons: DegradeReason[] = [];
-  if (!canBlur()) reasons.push('api<31');
-  if (!canLens()) reasons.push('lensUnavailable(api<33)');
-  for (const reason of snapshot.reasons) {
-    if (!reasons.includes(reason)) reasons.push(reason);
-  }
-  const policy = resolvePolicy(reasons);
-
-  const blurDp = policy.disableBlur
-    ? 0
-    : BLUR_DP_BY_KIND[kind] * clampScale('blurScale', snapshot.blurScale);
-
-  const lensScale = clampScale('lensScale', snapshot.lensScale);
-  const lens: GlassLens | null =
-    definition.lens && !policy.disableLens && canLens()
-      ? {
-          refractionHeightDp: LENS_BASE.refractionHeightDp * lensScale,
-          refractionAmountDp: LENS_BASE.refractionAmountDp * lensScale,
-          chromaticAberration: LENS_BASE.chromaticAberration,
-        }
-      : null;
-
-  assertGlassLayer(layer, kind);
-
-  return {
-    kind,
-    variant: definition.variant,
-    layer,
-    blurDp,
-    tintAlpha: resolveTintAlpha(TINT_ALPHA_BASE, snapshot.tintScale),
-    tintOnSurface: definition.tintOnSurface,
-    edgeHighlight: definition.edgeHighlight ? EDGE_HIGHLIGHT : null,
-    dimming: definition.dimming ? GLASS_DIMMING : null,
-    lens,
-    opacity: policy.forceOpaque ? Math.max(definition.opacity, 0.9) : definition.opacity,
-    degraded: reasons.length > 0,
-    reasons,
-    note: definition.note,
-  };
-}
 
 /* ------------------------------------------------------------------ *
- * 五、layer 白名单断言 / childRadius / 玻璃容器预算（⑤ 保留且升格）
+ * 五、childRadius / 玻璃容器预算（⑤ 保留）
  * ------------------------------------------------------------------ */
-
-/** A3：layer 白名单断言（对应红线转译 A3，非 RN 侧真实 SIGSEGV） */
-export const GLASS_LAYER_WHITELIST: Record<GlassKind, readonly GlassLayer[]> = {
-  compact: ['control'],
-  regular: ['control'],
-  large: ['control'],
-  tabs: ['control'],
-  detail: ['control'],
-  media: ['control'],
-  indicator: ['control'],
-} as const;
-
-/**
- * 内容层禁止玻璃（02 D1 / 04 §6.2 A3）：开发期直接报错，
- * 生产环境走 degrade('lowEnd') 单一路径降级为实色，并由静态守卫兜底。
- */
-export function assertGlassLayer(layer: GlassLayer, kind: GlassKind): boolean {
-  const allowed = GLASS_LAYER_WHITELIST[kind];
-  if (allowed.includes(layer)) return true;
-  const message =
-    `[glass] layer='${layer}' 不在 ${kind} 的白名单 ${JSON.stringify(allowed)} 内：` +
-    '内容层禁止使用 Liquid Glass（02 D1 / 04 §6.2 A3）';
-  if (__DEV__) throw new Error(message);
-  degrade('lowEnd');
-  return false;
-}
 
 /**
  * 同心几何 child = parent − padding（02 §4.2 / D1 / S17；⑤ 保留且升格）。
@@ -736,33 +524,9 @@ export function useGlassBudget(): GlassBudgetView {
 }
 
 /* ------------------------------------------------------------------ *
- * 六、GlassSurface 骨架 / 契约（P0 不接入任何页面，零视觉变化）
+ * 六、GlassSurface 骨架 / 契约——已随旧引擎一并删除（独立分支决策）：
+ * P0 骨架从未接入任何页面，UI 重写后由 GlassKitView 原生引擎承接单一容器。
  * ------------------------------------------------------------------ */
-
-export interface GlassSurfaceProps {
-  kind: GlassKind;
-  /** 默认 'control'；传 'content' 会触发 A3 断言 */
-  layer?: GlassLayer;
-  style?: StyleProp<ViewStyle>;
-  testID?: string;
-  children?: ReactNode;
-}
-
-/**
- * 单一容器承载全部玻璃效果（M23 / A2）。
- * ⚠️ P0 仅骨架：渲染普通 View，不挂 BlurView / tint / 渐变，避免任何视觉变化。
- * P1 起在本组件内按 spec 接线 expo-blur 与边缘高光，页面不得自行拼装玻璃视图。
- */
-export function GlassSurface(props: GlassSurfaceProps): ReactElement {
-  const snapshot = useGlassSnapshot();
-  const spec = useMemo(
-    () => resolveGlass(props.kind, { layer: props.layer ?? 'control', snapshot }),
-    [props.kind, props.layer, snapshot],
-  );
-  // spec 在 P0 只做契约校验（含 layer 白名单断言），不产生任何样式；P1 在此挂 blur/tint。
-  void spec;
-  return createElement(View, { style: props.style, testID: props.testID }, props.children);
-}
 
 /* ------------------------------------------------------------------ *
  * 七、模块加载即前置 API 双档降级（G1 · QA Round 1 收口）

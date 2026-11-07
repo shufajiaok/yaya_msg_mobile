@@ -18,7 +18,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
 import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -98,8 +97,8 @@ function TabCell({
 export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const palette = usePalette();
   const isDark = palette.name === 'dark';
-  // 苹果式磨砂玻璃：真模糊(Android 12+ RenderEffect, expo-blur) + 半透 tint + 顶部细高光
-  // 背景图/滚动内容透到胶囊下方被模糊；无内容时柔化的主题色 + 高光依然有玻璃观感
+  // 旧 expo-blur 引擎已删除（独立分支决策）；此处待 UI 重写接入 GlassKitView 原生引擎
+  // 降级：无模糊半透明实底（原 tint 色提高不透明度），保持胶囊布局与高光观感
   return (
     <View
       pointerEvents="box-none"
@@ -109,18 +108,12 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
         style={[
           styles.bar,
           {
-            // 玻璃底色（更实不透）：液态玻璃感但不高透；保留 12% 让 blur 仍显磨砂
-            backgroundColor: isDark ? 'rgba(30,31,36,0.86)' : 'rgba(245,246,250,0.88)',
+            // 降级实底：无模糊后提高不透明度保证可读
+            backgroundColor: isDark ? 'rgba(30,31,36,0.94)' : 'rgba(245,246,250,0.94)',
             borderColor: palette.innerStroke,
           },
         ]}
       >
-        {/* 磨砂层：Android 12+ 真模糊；iOS 系统毛玻璃 */}
-        <BlurView
-          style={StyleSheet.absoluteFill}
-          tint={isDark ? 'dark' : 'light'}
-          intensity={isDark ? 62 : 82}
-        />
         {/* tint 色相层：保证可读；浅色几乎透, 深色轻提亮 */}
         <View
           style={[

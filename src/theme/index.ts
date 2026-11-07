@@ -10,13 +10,11 @@ export { makeShadows } from './shadows';
 export { motion } from './motion';
 
 // P0 批次①：玻璃参数单一来源（03 §3.5 / §3.6 / §9 P0）
+// 旧引擎收尾（独立分支决策）：glassSettings 三段式、resolveGlass / GlassSurface /
+// layer 白名单断言、snapshot 全链路死骨架已删除，待 UI 重写接 GlassKitView 原生引擎。
 export {
-  // ① 全局状态与三段式
+  // ① 全局状态（持久化由 zustand persist 中间件自动承担）
   useGlassStore,
-  glassSettings,
-  initGlassSettings,
-  persistGlassSettings,
-  resetGlassSettings,
   DEFAULT_SCALES,
   SCALE_RANGES,
   GLOW_SCALE_MIN,
@@ -45,20 +43,13 @@ export {
   getActiveDegradeReasons,
   isGlassDegraded,
   ensurePlatformDegradation,
-  // ⑤ 分派 / 白名单 / 预算 / 同心几何
+  // ⑤ 预算 / 同心几何
   GLASS_KINDS,
-  GLASS_KIND_TABLE,
-  GLASS_LAYER_WHITELIST,
-  assertGlassLayer,
   childRadius,
   GLASS_BUDGET,
   registerGlassContainer,
   unregisterGlassContainer,
   useGlassBudget,
-  snapshotGlass,
-  useGlassSnapshot,
-  resolveGlass,
-  GlassSurface,
 } from './glass';
 export type {
   GlassKind,
@@ -75,10 +66,6 @@ export type {
   GlassLens,
   GlassPolicyMask,
   GlassDegradeResult,
-  GlassSnapshot,
-  GlassSpec,
-  ResolveGlassOptions,
   GlassBudgetEntry,
   GlassBudgetView,
-  GlassSurfaceProps,
 } from './glass';

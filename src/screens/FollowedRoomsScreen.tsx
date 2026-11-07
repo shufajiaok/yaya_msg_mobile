@@ -20,7 +20,6 @@ import {
   TextInput,
   StyleSheet,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import Video from 'react-native-video';
@@ -2356,14 +2355,10 @@ export default function FollowedRoomsScreen() {
           </View>
         } />
 
-          {/* 聊天工具条：高斯模糊玻璃（按深浅色 tint，不挡房间背景）*/}
+          {/* 聊天工具条（按深浅色实底，不挡房间背景）*/}
+          {/* 旧 expo-blur 引擎已删除（独立分支决策）；此处待 UI 重写接入 GlassKitView 原生引擎 */}
           <View style={[styles.chatToolsClip, { borderColor: palette.innerStroke }]}>
-            <BlurView
-              intensity={70}
-              tint={resolvedTheme === 'dark' ? 'dark' : 'light'}
-              experimentalBlurMethod="dimezisBlurView"
-              style={styles.chatTools}
-            >
+            <View style={[styles.chatTools, { backgroundColor: palette.surfaceElevated }]}>
           {/* 分段切换：大房间 / 小房间 */}
           <View style={[styles.segment, { backgroundColor: palette.fill2 }]}>
             <TouchableOpacity
@@ -2416,7 +2411,7 @@ export default function FollowedRoomsScreen() {
               <MaterialCommunityIcons name="microphone" size={18} color={palette.onTint} />
             </ScalePressable>
           ) : null}
-            </BlurView>
+            </View>
           </View>
 
         {roomSearchOpen ? (
