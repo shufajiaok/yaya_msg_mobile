@@ -14,6 +14,14 @@ import { MiniPlayer } from '../components/MiniPlayer';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import { usePlayerStore } from '../player/store/playerStore';
 import { usePalette } from '../theme';
+import GlassTestScreen, { GLASS_TEST_ROUTE } from '../screens/GlassTestScreen';
+
+/**
+ * ⚠️ 临时首屏开关（GlassKit 引擎验证用，用户指令 2026-11-07）：
+ * true = 打开 App 直进玻璃测试页；验证完成后改回 false 即恢复原首屏。
+ * 测试页路由 GlassTest 常驻注册，不受本开关影响。
+ */
+const GLASS_TEST_FIRST = true;
 import HomeScreen from '../screens/HomeScreen';
 import MessagesScreen from '../screens/MessagesScreen';
 import MediaScreen from '../screens/MediaScreen';
@@ -295,6 +303,7 @@ export default function AppNavigator() {
       <NavigationContainer theme={themed}>
       <>
         <Stack.Navigator
+          initialRouteName={GLASS_TEST_FIRST ? GLASS_TEST_ROUTE : undefined}
           screenOptions={{
             headerShown: false,
             animation: 'none',
@@ -304,6 +313,7 @@ export default function AppNavigator() {
           }}
         >
           <Stack.Screen name="Main" component={MainTabs} />
+          <Stack.Screen name={GLASS_TEST_ROUTE} component={GlassTestScreen} />
           <Stack.Screen name="MessagesScreen" component={MessagesStackScreen} />
           <Stack.Screen name="LoginScreen" component={LoginStackScreen} />
           <Stack.Screen name="RechargeScreen" component={RechargeStackScreen} />

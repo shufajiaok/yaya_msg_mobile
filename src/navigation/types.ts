@@ -2,6 +2,7 @@ import { NavigatorScreenParams } from '@react-navigation/native';
 
 export type RootStackParamList = {
   Main: NavigatorScreenParams<TabParamList>;
+  GlassTest: undefined;
   MessagesScreen: undefined;
   LoginScreen: undefined;
   RechargeScreen: undefined;
