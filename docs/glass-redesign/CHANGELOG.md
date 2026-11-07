@@ -145,3 +145,50 @@
 - **typecheck / 真机**：`node_modules` 未装、无网络 → 未跑 `npm run typecheck`；四倍率实时重绘、API 31/33 实机双档、帧率、对比度均未实测。
 - **留 P1–P3**：G2（`budget` 消费者 / `lowEnd` 设备档位检测）、S5（import 归置）、`surfaceGlass*` 真删、274 处数值字面量硬编码圆角批改、`GlassSurface` 与页面视觉接线、玻璃组件规范接入。
 - **对象级基线校验**：`e324df4` 不在 shallow clone 对象库；源码内容已与 codeload tarball 逐字节核验，网络恢复后可补 `git fetch --depth 1 origin e324df4...` 复核。
+
+## 引擎重写 E1（2026-11-07）
+
+依据 `引擎重写清单.md`（路线裁决：抛掉 Compose、纯 Kotlin 原生引擎、零依赖）交付能力批次，**页面零接线**（§四 不动清单零越界）。commits：`4842a25`（原生核心）→ `d402735`（JS 桥接）→ 本 docs commit；**未推送**（断网，主理人统一推）。
+
+### 文件清单（新增 6 Kotlin + 新增 2 TSX + 修改 1，与清单 §三 一致）
+
+| 文件 | 动作 | 说明 |
+| --- | --- | --- |
+| `android/.../glasskit/GlassCaptureEngine.kt` | 新增 | SparseArray<tag→WeakReference<View>> 注册表；`capture()` 用 getLocationOnScreen 差值平移对齐，clip 玻璃覆盖区后 `targetView.draw(canvas)`；≤1080 宽降采样防 OOM；未布局/尺寸 0 返回 false |
+| `android/.../glasskit/GlassLensShader.kt` | 新增 | AGSL 源码常量 + RuntimeShader 构建（仅 API 33+）；SDF 圆角矩形 + 中心差分梯度法线 + 边缘折射位移 + R/G/B 三通道错开色散 |
+| `android/.../glasskit/GlassKitView.kt` | 新增 | onDraw 七步管线：捕获→模糊→透镜→tint(H1 钳 0.12)→压暗 #000→1dp #FFF@0.14 描边→圆角 Path clip；OnPreDrawListener 33ms 节流重绘；`setBlurEnabled` 总开关；不设 LAYER_TYPE_HARDWARE |
+| `android/.../glasskit/GlassKitManager.kt` | 新增 | SimpleViewManager，12 个 @ReactProp（blurDp/tintAlpha/tintColor(Color)/refractionPx/dispersionPx/cornerRadiusDp/dimmingAlpha/backdropTag/blurScale/tintScale/lensScale/blurEnabled），对齐 LiveExoViewManager 先例 |
+| `android/.../glasskit/GlassKitBackdropManager.kt` | 新增 | 空 FrameLayout；onAfterUpdateTransaction 注册（tag=getId()）、onDropViewInstance 注销 |
+| `android/.../glasskit/GlassKitPackage.kt` | 新增 | createNativeModules 空列表 + 两个 ViewManager |
+| `android/.../MainApplication.kt` | **修改** | 仅 `add(GlassKitPackage())` + 1 行 import（R-07 手动注册惯例） |
+| `src/native/GlassKitView.tsx` | 新增 | 类型化 requireNativeComponent；H2 双档门控 + reduceTransparency 门控 + 四倍率 store 订阅 |
+| `src/native/GlassKitBackdrop.tsx` | 新增 | forwardRef 包装，children 透传，ref 供 findNodeHandle 取 tag |
+
+### 关键实现决策
+
+1. **捕获方式**：`View.draw(canvas)` 子树采集（清单 §〇 路线核心）。坐标对齐用双方 `getLocationOnScreen` 差值算玻璃在背景坐标系偏移，canvas 先在恒等矩阵下 clipRect 玻璃覆盖区（省内存），再 translate(-offset)+scale(降采样) 绘制；复用位图每帧 `eraseColor(TRANSPARENT)` 防残影。采集上限 ≤1080 宽，超限等比降采样。
+2. **AGSL 契约**（GlassLensShader，uniform 与 GlassKitView 喂参一一对应）：`uBlurred`(shader)/`uSize`(float2)/`uRefractionPx`/`uDispersionPx`/`uCornerRadiusPx`。SDF 内部为负；**法线用 SDF 中心差分梯度**（eps=0.5px，免解析分段）。⚠️ **对清单原式符号订正**：原文 `edgeFactor = clamp(1 - sdf/uRefractionPx, 0, 1)`——SDF 形内恒为负 ⇒ 原式形内恒 ≥1、经 clamp 退化为恒 1，整幅内容被均匀平移而非边缘折射；实现改为 `edgeFactor = clamp(1 + sdf/uRefractionPx, 0, 1)`（贴边满位移、向内按 uRefractionPx 线性衰减到 0），符合清单 §二.3「edgeFactor 由到边界距离决定」意图。折射位移 `uv' = uv - normal*edgeFactor*uRefractionPx`（外向法线取负 ⇒ 采样点落向玻璃内部，边缘放大观感）；色散 R/G/B 以 uDispersionPx 的 1.0/0.5/0.0 倍错开采样后取 r/g/b 合成；形外返回透明（与圆角 clip 双保险）。
+3. **降级映射**（H2 双档，原生侧只处理 api 两档，其余四类由 JS 门控不挂载/传零）：
+   - API 31+ 且硬件画布：RenderNode + `RenderEffect.createBlurEffect(blurDp*blurScale*density, CLAMP)` 真高斯；
+   - API 26–30 / 软件画布：降采样 1/4 + 双线性放大近似（复用 canBlur 单档语义）；
+   - API 33+ 且 lensScale>0 且 refraction/dispersion>0：小位图作 BitmapShader(CLAMP)+本地矩阵 喂 RuntimeShader，uRefractionPx/uDispersionPx 乘 lensScale；否则跳过透镜（canLens 语义）；
+   - reduceTransparency：JS 传 blurEnabled=false → 原生整链兜底（不采集，画半透明兜底底色 + tint/压暗/描边）；
+   - H1：tint 最终 alpha = `min(tintAlpha*tintScale, 0.12)`，原生侧 coerceIn 钳制，JS 不重复算。
+4. **重绘触发**：backdrop 目标视图挂 `OnPreDrawListener`（恒返回 true 不拦截），33ms（≈30fps）节流：到点 `postInvalidate()`，未到点 `postInvalidateDelayed`；onDetachedFromWindow 与 onDropViewInstance 双路径清理；backdrop 晚挂载时 onDraw 惰性重试解析。
+
+### 验证结果（可做项已全做）
+
+- props 命名 JS↔原生逐一 grep 比对：12/12 一致（GlassKitManager @ReactProp ↔ GlassKitView.tsx GlassKitViewProps）。
+- 组件名/包名：`GlassKitView`/`GlassKitBackdrop` 在 Manager NAME、requireNativeComponent、Package 三处一致；包 `com.yk1z.yayamsg.glasskit`，MainApplication import 对齐。
+- AGSL 语法静态自查：`half4 main(float2 fragCoord)`、uniform shader/float/float2、用户函数、`uBlurred.eval()`、`half4(0.0)` splat 均为 RuntimeShader 合法子集；无保留字冲突。
+- **0 新增依赖**：`git diff --name-only -- '*.gradle' gradle.properties` = 0 条。
+- **不动清单 0 越界**：tracked 修改仅 MainApplication.kt（+2 行：import+注册）；页面/ GlassSurface/expo-blur/GlassCard/LiveExoViewManager/glass.ts 均 0 diff；`引擎重写清单.md` 保持 untracked 未混入。
+- **编译与真机验证未执行**：无 JDK/Android SDK、断网，`assembleDebug` 与 npm typecheck 均未跑；需 CI（ci-build 分支）或装好工具链后补跑。
+
+### 已知局限
+
+- SurfaceView 视频帧采不到（`View.draw` 不含 SurfaceView 内容，清单 §〇/§五 已登记）；直播画面上玻璃仍是膜层+压暗。PixelCopy 增强本批不做。
+- API 33+ 透镜路径的模糊输入为「降采样 1/4+双线性」近似（RenderEffect 离屏出位图需 HardwareRenderer/ImageReader，本批不引入）；31–32 非透镜路径在硬件画布上仍是真高斯。
+- 采集/重绘链路按 UI 线程约束实现（registry synchronized 仅兜底）；多玻璃面板同指一个 backdrop 时各自独立捕获，未做共享缓存。
+- 新架构（bridgeless）下 SimpleViewManager 需迁 Fabric/Expo Modules——清单 §六 已登记，本批渲染核心（View 层）可原样迁移换壳。
+- requireNativeComponent 的 HostComponent ref 类型在 node_modules 未装环境下未经 typecheck 实证，装依赖后首次 typecheck 需关注 `ref as Ref<NativeViewInstance>` 两处断言。
