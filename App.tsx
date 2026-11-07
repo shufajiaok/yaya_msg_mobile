@@ -1,10 +1,8 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { View, Text, ActivityIndicator, ImageBackground, Modal, Image, TouchableOpacity, Linking, StyleSheet, Animated, Easing, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AppNavigator from './src/navigation';
 import { loadSettings } from './src/services/settings';
-import { loadPlayerPrefs } from './src/player/store/playerStore';
 import { useResolvedTheme } from './src/hooks/useAppTheme';
 import { useSettingsStore, useMemberStore, useAnnouncementStore, useUpdateStore } from './src/store';
 import { loadMembers } from './src/utils/members';
@@ -12,7 +10,7 @@ import { fetchJson } from './src/utils/network';
 import { loadCachedMemberData } from './src/services/memberData';
 import { prefetchR2Music } from './src/api/r2Music';
 import { initWasm, WebViewSigner } from './src/auth';
-import { startRadioForeground, stopRadioForeground, updateRadioLyric, onRadioStopRequested, syncRadioPosition } from './src/native/LivePlayer';
+import { startRadioForeground, stopRadioForeground, updateRadioLyric, onRadioStopRequested, onRadioControlRequested , syncRadioPosition } from './src/native/LivePlayer';
 import {
   subscribeExo,
   exoPlayTrack,
@@ -39,7 +37,6 @@ import { useSafeAreaInsets } from './src/hooks/useSafeAreaInsets';
 // 本工程已在 autolinking 排除 react-native-safe-area-context（无原生 Provider），
 // 因此在顶层提供纯 JS 经验值上下文，让 react-navigation 走「已有 insets → 普通 View」分支。
 import { SafeAreaInsetsContext } from 'react-native-safe-area-context';
-import { KeyboardProvider } from 'react-native-keyboard-controller';
 
 // v2.6.5: 给 react-navigation 提供安全区上下文（纯 JS 经验值，无原生依赖）
 function SafeAreaBridge({ children }: { children: React.ReactNode }) {
@@ -117,14 +114,12 @@ async function pushExoAfterSwitch() {
     let resumeAt = 0;
     if (Number(st.seekTarget) > 0) {
       resumeAt = Number(st.seekTarget);
-      useMusicPlayerStore.getState().consumeSeekTarget();
+      useMusicPlayerStore.setState({ seekTarget: 0 });
     }
     const vol = /(gnz\.hk|gnz-music|music\.gnz)/i.test(url) ? 0.86 : 1;
     const rep = st.playMode === 'single' ? 1 : 0;
     const send = (art: string) => {
-      // 正常路径诊断：每首歌会打两条（立即起播 + 封面补发）。dev 输出，release 编译期消除，
-      // 避免导出日志里被这类高频 WARN 淹没（用户会误以为出错了）。
-      if (__DEV__) console.warn(`[push-global] ${art ? 'art-refresh' : 'initial'} url=${String(url).slice(0, 50)} resumeAt=${resumeAt}`);
+      console.warn(`[push-global] ${art ? 'art-refresh' : 'initial'} url=${String(url).slice(0, 50)} resumeAt=${resumeAt}`);
       exoPlayTrack({
         url,
         title: String(track.title || '音乐'),
@@ -500,6 +495,29 @@ function MusicForegroundBridge() {
       st.setPlaybackState('paused');
     }
   }), []);
+  // 通知栏媒体控制（播放/暂停、上一首、下一首）→ 驱动 MusicEngine
+  useEffect(() => onRadioControlRequested((action, value) => {
+    const st = useMusicPlayerStore.getState();
+    if (action === 'play') {
+      if (st.playbackState === 'paused' && st.queue.length) MusicEngine.resume();
+    } else if (action === 'pause') {
+      if (st.playbackState === 'playing') st.setPlaybackState('paused');
+    } else if (action === 'play_pause') {
+      if (st.playbackState === 'playing') st.setPlaybackState('paused');
+      else if (st.playbackState === 'paused') MusicEngine.resume();
+      else if (!st.queue.length) return;
+    } else if (action === 'seek' && value) {
+      // 系统媒体条拖动 seek（value=毫秒）→ 交给 MusicEngine（消费后清 seekTarget）
+      st.setSeekTarget(Math.max(0, Number(value) / 1000));
+    } else if (action === 'next') {
+      MusicEngine.next();
+    } else if (action === 'prev') {
+      MusicEngine.prev();
+    } else if (action === 'stop') {
+      stopRadioForeground();
+      if (st.playbackState === 'playing' || st.playbackState === 'paused') st.setPlaybackState('paused');
+    }
+  }), []);
   return null;
 }
 
@@ -561,8 +579,6 @@ export default function App() {
       try {
         const settings = await loadSettings();
         useSettingsStore.getState().setSettings(settings);
-        // 直播偏好（屏蔽进场/屏蔽特效）在进直播间之前恢复，避免先进直播再闪一次特效/进场
-        await loadPlayerPrefs();
       } catch (error: any) {
         if (mounted) setMessage(`设置加载失败：${error?.message || String(error)}`);
       }
@@ -622,12 +638,6 @@ export default function App() {
     : null;
 
   const content = (
-    /**
-     * KeyboardProvider：react-native-keyboard-controller 的根上下文。
-     * 键盘位置/高度改由原生 WindowInsetsAnimation 提供（RN 自带的 keyboardDidShow
-     * 在 edge-to-edge 下上报的高度可能远大于真实值，不能直接拿来算布局）。
-     */
-    <KeyboardProvider>
     <View style={{ flex: 1, backgroundColor: backgroundSource ? 'transparent' : palette.background }}>
       <StatusBar style={appTheme === 'dark' ? 'light' : 'dark'} />
       {backgroundLoadError ? (
@@ -680,11 +690,10 @@ export default function App() {
         </View>
       </Modal>
     </View>
-    </KeyboardProvider>
   );
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <>
       {!ready ? (
         // 原生开屏已展示 app 图标（与开屏同色纯背景，避免黑屏闪烁）；签名 WebView 仍在后台预热。
         <View style={{ flex: 1, backgroundColor: splashBg }} />
@@ -708,18 +717,18 @@ export default function App() {
       <WebViewSigner />
       {/* 音乐前台保活（后台播放通知栏控制 + 防进程被杀） */}
       <MusicForegroundBridge />
-    </GestureHandlerRootView>
+    </>
   );
 }
 
 // v2.6: Announcement modal styles
 const anStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 24 },
-  card: { borderRadius: 16, padding: 20, maxWidth: 400, width: '100%', maxHeight: '80%' }, // 背景色由内联 palette.surface 提供
+  card: { backgroundColor: '#fff', borderRadius: 16, padding: 20, maxWidth: 400, width: '100%', maxHeight: '80%' },
   header: { fontSize: 18, fontWeight: '700', marginBottom: 4 },
-  title: { fontSize: 15, fontWeight: '600', marginBottom: 10 }, // 颜色由内联 palette.label 提供
+  title: { fontSize: 15, fontWeight: '600', marginBottom: 10, color: '#333' },
   image: { width: '100%', height: 160, borderRadius: 10, marginBottom: 10 },
-  content: { fontSize: 14, lineHeight: 22, marginBottom: 16 }, // 颜色由内联 palette.labelSecondary 提供
+  content: { fontSize: 14, lineHeight: 22, color: '#555', marginBottom: 16 },
   btnRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
   btn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 8 },
   btnText: { color: '#fff', fontSize: 14, fontWeight: '600' },

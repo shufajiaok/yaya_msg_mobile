@@ -12,8 +12,6 @@ export interface Member {
   avatar: string;
   groupName: string;
   teamId: string;
-  /** 官方队伍 Logo（房间头部队伍标签用图；缺失时回退文字） */
-  teamLogo?: string;
   /** 成员状态分类（官方源优先）：active 在团 / left 退团 / graduated 毕业 / paused 暂休 / unknown 未知 */
   state?: string;
 }
@@ -304,8 +302,6 @@ export interface AppSettings {
   theme: Theme;
   language: LanguageSetting;
   p48Token: string;
-  /** 登录/请求身份：pocket48 = 口袋48 客户端身份，seine48 = 塞纳河48 客户端身份（appInfo/UA 不同） */
-  p48ClientProfile: 'pocket48' | 'seine48';
   bilibiliCookie: string;
   bilibiliUserInfo: any;
   msg_sort_order: 'asc' | 'desc';
@@ -322,24 +318,4 @@ export interface AppSettings {
   meet48Auth?: Meet48Auth | null;
   /** 画中画（系统小窗）：视频播放中切后台自动弹系统悬浮窗。默认关——不主动调用不弹 App 外小窗 */
   pip_auto: boolean;
-  /** 个性装扮：头像框 pfUrl（留空 = 不带；相对路径自动补 source1.48.cn） */
-  yaya_send_pfurl: string;
-  /** 个性装扮：队标 teamLogo（留空 = 不带） */
-  yaya_send_teamlogo: string;
-  /** 'on' = 自定义队标同时以成员身份（isStar）发送，官方客户端才会画队标；空 = 不伪装 */
-  yaya_send_is_star: string;
-  /** 个性装扮：勋章 badge（多个用逗号分隔；留空 = 不带） */
-  yaya_send_badge: string;
-  /** 口袋官方聊天气泡 id（0=默认）；发房间消息时随 bubbleId 发送 */
-  yaya_send_bubble_id: string;
-  /** 直播进场特效 id（选中即同步账号；空=不使用） */
-  yaya_live_effect_id: string;
-  /** 直播进场特效名称（仅展示用） */
-  yaya_live_effect_name: string;
-  /** 直播弹幕气泡 id（选中即同步账号；空=不使用） */
-  yaya_live_bubble_id: string;
-  /** 直播弹幕气泡名称（仅展示用） */
-  yaya_live_bubble_name: string;
-  /** 首页「私信」入口的未读红点角标。默认开 */
-  yaya_pm_unread_badge: boolean;
 }

@@ -46,7 +46,6 @@ public class LiveExoView extends FrameLayout {
   private float videoPixelRatio = 1f;
   private boolean released = false;
   private boolean audioOnly = false;
-  private boolean coverPortrait = false;
   /** JS 显式暂停（统一播放器控制条用；默认 false=自动播，等同 v2.7.3 行为） */
   private volatile boolean paused = false;
   private final com.facebook.react.uimanager.ThemedReactContext reactContext;
@@ -186,15 +185,6 @@ public class LiveExoView extends FrameLayout {
               }
             } catch (Throwable ignored) {
             }
-            // 关键兜底：新架构（bridgeless）下取不到 UIManagerModule，上面的 View 事件会被静默丢弃
-            // → 画面在播但 JS 永远停在「加载中…」。改走 NativeModule 事件（bridgeless 可用），
-            // 并在首帧后再补发两次，避免 JS 侧监听器尚未订阅就丢事件。
-            final String sizeUrl = url;
-            final int w = videoWidth;
-            final int h = videoHeight;
-            handler.post(() -> LivePlayerModule.emitLiveSize(sizeUrl, w, h));
-            handler.postDelayed(() -> LivePlayerModule.emitLiveSize(sizeUrl, w, h), 600L);
-            handler.postDelayed(() -> LivePlayerModule.emitLiveSize(sizeUrl, w, h), 2000L);
           }
         }
       });
@@ -219,8 +209,6 @@ public class LiveExoView extends FrameLayout {
 
   /** 重试耗尽后把失败原因发给 JS（LiveExoViewManager 注册的 onError） */
   private void emitErrorToJs(String reason) {
-    // 新架构下 UIManagerModule 事件会丢 → 同时走 NativeModule 事件（JS 侧两者都听）
-    LivePlayerModule.emitLiveError(url, reason);
     if (reactContext == null) return;
     try {
       com.facebook.react.uimanager.UIManagerModule uiManager =
@@ -244,11 +232,6 @@ public class LiveExoView extends FrameLayout {
     }
   }
 
-  public void setCoverPortrait(boolean coverPortrait) {
-    this.coverPortrait = coverPortrait;
-    applyAspectTransform();
-  }
-
   private void applyAspectTransform() {
     if (audioOnly) return; // 纯音频模式下不渲染画面，无需适配
     int hostW = getWidth();
@@ -259,10 +242,7 @@ public class LiveExoView extends FrameLayout {
 
     float scaleX = 1f;
     float scaleY = 1f;
-    if (coverPortrait && videoRatio < 1f && hostRatio < 1f) {
-      if (videoRatio > hostRatio) scaleX = videoRatio / hostRatio;
-      else scaleY = hostRatio / videoRatio;
-    } else if (videoRatio > hostRatio) {
+    if (videoRatio > hostRatio) {
       scaleY = hostRatio / videoRatio;
     } else {
       scaleX = videoRatio / hostRatio;

@@ -6,30 +6,11 @@ export const BILIBILI_API = 'https://api.bilibili.com';
 
 // 成员数据权威源：数据发布于 data.gnz.hk（GNZ48 团站数据库镜像）。
 // 进入软件由 AppNavigator 调用 ensureMemberData() 无条件同步最新。
-/**
- * 自建镜像成员库（推荐源）：GitHub Action 每日同步上游 + 应用本地 overrides/extra 后产出。
- * 见 member-db/README.md。换成自建域名时只改这一行。
- */
-export const MEMBERS_URL_SELF = 'https://cdn.jsdelivr.net/gh/Xenia0922/yaya_msg_mobile@main/member-db/dist/members.json';
-
-/**
- * 镜像的多 CDN 端点（按顺序重试，前一个失败才试下一个）。
- * 国内网络对 jsDelivr 各边缘节点的可达性差异极大：同一网络下 cdn.* 可能直接 TLS 握手失败，
- * 而其它域名正常。只用单域名会出现「镜像拉不到 → 回退官方目录 → channelId/yklzId 全丢（大/小房间消失）」。
- * 见 member-db/README.md。
- */
-export const MEMBERS_URL_SELF_LIST = [
-  MEMBERS_URL_SELF,
-  'https://fastly.jsdelivr.net/gh/Xenia0922/yaya_msg_mobile@main/member-db/dist/members.json',
-  'https://testingcf.jsdelivr.net/gh/Xenia0922/yaya_msg_mobile@main/member-db/dist/members.json',
-  'https://gcore.jsdelivr.net/gh/Xenia0922/yaya_msg_mobile@main/member-db/dist/members.json',
-];
-
-/** 上游 yk1z 库：自建源不可用时的回退（保证不全依赖自建可用性） */
 export const MEMBERS_URL = 'https://data.gnz.hk/members.json';
 
-export const APP_VERSION = '2.7.7';
+export const APP_VERSION = '2.7.5';
 
+// 成员数据原始仓库（yk1z 的牙牙消息电脑版），数据由其维护并发布。
 export const MEMBER_DATA_SOURCE_URL = 'https://github.com/yk1z/yaya_msg';
 
 export const BILIBILI_LIVE_CONFIG_URL = 'https://yaya-data.pages.dev/bilibili-live.json';

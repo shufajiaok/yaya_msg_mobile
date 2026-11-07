@@ -13,7 +13,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Animated, AppState, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useNavigation, useFocusEffect, useIsFocused } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import { CompositeNavigationProp } from '@react-navigation/native';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { StackNavigationProp } from '@react-navigation/stack';
@@ -32,17 +32,13 @@ import { Button } from '../components/Button';
 import { Skeleton } from '../components/Skeleton';
 import { FadeInView, ScalePressable } from '../components/Motion';
 import { NetworkImage } from '../components/NetworkImage';
-import { MarqueeText } from '../components/MarqueeText';
 import { useI18n } from '../i18n';
 import { pocketApi } from '../api/pocket48';
 import { externalApi } from '../api/external';
 import bilibiliApi from '../api/bilibili';
 import { BilibiliLiveRoom } from '../types';
 import { normalizeUrl, pickText, unwrapList } from '../utils/data';
-import { privateUnreadCount } from '../utils/privateUnread';
-import { AVATAR_THUMB_WIDTH } from '../utils/imageThumb';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 type HomeNavProp = CompositeNavigationProp<
   BottomTabNavigationProp<TabParamList, 'Home'>,
@@ -79,13 +75,17 @@ const QUICK: NavItem[] = [
 const TOOL_CHIPS: NavItem[] = [
   { title: '翻牌', desc: '', route: 'FlipScreen', icon: ICONS.FlipSend },
   { title: '上麦', desc: '', route: 'OnMicScreen', icon: ICONS.OnMic },
+  { title: '统计', desc: '', route: 'AnalysisScreen', icon: ICONS.Analysis },
+  { title: '社区', desc: '', route: 'CommunityScreen', icon: ICONS.Community },
   { title: '下载', desc: '', route: 'DownloadScreen', icon: ICONS.Download },
   { title: '账号', desc: '', route: 'LoginScreen', icon: ICONS.Login },
   { title: '设置', desc: '', route: 'Settings', icon: ICONS.Settings },
+  { title: '相册', desc: '', route: 'RoomAlbumScreen', icon: ICONS.RoomAlbum },
   { title: '公演', desc: '', route: 'OpenLiveScreen', icon: ICONS.OpenLive },
   { title: 'B站', desc: '', route: 'BilibiliLiveScreen', icon: ICONS.Bilibili },
+  { title: '微博', desc: '', route: 'MemberWeiboScreen', icon: ICONS.MemberWeibo },
+  { title: '行程', desc: '', route: 'TripScreen', icon: ICONS.Trip },
   { title: '鸡腿榜', desc: '', route: 'MeleeRankScreen', icon: ICONS.MeleeRank },
-  { title: '相册', desc: '', route: 'RoomAlbumScreen', icon: ICONS.RoomAlbum },
   { title: '数据库', desc: '', route: 'DatabaseScreen', icon: ICONS.Database },
   { title: '发票', desc: '', route: 'InvoiceScreen', icon: ICONS.Invoice },
 ];
@@ -125,10 +125,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
     p,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
   ]);
-}
-
-function isAppForeground(): boolean {
-  return AppState.currentState !== 'background' && AppState.currentState !== 'inactive';
 }
 
 function normalizeLiveList(res: any): LiveCardItem[] {
@@ -194,10 +190,6 @@ function LiveBanner({ item, onPress }: { item: LiveCardItem; onPress: () => void
             style={styles.liveBannerCover}
             resizeMode="cover"
             fallback={false}
-            // 16:9 全宽横幅：显示约 1080×609px（480dpi），请求「装进 1080 盒子」即可
-            // —— 服务端等比 contain，3:4 竖图会回 ~810×1080，不放大也不损失清晰度，
-            // 体积却从原图 ~780KB 降到约 1/8（此前不传 thumbnail = 每张都下原图）
-            thumbnail={1080}
             onError={handleCoverError}
           />
         ) : (
@@ -225,9 +217,6 @@ function LiveBanner({ item, onPress }: { item: LiveCardItem; onPress: () => void
 
 export default function HomeScreen() {
   const navigation = useNavigation<HomeNavProp>();
-  const isFocused = useIsFocused();
-  const focusedRef = useRef(isFocused);
-  focusedRef.current = isFocused;
   const settings = useSettingsStore((state) => state.settings);
   const palette = usePalette();
   const shadows = makeShadows(palette.name === 'dark');
@@ -243,9 +232,6 @@ export default function HomeScreen() {
   const [livesOk, setLivesOk] = useState(false);
   const [livesError, setLivesError] = useState('');
   const [bannerIndex, setBannerIndex] = useState(0);
-  /** 口袋私信未读数（红点角标）：进首页拉一次，失败静默为 0 */
-  const [pmUnread, setPmUnread] = useState(0);
-  const pmUnreadTokenRef = useRef('');
   const fetchedRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -275,7 +261,6 @@ export default function HomeScreen() {
   useEffect(() => { gongyanInfoRef.current = gongyanInfo; }, [gongyanInfo]);
 
   const fetchGongyanStatus = useCallback(async () => {
-    if (!focusedRef.current || !isAppForeground()) return;
     try {
       const rooms = await externalApi.fetchBilibiliConfig();
       // 五团固定顺序（按 GONGYAN_ROOMS 序，非 B站接口返回序 —— 接口顺序跨轮不稳会导致行顺序跳动"抽风"）
@@ -297,6 +282,7 @@ export default function HomeScreen() {
           next[room.roomId] = !!prevLive[room.roomId];
         }
       });
+      setGongyanLive(next);
       // 在播房间并行抓取封面 + 直播标题（公演行展示真实封面与场次标题；6s 竞速超时）
       const liveIds = filtered.filter((room) => next[room.roomId]).map((room) => room.roomId);
       const infoResults = await Promise.allSettled(liveIds.map((id) => withTimeout(bilibiliApi.getRoomInfo(id), BILI_FAST_TIMEOUT)));
@@ -315,8 +301,6 @@ export default function HomeScreen() {
           infoMap[rid] = prevInfo[rid] || { title: '', cover: '' };
         }
       });
-      if (!focusedRef.current || !isAppForeground()) return;
-      setGongyanLive(next);
       setGongyanInfo(infoMap);
       setGongyanRooms(filtered);
       setGongyanOk(true);
@@ -329,15 +313,14 @@ export default function HomeScreen() {
         JSON.stringify({ rooms: filtered, live: next, info: infoMap }),
       ).catch(() => {});
     } catch (e: any) {
-      if (!focusedRef.current) return;
       // 刷新失败：保留旧数据继续展示（不闪骨架）；完全无数据时才记错误态
       if (!gongyanHasDataRef.current) setGongyanError(e?.message || String(e));
       // 初次失败 5s 后自动重试（最多 2 次），不必干等 60s 轮询
       if (gongyanRetryRef.current < 2) {
         gongyanRetryRef.current += 1;
         setTimeout(() => {
-          if (!mountedRef.current || !focusedRef.current) return;
-          if (isAppForeground()) fetchGongyanStatus();
+          if (!mountedRef.current) return;
+          if (AppState.currentState === 'active') fetchGongyanStatus();
         }, 5000);
       }
     }
@@ -363,7 +346,6 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    if (!isFocused) return;
     fetchGongyanStatus();
     gongyanTimer.current = setInterval(() => {
       // 切到后台时暂停轮询，回前台立即补一次（省电 + 不占后台网络）
@@ -377,7 +359,7 @@ export default function HomeScreen() {
       if (gongyanTimer.current) clearInterval(gongyanTimer.current);
       sub.remove();
     };
-  }, [fetchGongyanStatus, isFocused]);
+  }, [fetchGongyanStatus]);
 
   const liveGongyanRooms = useMemo(
     () => gongyanRooms.filter((room) => !!gongyanLive[room.roomId]),
@@ -405,11 +387,10 @@ export default function HomeScreen() {
   }, [token]);
 
   const fetchLives = useCallback(() => {
-    if (!focusedRef.current || !isAppForeground()) return;
     // 秒显上次缓存（stale-while-revalidate）：冷启动立即有内容，后台刷新
     AsyncStorage.getItem(LIVES_CACHE_KEY)
       .then((raw) => {
-        if (!raw || !focusedRef.current) return;
+        if (!raw) return;
         try {
           const cached = JSON.parse(raw);
           if (Array.isArray(cached) && cached.length && !fetchedRef.current) {
@@ -424,7 +405,6 @@ export default function HomeScreen() {
       10000,
     )
       .then((res: any) => {
-        if (!focusedRef.current || !isAppForeground()) return;
         if (!res) throw new Error('timeout');
         // 空壳防护：官方接口偶发返回 success/200 但 content 无 liveList 字段（限流/风控/异常），
         // 此时 normalizeLiveList 会解出空数组 → 误把"有直播"显示成"暂无成员直播"。
@@ -433,25 +413,33 @@ export default function HomeScreen() {
         const rawList = (res?.content ?? res?.data ?? res)?.liveList;
         if (!Array.isArray(rawList)) throw new Error('live list empty shell');
         const list = sortLivesByPreference(normalizeLiveList(res), followedIds, pinnedIds);
-        setLives(list);
-        fetchedRef.current = true;
-        setLivesOk(true);
-        setLivesError('');
-        livesRetryRef.current = 0;
-        AsyncStorage.setItem(LIVES_CACHE_KEY, JSON.stringify(list)).catch(() => {});
+        if (list.length) {
+          setLives(list);
+          setLivesOk(true);
+          setLivesError('');
+          livesRetryRef.current = 0;
+          AsyncStorage.setItem(LIVES_CACHE_KEY, JSON.stringify(list)).catch(() => {});
+        } else if (livesRef.current.length === 0) {
+          // 结构完整但确实无人开播：仅在本地本就无数据时落空态；
+          // 已有旧数据时保留旧列表（直播可能刚下播/接口瞬时空，等下一轮轮询纠正）
+          setLives([]);
+          setLivesOk(true);
+          setLivesError('');
+          livesRetryRef.current = 0;
+        }
       })
       .catch((e: any) => {
-        if (!focusedRef.current) return;
         // 有缓存/已有列表时网络失败不打断展示（保留内容，仅静默）；
         // 无任何数据时：记错误态 + 5s 后自动重试（最多 3 次，网络抖动自愈，不必等手动点重试）。
-        // 判断依据是当前无可展示数据，避免首屏失败后只剩 60s 轮询兜底。
+        // ⚠️ 判断依据是"当前无可展示数据"，不是 fetchedRef（后者首屏已置 true，
+        // 用它会让首屏失败永不进入错误态/重试，只剩 60s 轮询兜底 → 首页整段空白）。
         if (livesRef.current.length === 0) {
           setLivesError(e?.message || String(e));
           if (livesRetryRef.current < 3) {
             livesRetryRef.current += 1;
             setTimeout(() => {
-              if (!mountedRef.current || !focusedRef.current) return;
-              if (isAppForeground()) fetchLives();
+              if (!mountedRef.current) return;
+              if (AppState.currentState === 'active') fetchLives();
             }, 5000);
           }
         }
@@ -463,14 +451,15 @@ export default function HomeScreen() {
     setLives((prev) => (prev.length ? sortLivesByPreference(prev, followedIds, pinnedIds) : prev));
   }, [followedIds, pinnedIds]);
 
-  // 仅首页可见时请求和轮询；重新进入首页立即刷新。
-  const wasFocusedRef = useRef(false);
+  // 首屏拉取（fetchedRef 防重复）
   useEffect(() => {
-    if (!isFocused) { wasFocusedRef.current = false; return; }
-    if (!wasFocusedRef.current) {
-      wasFocusedRef.current = true;
-      fetchLives();
-    }
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    fetchLives();
+  }, [fetchLives]);
+
+  // 成员直播 60s 轮询 + 回前台立即刷新：避免「启动时网络差失败后永久骨架/错误态，只能手动重试」
+  useEffect(() => {
     const id = setInterval(() => {
       if (AppState.currentState === 'active') fetchLives();
     }, 60 * 1000);
@@ -478,45 +467,36 @@ export default function HomeScreen() {
       if (state === 'active') fetchLives();
     });
     return () => { clearInterval(id); sub.remove(); };
-  }, [fetchLives, isFocused]);
+  }, [fetchLives]);
 
   // banner 轮播：2.5s 自动切换下一条（最多轮前 4 条），切换带 crossfade + 位移动画。
-  // 与直播/公演轮询一致，仅首页可见且 App 前台时切换。
+  // B1 修复：与直播/公演 60s 轮询一致，仅前台运行时切换（后台不跑动画/不空转，回前台立即恢复）。
   const bannerCount = Math.min(4, lives.length);
   // B4 修复：渲染期安全下标 —— 轮询把 lives 变短（主播下播）时，bannerIndex 可能暂时越界；
   // 仅靠 effect 收敛会先渲染一帧 lives[idx]=undefined → banner 整块消失 → 下方列表跳位“抽风”。
   // 渲染期直接夹取，保证任何一帧 banner 都存在（dots 也跟随安全下标）。
   const safeBannerIndex = bannerCount > 0 ? Math.min(bannerIndex, bannerCount - 1) : 0;
   useEffect(() => {
-    if (!isFocused || bannerCount <= 1) return;
+    if (bannerCount <= 1) return;
     let timer: ReturnType<typeof setInterval> | null = null;
-    let transition: Animated.CompositeAnimation | null = null;
     const startLoop = () => {
-      if (timer || !isAppForeground()) return;
+      if (timer) return;
       timer = setInterval(() => {
-        if (!isAppForeground()) return;
-        transition = Animated.parallel([
-          Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
-          Animated.timing(slideAnim, { toValue: 10, duration: 150, useNativeDriver: true }),
-        ]);
-        transition.start(({ finished }) => {
-          if (!finished || !focusedRef.current || !isAppForeground()) return;
-          setBannerIndex((i) => ((i < 0 ? 0 : Math.min(i, bannerCount - 1)) + 1) % bannerCount);
-          // 退场结束后再回弹，避免两个动画同时驱动 slideAnim。
-          transition = Animated.parallel([
-            Animated.timing(fadeAnim, { toValue: 1, duration: 240, useNativeDriver: true }),
-            Animated.spring(slideAnim, { toValue: 0, speed: 26, bounciness: 5, useNativeDriver: true }),
-          ]);
-          transition.start(() => { transition = null; });
-        });
+        if (AppState.currentState !== 'active') return;
+        // 退场再入场
+        Animated.sequence([
+          Animated.parallel([
+            Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
+            Animated.timing(slideAnim, { toValue: 10, duration: 150, useNativeDriver: true }),
+          ]),
+          Animated.timing(fadeAnim, { toValue: 1, duration: 240, useNativeDriver: true }),
+        ]).start();
+        Animated.spring(slideAnim, { toValue: 0, speed: 26, bounciness: 5, useNativeDriver: true }).start();
+        setBannerIndex((i) => ((i < 0 ? 0 : Math.min(i, bannerCount - 1)) + 1) % bannerCount);
       }, 2500);
     };
     const stopLoop = () => {
       if (timer) { clearInterval(timer); timer = null; }
-      transition?.stop();
-      transition = null;
-      fadeAnim.setValue(1);
-      slideAnim.setValue(0);
     };
     startLoop();
     const sub = AppState.addEventListener('change', (s) => {
@@ -524,7 +504,7 @@ export default function HomeScreen() {
       else stopLoop();
     });
     return () => { sub.remove(); stopLoop(); };
-  }, [bannerCount, fadeAnim, slideAnim, isFocused]);
+  }, [bannerCount, fadeAnim, slideAnim]);
 
   // B2 修复：lives 数量变化（60s 轮询）后 bannerIndex 收敛到有效范围（dots 点击/轮播前进以渲染期安全值为主）
   useEffect(() => {
@@ -538,57 +518,6 @@ export default function HomeScreen() {
   const musicIndex = useMusicPlayerStore((s) => s.currentIndex);
   const musicPlaybackState = useMusicPlayerStore((s) => s.playbackState);
   const currentTrack = musicQueue[musicIndex] || null;
-  /**
-   * 当前歌词行：selector 返回字符串（Object.is 比较），position 高频更新时
-   * 只有「行文本变化」才触发首页重渲染，避免每 250ms 刷整页。
-   */
-  /**
-   * minibar 歌词行（2026-10-18 重做）。
-   *
-   * 此前直接按 store.position 取行：一旦位置心跳停更（页面不在 / 原生心跳丢失），
-   * 歌词永远停在第一句（用户看到一直显示「如果有你在 -」这种版权信息行）。
-   *
-   * 现在：不订阅 position（避免 4 次/秒整页重渲染），改成 500ms 本地 ticker：
-   *  - 记录「最近一次 store.position + 对应时刻」作为锚点；
-   *  - 播放中时按墙上时钟补时（锚点 + 已过秒数），与 store.position 取较大值；
-   *  - 只在「命中的行号变化」时才 setState，渲染开销可忽略。
-   */
-  const lyricsList = useMusicPlayerStore((s) => s.lyrics);
-  const playbackForLyric = useMusicPlayerStore((s) => s.playbackState);
-  const [lyricIdx, setLyricIdx] = useState(-1);
-  const lyricAnchor = useRef({ pos: 0, at: Date.now(), last: -1 });
-
-  useEffect(() => {
-    if (!isFocused) return;
-    const tick = () => {
-      const st = useMusicPlayerStore.getState();
-      const list = st.lyrics;
-      const pos = Number(st.position) || 0;
-      const a = lyricAnchor.current;
-      if (pos !== a.last) lyricAnchor.current = { pos, at: Date.now(), last: pos };
-      const playing = st.playbackState === 'playing' || st.playbackState === 'loading';
-      const anchorNow = lyricAnchor.current;
-      const est = playing ? anchorNow.pos + (Date.now() - anchorNow.at) / 1000 : pos;
-      const use = Math.max(pos, est);
-      if (!list.length) {
-        setLyricIdx((v) => (v === -1 ? v : -1));
-        return;
-      }
-      let lo = 0;
-      let hi = list.length - 1;
-      let hit = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (list[mid].time <= use) { hit = mid; lo = mid + 1; } else { hi = mid - 1; }
-      }
-      setLyricIdx((v) => (v === hit ? v : hit));
-    };
-    tick();
-    const id = setInterval(tick, 500);
-    return () => clearInterval(id);
-  }, [lyricsList, playbackForLyric, isFocused]);
-
-  const lyricLine = lyricIdx >= 0 ? (lyricsList[lyricIdx]?.text || '') : '';
 
   const handleNav = useCallback((item: NavItem) => {
     if (item.params) (navigation as any).navigate(item.route, item.params);
@@ -615,26 +544,22 @@ export default function HomeScreen() {
       openMusicLibrary();
       return;
     }
-    void MusicEngine.resume().catch(() => {});
+    MusicEngine.resume();
     openMusicLibrary();
   }, [openMusicLibrary]);
-
-  /** minibar：上一首 / 下一首 / 暂停播放 */
-  const handleMusicPrev = useCallback(() => { void MusicEngine.prev(); }, []);
-  const handleMusicNext = useCallback(() => { void MusicEngine.next(); }, []);
-  const handleMusicToggle = useCallback(() => {
-    const s = useMusicPlayerStore.getState();
-    if (!s.queue[s.currentIndex]) return;
-    if (s.playbackState === 'idle') { void MusicEngine.resume().catch(() => {}); return; }
-    MusicEngine.togglePause();
-  }, []);
 
   /** 关闭音乐：清播放上下文（queue 保留以便再播），idle → 停 Exo 服务与系统媒体通知 */
   const handleStopMusic = useCallback(() => {
     const s = useMusicPlayerStore.getState();
     if (!s.queue.length || s.playbackState === 'idle') return;
-    // ⚠️ 不能只 setState：原生 Exo 的声源不受 store 控制，清了状态还会继续播
-    MusicEngine.stop();
+    useMusicPlayerStore.setState({
+      url: '',
+      playbackState: 'idle',
+      position: 0,
+      duration: 0,
+      seekTarget: 0,
+      lyrics: [],
+    });
   }, []);
 
   const hour = new Date().getHours();
@@ -642,31 +567,6 @@ export default function HomeScreen() {
     hour < 5 ? t('夜深了') : hour < 11 ? t('早上好') : hour < 14 ? t('中午好') : hour < 18 ? t('下午好') : t('晚上好');
 
   const quick = QUICK.map((i) => ({ ...i, title: t(i.title) }));
-
-  // 私信未读红点：仅在已登录时拉取；失败静默（不打扰）
-  useFocusEffect(useCallback(() => {
-    // 设置里有开关（默认开）：关掉就不再拉取、不显示角标
-    if (!token || settings.yaya_pm_unread_badge === false) { pmUnreadTokenRef.current = ''; setPmUnread(0); return; }
-    if (pmUnreadTokenRef.current !== token) { pmUnreadTokenRef.current = token; setPmUnread(0); }
-    let alive = true;
-    let fetching = false;
-    const refreshUnread = () => {
-      if (!alive || fetching || AppState.currentState !== 'active') return;
-      fetching = true;
-      pocketApi.getUnreadMessageCount()
-        .then((res: any) => {
-          if (!alive) return;
-          const count = privateUnreadCount(res);
-          if (count !== null) setPmUnread(count);
-        })
-        .catch(() => {})
-        .finally(() => { fetching = false; });
-    };
-    refreshUnread();
-    const timer = setInterval(refreshUnread, 30000);
-    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') refreshUnread(); });
-    return () => { alive = false; clearInterval(timer); sub.remove(); };
-  }, [token, settings.yaya_pm_unread_badge]));
   const toolChips = TOOL_CHIPS.map((i) => ({ ...i, title: t(i.title) }));
 
   const banner = lives[safeBannerIndex];
@@ -691,7 +591,7 @@ export default function HomeScreen() {
 
   return (
     <View style={[styles.outer, { backgroundColor: usePageBackground() }]}>
-      {}
+      {/* 顶栏与全站统一：大标题 24/800 左对齐、无返回键（tab 根页） */}
       <ScreenHeader title={t('牙牙消息')} hideBack />
       <ScrollView
         style={{ flex: 1 }}
@@ -737,32 +637,21 @@ export default function HomeScreen() {
             onAction={() => handleNav({ title: '', desc: '', route: 'Media', icon: '' })}
           />
 
-          {/* 加载中渲染骨架（此前是 null → 首屏该区块只有标题、下方空白，弱网下像坏了） */}
-          {!livesOk && !livesError ? (
-            <Skeleton width="100%" height={148} radius={20} style={{ marginTop: 12 }} />
-          ) : livesError && !livesOk ? (
-            <GlassSurface
-              radius={20}
-              role="card"
-              style={[styles.liveStateCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}
-            >
+          {!livesOk && !livesError ? null : livesError && !livesOk ? (
+            <View style={[styles.liveStateCard, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
               <MaterialCommunityIcons name="wifi-off" size={20} color={palette.labelTertiary} />
               <Text style={[styles.liveStateText, { color: palette.labelSecondary }]} numberOfLines={2}>
                 {t('直播列表加载失败')}
               </Text>
               <Button title={t('重试')} variant="tinted" size="sm" onPress={fetchLives} />
-            </GlassSurface>
+            </View>
           ) : livesOk && lives.length === 0 ? (
-            <GlassSurface
-              radius={20}
-              role="card"
-              style={[styles.liveStateCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}
-            >
+            <View style={[styles.liveStateCard, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
               <MaterialCommunityIcons name="video-off" size={20} color={palette.labelTertiary} />
               <Text style={[styles.liveStateText, { color: palette.labelSecondary }]}>{t('此时段暂无成员直播')}</Text>
-            </GlassSurface>
+            </View>
           ) : livesOk ? (
-            <FadeInView delay={0} duration={320}>
+            <FadeInView delay={80} duration={320}>
               {banner ? (
                 <View style={{ marginBottom: 12 }}>
                   {/* crossfade + 位移动画包裹 banner */}
@@ -800,74 +689,59 @@ export default function HomeScreen() {
             onAction={() => handleNav({ title: '', desc: '', route: 'BilibiliLiveScreen', icon: '' })}
           />
           {!gongyanOk && !gongyanError ? null : gongyanError && !gongyanOk ? (
-            <FadeInView delay={0} duration={300}>
-              <GlassSurface
-                radius={20}
-                role="card"
-                style={[styles.liveStateCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}
-              >
+            <FadeInView delay={80} duration={300}>
+              <View style={[styles.liveStateCard, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
                 <MaterialCommunityIcons name="wifi-off" size={20} color={palette.labelTertiary} />
                 <Text style={[styles.liveStateText, { color: palette.labelSecondary }]} numberOfLines={2}>
                   {t('公演直播加载失败')}
                 </Text>
                 <Button title={t('重试')} variant="tinted" size="sm" onPress={() => { setGongyanError(''); fetchGongyanStatus(); }} />
-              </GlassSurface>
+              </View>
             </FadeInView>
           ) : liveGongyanRooms.length === 0 ? (
-            <FadeInView delay={0} duration={320}>
-              <GlassSurface
-                radius={20}
-                role="card"
-                style={[styles.liveStateCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}
-              >
+            <FadeInView delay={80} duration={320}>
+              <View style={[styles.liveStateCard, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
                 <MaterialCommunityIcons name="broadcast-off" size={20} color={palette.labelTertiary} />
                 <Text style={[styles.liveStateText, { color: palette.labelSecondary }]}>{t('此时段暂无公演直播')}</Text>
-              </GlassSurface>
+              </View>
             </FadeInView>
           ) : (
-            <FadeInView delay={0} duration={320}>
+            <FadeInView delay={80} duration={320}>
               {liveGongyanRooms.map((room, index) => (
-                <FadeInView key={room.roomId} delay={0} duration={160} distance={10}>
+                <FadeInView key={room.roomId} delay={index < 12 ? 60 + index * 25 : 0} duration={300} distance={10}>
                   <ScalePressable
                     onPress={() => (navigation as any).navigate('BilibiliLiveScreen', { roomId: room.roomId, roomName: room.name })}
                     pressedScale={0.97}
-                    style={{ marginBottom: 8 }}
+                    style={[styles.liveRow, shadows.xs, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth, marginBottom: 8 }]}
                   >
-                    {/* ⚠️【性能】列表逐卡不要用 GlassSurface —— 每张卡一个 BlurView，
-                        滚动时逐帧重算 RenderEffect 模糊，三星等模糊较慢的机型直接掉帧。
-                        项目铁律：列表/网格用实底圆角 + 细描边（surfaceGlassStrong）。 */}
-                    <View
-                      style={[styles.liveRow, shadows.xs, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
-                    >
-                      <View style={[styles.liveRowThumb, { backgroundColor: palette.tintSoft }]}>
-                        {gongyanInfo[room.roomId]?.cover ? (
-                          <NetworkImage
-                            source={{ uri: gongyanInfo[room.roomId].cover }}
-                            style={styles.liveRowThumb}
-                            resizeMode="cover"
-                          />
-                        ) : (
-                          <MaterialCommunityIcons name="television-classic" color={palette.tint} size={22} />
-                        )}
-                      </View>
-                      <View style={{ flex: 1, marginLeft: 12, minWidth: 0 }}>
-                        <Text style={[styles.liveRowTitle, { color: palette.label }]} numberOfLines={1}>
-                          {gongyanInfo[room.roomId]?.title || room.name || t('房间号：{id}', { id: room.roomId })}
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
-                          <View style={[styles.gongyanDotWrap, { backgroundColor: palette.success }]}>
-                            <View style={[styles.gongyanDot, { backgroundColor: palette.success }]} />
-                          </View>
-                          <Text style={[styles.liveRowNick, { color: palette.success, marginTop: 0, marginLeft: 5 }]}>{t('直播中')}</Text>
-                          {room.name ? (
-                            <Text style={[styles.liveRowNick, { color: palette.labelTertiary, marginTop: 0, marginLeft: 8 }]} numberOfLines={1}>
-                              {room.name}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </View>
-                      <MaterialCommunityIcons name="chevron-right" color={palette.labelTertiary} size={18} />
+                    <View style={[styles.liveRowThumb, { backgroundColor: palette.tintSoft }]}>
+                      {gongyanInfo[room.roomId]?.cover ? (
+                        <NetworkImage
+                          source={{ uri: gongyanInfo[room.roomId].cover }}
+                          style={styles.liveRowThumb}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <MaterialCommunityIcons name="television-classic" color={palette.tint} size={22} />
+                      )}
                     </View>
+                    <View style={{ flex: 1, marginLeft: 12, minWidth: 0 }}>
+                      <Text style={[styles.liveRowTitle, { color: palette.label }]} numberOfLines={1}>
+                        {gongyanInfo[room.roomId]?.title || room.name || t('房间号：{id}', { id: room.roomId })}
+                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                        <View style={[styles.gongyanDotWrap, { backgroundColor: palette.success }]}>
+                          <View style={[styles.gongyanDot, { backgroundColor: palette.success }]} />
+                        </View>
+                        <Text style={[styles.liveRowNick, { color: palette.success, marginTop: 0, marginLeft: 5 }]}>{t('直播中')}</Text>
+                        {room.name ? (
+                          <Text style={[styles.liveRowNick, { color: palette.labelTertiary, marginTop: 0, marginLeft: 8 }]} numberOfLines={1}>
+                            {room.name}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-right" color={palette.labelTertiary} size={18} />
                   </ScalePressable>
                 </FadeInView>
               ))}
@@ -880,29 +754,26 @@ export default function HomeScreen() {
           <SectionHeader title={t('快捷入口')} />
           <View style={styles.quickRow}>
             {quick.map((item, index) => (
-              <FadeInView key={item.title} delay={0} duration={160} distance={8} style={[styles.quickCell, { width: quickCellW }]}>
+              <FadeInView key={item.title} delay={index < 12 ? 60 + index * 25 : 0} duration={280} distance={8} style={[styles.quickCell, { width: quickCellW }]}>
                 <ScalePressable
                   onPress={() => handleNav(item)}
                   pressedScale={0.94}
                   style={styles.quickCellInner}
                 >
-                    {/* 半透明底色让背景透出，避免为每个入口重复模糊。 */}
                     <View
-                      style={[styles.chip, { backgroundColor: palette.name === 'dark' ? 'rgba(28,28,34,0.68)' : 'rgba(255,255,255,0.58)', borderColor: palette.name === 'dark' ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.66)' }]}
+                      style={[
+                        styles.chip,
+                        shadows.xs,
+                        {
+                          backgroundColor: palette.surfaceGlassStrong,
+                          borderColor: palette.innerStroke,
+                        },
+                      ]}
                     >
                       <View style={[styles.chipIcon, { backgroundColor: palette.tintSoft }]}>
                         <MaterialCommunityIcons name={item.icon} color={palette.tint} size={16} />
                       </View>
-                      <Text style={[styles.chipText, { color: palette.label }]} numberOfLines={1}>{item.title}</Text>
-                      {/* 私信未读红点角标 */}
-                      {item.route === 'PrivateMessagesScreen' && pmUnread > 0 && settings.yaya_pm_unread_badge !== false ? (
-                        <View style={{
-                          position: 'absolute', top: -4, right: -4, minWidth: 17, height: 17, borderRadius: 9,
-                          backgroundColor: palette.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4,
-                        }}>
-                          <Text style={{ color: '#FFFFFF', fontSize: 10, fontWeight: '800' }}>{pmUnread > 99 ? '99+' : String(pmUnread)}</Text>
-                        </View>
-                      ) : null}
+                      <Text style={[typography.footnote, { color: palette.label, fontWeight: '600' }]} numberOfLines={1}>{item.title}</Text>
                     </View>
                   </ScalePressable>
                 </FadeInView>
@@ -914,83 +785,52 @@ export default function HomeScreen() {
         {currentTrack && trackTitle ? (
           <View style={styles.sectionOuter}>
             <SectionHeader title={t('最近播放')} />
-            <FadeInView delay={0} duration={320}>
-              {/* 音乐 minibar：封面 + 标题 + 当前一句歌词 + 上一首/暂停/下一首，状态与正在播放的音乐同步 */}
-              <GlassCard strong padding={10} radius={20}>
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <ScalePressable onPress={openMusicLibrary} pressedScale={0.94} hitSlop={4}>
+            <FadeInView delay={150} duration={320}>
+              <ScalePressable onPress={openMusicLibrary} pressedScale={0.97}>
+                <GlassCard strong padding={12} radius={20}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                     <View style={[styles.musicCover, { backgroundColor: palette.tintSoft }]}>
                       {currentTrack?.coverUrl || currentTrack?.cover ? (
                         <NetworkImage
                           source={{ uri: (currentTrack.coverUrl || currentTrack.cover || '') as string }}
                           style={styles.musicCover}
                           resizeMode="cover"
-                          thumbnail={AVATAR_THUMB_WIDTH}
                         />
                       ) : (
-                        <MaterialCommunityIcons name="music-note" color={palette.tint} size={22} />
+                        <MaterialCommunityIcons name="music-note" color={palette.tint} size={24} />
                       )}
                     </View>
-                  </ScalePressable>
-                  <ScalePressable onPress={openMusicLibrary} pressedScale={0.98} style={{ flex: 1, marginHorizontal: 8, minWidth: 0 }}>
-                    <Text style={[typography.headline, { color: palette.label }]} numberOfLines={1}>{trackTitle}</Text>
-                    <Text style={[typography.footnote, { color: palette.labelSecondary, marginTop: 2 }]} numberOfLines={1}>
-                      {trackArtist || resumeLabel}
-                    </Text>
-                  </ScalePressable>
-                  {/* 控制区：主按钮（播放/暂停）实心高对比，切歌为次级描边，视觉层级分明 */}
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                    <ScalePressable
-                      onPress={handleMusicPrev}
-                      pressedScale={0.9}
-                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                      style={[styles.miniBtn, { backgroundColor: 'rgba(128,128,128,0.14)' }]}
-                    >
-                      <MaterialCommunityIcons name="skip-previous" color={palette.label} size={20} />
-                    </ScalePressable>
-                    <ScalePressable
-                      onPress={handleMusicToggle}
-                      pressedScale={0.9}
-                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                      style={[styles.miniBtn, { backgroundColor: palette.tint }]}
-                    >
-                      <MaterialCommunityIcons
-                        name={musicPlaybackState === 'playing' ? 'pause' : musicPlaybackState === 'loading' ? 'dots-horizontal' : 'play'}
-                        color={palette.onTint}
-                        size={22}
-                      />
-                    </ScalePressable>
-                    <ScalePressable
-                      onPress={handleMusicNext}
-                      pressedScale={0.9}
-                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                      style={[styles.miniBtn, { backgroundColor: 'rgba(128,128,128,0.14)' }]}
-                    >
-                      <MaterialCommunityIcons name="skip-next" color={palette.label} size={20} />
-                    </ScalePressable>
+                    <View style={{ flex: 1, marginHorizontal: 12, minWidth: 0 }}>
+                      <Text style={[typography.headline, { color: palette.label }]} numberOfLines={1}>{trackTitle}</Text>
+                      {trackArtist ? (
+                        <Text style={[typography.footnote, { color: palette.labelSecondary, marginTop: 2 }]} numberOfLines={1}>
+                          {trackArtist}
+                        </Text>
+                      ) : null}
+                    </View>
                     {musicPlaybackState === 'playing' || musicPlaybackState === 'paused' ? (
+                      // 关闭音乐：正在播放/暂停时显示（由 MusicEngine stop 链清空服务/系统卡）
                       <ScalePressable
                         onPress={handleStopMusic}
-                        pressedScale={0.85}
-                        hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-                        style={{ width: 16, height: 30, alignItems: 'center', justifyContent: 'center' }}
+                        pressedScale={0.9}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 17,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          backgroundColor: 'rgba(128,128,128,0.12)',
+                          marginRight: 10,
+                        }}
                       >
-                        <MaterialCommunityIcons name="close" color={palette.labelTertiary} size={15} />
+                        <MaterialCommunityIcons name="close" color={palette.labelSecondary} size={18} />
                       </ScalePressable>
                     ) : null}
+                    <Pill label={resumeLabel} accent onPress={handleResumeMusic} style={{ alignSelf: 'center' }} />
                   </View>
-                </View>
-                {/* 歌词独占一行、整卡宽：窄列里跑马灯只能看到 7-9 个字，怎么滚都像被截断 */}
-                <ScalePressable onPress={openMusicLibrary} pressedScale={0.99} style={{ marginTop: 6 }}>
-                  <MarqueeText
-                    text={lyricLine || t('暂无歌词')}
-                    style={[typography.footnote, { color: palette.labelSecondary }]}
-                    containerStyle={{ minHeight: 17 }}
-                    speed={22}
-                    pause={1400}
-                  />
-                </ScalePressable>
-              </GlassCard>
+                </GlassCard>
+              </ScalePressable>
             </FadeInView>
           </View>
         ) : null}
@@ -998,32 +838,24 @@ export default function HomeScreen() {
         {/* 工具：单行横向 chips */}
         <View style={styles.sectionOuter}>
           <SectionHeader title={t('工具')} />
-          <FadeInView delay={0} duration={320}>
+          <FadeInView delay={190} duration={320}>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.toolChipsContent}
               style={{ marginHorizontal: -spacing.md }}
             >
-              {/* ⚠️ 工具 chip 不能用快捷入口的固定格宽（quickCellW）：
-                  360dp 屏 quickCellW=76，扣掉图标 28 + gap 4 + 上下左右 padding 8 只剩 36dp，
-                  而 12px 中文三字正好 36dp —— 零余量，实测「鸡腿榜 / 数据库」会被 ellipsize 成「鸡腿…」。
-                  宽度改为内容自适应 + 最小宽度，横排本来就可滚动，宽一点不影响布局。 */}
               {toolChips.map((item) => (
                 <ScalePressable
                   key={item.title}
                   onPress={() => handleNav(item)}
                   pressedScale={0.94}
-                  style={{ minWidth: Math.round(quickCellW * 0.8) }}
+                  style={[styles.toolChip, shadows.xs, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.innerStroke }]}
                 >
-                  <View
-                    style={[styles.chip, styles.toolChip, { backgroundColor: palette.name === 'dark' ? 'rgba(28,28,34,0.68)' : 'rgba(255,255,255,0.58)', borderColor: palette.name === 'dark' ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.66)' }]}
-                  >
-                    <View style={[styles.chipIcon, { backgroundColor: palette.tintSoft }]}>
-                      <MaterialCommunityIcons name={item.icon} color={palette.tint} size={16} />
-                    </View>
-                    <Text style={[styles.chipText, { color: palette.label }]} numberOfLines={1}>{item.title}</Text>
+                  <View style={[styles.toolChipIcon, { backgroundColor: palette.tintSoft }]}>
+                    <MaterialCommunityIcons name={item.icon} color={palette.tint} size={16} />
                   </View>
+                  <Text style={[typography.footnote, { color: palette.label, fontWeight: '600' }]} numberOfLines={1}>{item.title}</Text>
                 </ScalePressable>
               ))}
             </ScrollView>
@@ -1043,7 +875,9 @@ export default function HomeScreen() {
   );
 }
 
-
+/** 指示点随动动画：膨胀 + 变色。
+ *  外层固定等宽槽位（16）居中，保证 active 横条与其它小点的中心距均匀对齐；
+ *  宽度动画用 JS driver（width 不支持 native driver，否则横竖屏/轮播切换时宽度错乱）。 */
 function AnimatedDots({ active, color, idle, onPress }: { active: boolean; color: string; idle: string; onPress?: () => void }) {
   const w = useRef(new Animated.Value(active ? 16 : 6)).current;
   const c = useRef(new Animated.Value(active ? 1 : 0)).current;
@@ -1133,13 +967,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 10,
-    borderRadius: 20,
+    borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
   },
   liveRowThumb: {
     width: 52,
     height: 52,
-    borderRadius: 14,
+    borderRadius: 12,
     overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1161,7 +995,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     padding: 14,
-    borderRadius: 20,
+    borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
   },
   liveStateText: { flex: 1, fontSize: 13, lineHeight: 18 },
@@ -1172,26 +1006,22 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
-    height: 46,
-    paddingHorizontal: 4,
-    gap: 4,
+    paddingRight: 12,
+    paddingVertical: 7,
   },
-  /** 工具 chip：左右留白更大 + 不压缩文字，保证「鸡腿榜 / 数据库」完整显示 */
-  toolChip: { paddingHorizontal: 10, justifyContent: 'flex-start' },
   quickRow: { flexDirection: 'row', gap: 8 },
   quickCell: {},
   quickCellInner: { width: '100%' },
   chipIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 9,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     alignItems: 'center',
     justifyContent: 'center',
-    flexShrink: 0,
+    marginRight: 8,
+    marginLeft: 6,
   },
-  chipText: { fontSize: 12, lineHeight: 16, fontWeight: '600', flexShrink: 1 },
-  miniBtn: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  musicCover: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  musicCover: { width: 52, height: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   toolChipsContent: {
     paddingRight: 8,
     gap: 8,
@@ -1199,5 +1029,21 @@ const styles = StyleSheet.create({
     // 防横向 ScrollView 高度塌缩：显式 minHeight + 垂直居中，保证图标不被截断
     alignItems: 'center',
     minHeight: 46,
+  },
+  toolChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  toolChipIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
   },
 });

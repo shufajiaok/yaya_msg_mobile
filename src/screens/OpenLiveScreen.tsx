@@ -3,11 +3,8 @@ import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
   BackHandler,
-  ActivityIndicator,
   Image,
   Linking,
-  Modal,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -30,7 +27,6 @@ import { enqueueDownload } from '../services/downloads';
 import { errorMessage, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
 import { formatTimestamp } from '../utils/format';
 import { usePalette } from '../theme';
-import { GlassSurface } from '../components/GlassSurface';
 
 interface OpenLiveItem {
   key: string;
@@ -160,7 +156,6 @@ export default function OpenLiveScreen() {
   const palette = usePalette();
   const { t } = useI18n();
   const showToast = useUiStore((state) => state.showToast);
-  const token = useSettingsStore((state) => state.settings.p48Token);
   const [member, setMember] = useState<Member | null>(null);
   const [items, setItems] = useState<OpenLiveItem[]>([]);
   const [query, setQuery] = useState('');
@@ -171,8 +166,6 @@ export default function OpenLiveScreen() {
   const [listError, setListError] = useState('');
   const [playing, setPlaying] = useState<{ url: string; title: string } | null>(null);
   const loadingRef = useRef(false);
-  const participantRequest = useRef(0);
-  const [participants, setParticipants] = useState<{ title: string; loading: boolean; error: string; rows: { id: string; name: string; avatar: string; team: string }[] } | null>(null);
 
   // 播放器生命周期已由统一 PlayerScreen/FullscreenManager 管理（横屏/竖屏/PiP/返回键）
 
@@ -265,28 +258,6 @@ export default function OpenLiveScreen() {
     }
   };
 
-  const showParticipants = async (item: OpenLiveItem) => {
-    const request = ++participantRequest.current;
-    setParticipants({ title: item.title, loading: true, error: '', rows: [] });
-    if (!token) {
-      setParticipants({ title: item.title, loading: false, error: t('登录后可查看参与成员'), rows: [] });
-      return;
-    }
-    try {
-      const res = await pocketApi.getOpenLiveMemberRank(item.liveId);
-      if (participantRequest.current !== request) return;
-      const rows = (Array.isArray(res?.content) ? res.content : []).map((entry: any) => ({
-        id: String(entry?.user?.userId || ''),
-        name: String(entry?.user?.userName || entry?.user?.nickName || '').trim(),
-        avatar: normalizeUrl(String(entry?.user?.userAvatar || '')),
-        team: String(entry?.userTeam?.teamName || ''),
-      })).filter((entry: { id: string; name: string }) => entry.name && /^[1-9]\d{0,31}$/.test(entry.id));
-      setParticipants({ title: item.title, loading: false, error: '', rows });
-    } catch (error) {
-      if (participantRequest.current === request) setParticipants({ title: item.title, loading: false, error: errorMessage(error), rows: [] });
-    }
-  };
-
   if (playing) {
     // 统一播放器（重写）：公演回放 → PlayerScreen（控制条/全屏/内核切换/错误重试内置）
     return (
@@ -350,14 +321,14 @@ export default function OpenLiveScreen() {
             loading ? (
               <View style={styles.skeletonWrap}>
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <GlassSurface radius={20} role="card" key={i} style={[styles.skeletonCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+                  <View key={i} style={[styles.skeletonCard, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
                     <Skeleton width={56} height={56} radius={12} />
                     <View style={{ marginLeft: 12, flex: 1 }}>
                       <Skeleton width="70%" height={13} />
                       <Skeleton width="40%" height={10} style={{ marginTop: 8 }} />
                       <Skeleton width="50%" height={10} style={{ marginTop: 8 }} />
                     </View>
-                  </GlassSurface>
+                  </View>
                 ))}
               </View>
             ) : listError ? (
@@ -374,16 +345,14 @@ export default function OpenLiveScreen() {
               {loading ? '' : hasMore ? t('上滑加载更多') : t('没有更多了')}
             </Text>
           ) : null}
-          renderItem={({ item }) => (
+          renderItem={({ item, index }) => (
+            <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={360}>
               <ScalePressable
+                style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.hairline }]}
                 activeOpacity={0.85}
                 pressedScale={0.97}
                 onPress={() => playItem(item)}
                 onLongPress={() => downloadItem(item)}
-              >
-              {/* 列表卡不用玻璃：每卡一个 BlurView 滚动会逐帧重算模糊（用户反馈卡顿）——半透明实底卡 */}
-              <View
-                style={[styles.card, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth, borderRadius: 20, overflow: 'hidden' }]}
               >
                 {item.cover ? (
                   <Image source={{ uri: item.cover }} style={[styles.cover, { backgroundColor: palette.fill2 }]} resizeMode="cover" />
@@ -397,35 +366,18 @@ export default function OpenLiveScreen() {
                   <Text style={[styles.meta, { color: palette.labelSecondary }]} numberOfLines={1}>{item.nickname || shortMemberName(member) || t('成员')}</Text>
                   <View style={styles.cardFoot}>
                     <Text style={[styles.time, { color: palette.labelSecondary }]}>{formatTimestamp(item.msgTime)}</Text>
-                    <TouchableOpacity accessibilityRole="button" onPress={(event) => { event.stopPropagation(); void showParticipants(item); }} style={[styles.badge, { backgroundColor: palette.tintSoft }]}>
-                      <MaterialCommunityIcons name="account-group-outline" size={12} color={palette.tint} />
-                      <Text style={[styles.badgeText, { color: palette.tint }]}>{t('参与成员')}</Text>
-                    </TouchableOpacity>
+                    <View style={[styles.badge, { backgroundColor: palette.tintSoft }]}>
+                      <MaterialCommunityIcons name="play-circle-outline" size={12} color={palette.tint} />
+                      <Text style={[styles.badgeText, { color: palette.tint }]}>{t('可看')}</Text>
+                    </View>
                   </View>
                 </View>
                 <MaterialCommunityIcons name="chevron-right" size={20} color={palette.labelTertiary} style={styles.chevron} />
-              </View>
               </ScalePressable>
+            </FadeInView>
           )}
         />
       </FadeInView>
-      <Modal visible={!!participants} transparent animationType="fade" onRequestClose={() => { participantRequest.current++; setParticipants(null); }}>
-        <View style={styles.modalBackdrop}>
-          <View style={[styles.participantsSheet, { backgroundColor: palette.surfaceGlassStrong }]}>
-            <View style={styles.participantsHeader}>
-              <Text style={[styles.cardTitle, { color: palette.label, flex: 1 }]} numberOfLines={1}>{participants?.title} · {t('参与成员')}</Text>
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel={t('关闭')} onPress={() => { participantRequest.current++; setParticipants(null); }}><MaterialCommunityIcons name="close" size={24} color={palette.labelSecondary} /></TouchableOpacity>
-            </View>
-            {participants?.loading ? <ActivityIndicator color={palette.tint} style={{ margin: 24 }} /> : participants?.error ? <Text style={[styles.participantsMessage, { color: palette.labelSecondary }]}>{participants.error}</Text> : participants?.rows.length ? (
-              <ScrollView>{participants.rows.map((entry) => <View key={entry.id} style={styles.participantRow}>
-                {entry.avatar ? <Image source={{ uri: entry.avatar }} style={styles.participantAvatar} /> : <View style={[styles.participantAvatar, { backgroundColor: palette.fill2 }]} />}
-                <Text style={{ color: palette.label, flex: 1 }}>{entry.name}</Text>
-                {entry.team ? <Text style={{ color: palette.labelSecondary }}>{entry.team}</Text> : null}
-              </View>)}</ScrollView>
-            ) : <Text style={[styles.participantsMessage, { color: palette.labelSecondary }]}>{t('暂无参与成员数据')}</Text>}
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -444,8 +396,8 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, fontSize: 15, padding: 0, margin: 0 },
   status: { fontSize: 12, lineHeight: 18 },
   list: { padding: 14, paddingBottom: 112 },
-  card: { flexDirection: 'row', alignItems: 'center', padding: 10, marginVertical: 4, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
-  cover: { width: 56, height: 56, borderRadius: 14 },
+  card: { flexDirection: 'row', alignItems: 'center', padding: 10, marginVertical: 4, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
+  cover: { width: 56, height: 56, borderRadius: 12 },
   coverPlaceholder: { alignItems: 'center', justifyContent: 'center' },
   cardBody: { flex: 1, minWidth: 0, paddingLeft: 12 },
   cardTitle: { fontSize: 14, fontWeight: '700', lineHeight: 20 },
@@ -471,19 +423,13 @@ const styles = StyleSheet.create({
   playerRetryText: { fontSize: 13, fontWeight: '800' },
   externalBtn: { margin: 16, minHeight: 44, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   externalText: { fontWeight: '900' },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  participantsSheet: { maxHeight: '70%', minHeight: 160, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18 },
-  participantsHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
-  participantsMessage: { textAlign: 'center', marginVertical: 24 },
-  participantRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 7 },
-  participantAvatar: { width: 36, height: 36, borderRadius: 18 },
   skeletonWrap: { padding: 4 },
   skeletonCard: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 10,
     marginVertical: 4,
-    borderRadius: 20,
+    borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
   },
 });

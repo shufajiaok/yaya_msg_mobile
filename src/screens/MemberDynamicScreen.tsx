@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import ScreenHeader from '../components/ScreenHeader';
-import { ScalePressable } from '../components/Motion';
+import { FadeInView, ScalePressable } from '../components/Motion';
 import MemberPicker from '../components/MemberPicker';
 import ZoomImageModal from '../components/ZoomImageModal';
 import pocketApi from '../api/pocket48';
@@ -110,8 +110,9 @@ export default function MemberDynamicScreen() {
     setRefreshing(false);
   }, [refresh]);
 
-  const renderItem = ({ item }: { item: DynItem }) => (
-    <View style={[styles.card, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
+  const renderItem = ({ item, index }: { item: DynItem; index: number }) => (
+    <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={360}>
+      <View style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
         {item.ownerName ? (
           <View style={styles.ownerRow}>
             {item.ownerAvatar ? (
@@ -155,7 +156,8 @@ export default function MemberDynamicScreen() {
           </View>
         )}
         <View style={[styles.hairline, { backgroundColor: palette.hairline }]} />
-    </View>
+      </View>
+    </FadeInView>
   );
 
   return (
@@ -212,7 +214,7 @@ const avatarSize = 40;
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
   list: { padding: 8, paddingBottom: 40 },
-  card: { borderRadius: 20, padding: 14, marginVertical: 4 },
+  card: { borderRadius: 16, padding: 14, marginVertical: 4 },
   ownerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   ownerAvatar: { width: avatarSize, height: avatarSize, borderRadius: avatarSize / 2, marginRight: 10, overflow: 'hidden' },
   ownerMeta: { flex: 1, minWidth: 0 },
@@ -229,6 +231,6 @@ const styles = StyleSheet.create({
   hairline: { height: StyleSheet.hairlineWidth, marginTop: 12 },
   footer: { textAlign: 'center', fontSize: 12, paddingVertical: 10 },
   skeletonWrap: { padding: 8 },
-  skeletonCard: { borderRadius: 20, padding: 14, marginVertical: 4, borderWidth: StyleSheet.hairlineWidth },
+  skeletonCard: { borderRadius: 16, padding: 14, marginVertical: 4, borderWidth: StyleSheet.hairlineWidth },
   skeletonHead: { flexDirection: 'row' },
 });

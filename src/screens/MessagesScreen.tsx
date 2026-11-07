@@ -1,4 +1,11 @@
-
+/**
+ * MessagesScreen · 消息检索 v2.6 布局重做
+ * - 顶部成员选择改为行卡（48 圆底图标 + 主标题成员名 + 副标题「共 N 位成员」+ chevron，ScalePressable）
+ * - 搜索条按规范（圆角 14 fill2 底 + magnify 图标 + 清除按钮）
+ * - 消息列表改「气泡卡行」：sender 名 13/700 tint + 时间 10 右对齐 + 正文 14，行卡圆角 16
+ * - 成员选择 Modal 改底部 sheet（Modal transparent + 底部圆角 radii.sheet=22 + 顶部 handle + 搜索条 + 带头像+名字+team 的虚拟化行）
+ * 业务逻辑 / API / 数据流 / 路由 / i18n 原文一律不动，仅重组布局。
+ */
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { PerfFlatList } from '../components/PerfFlatList';
 
@@ -6,7 +13,7 @@ import {
   View, Text, TextInput, StyleSheet, Modal, ScrollView,
 } from 'react-native';
 import { useSettingsStore, useMemberStore, useUiStore } from '../store';
-import { ScalePressable } from '../components/Motion';
+import { FadeInView, ScalePressable } from '../components/Motion';
 import { CenterSpinner } from '../components/Loaders';
 import { EmptyState, ErrorState } from '../components/StateViews';
 import ScreenHeader from '../components/ScreenHeader';
@@ -19,7 +26,6 @@ import { usePalette, radii, radiiAlias, usePageBackground } from '../theme';
 import { typography } from '../theme/typography';
 import { useI18n } from '../i18n';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 function msgTime(item: any): number {
   const value = Number(item.msgTime || item.messageTime || item.ctime || item.time || item.createTime || 0);
@@ -87,13 +93,24 @@ export default function MessagesScreen() {
   }, [messages, search]);
 
   const renderMsgItem = useCallback(({ item }: { item: any }) => (
-    <View style={[styles.msg, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth, borderRadius: 20 }]}>
+    <FadeInView delay={80} duration={300} distance={8}>
+      <View
+        style={[
+          styles.msg,
+          {
+            backgroundColor: palette.surface,
+            borderColor: palette.hairline,
+            borderWidth: StyleSheet.hairlineWidth,
+          },
+        ]}
+      >
         <View style={styles.msgHeader}>
           <Text style={[styles.msgSender, { color: palette.tint }]} numberOfLines={1}>{item.senderName || item.senderNickName || t('成员')}</Text>
           <Text style={[styles.msgTime, { color: palette.labelTertiary }]}>{formatTimestamp(item.msgTime || item.time || item.ctime)}</Text>
         </View>
         <Text style={[styles.msgBody, { color: palette.labelSecondary }]}>{messageText(item) || t('[空消息]')}</Text>
-    </View>
+      </View>
+    </FadeInView>
   ), [palette, t]);
 
   return (
@@ -101,10 +118,10 @@ export default function MessagesScreen() {
       <ScreenHeader title={t('消息检索')} />
 
       {/* 顶部留白区 */}
-      <GlassSurface radius={20} role="card" style={styles.topBar}>
+      <View style={styles.topBar}>
         {/* 成员选择行卡：48 圆底图标 + 成员名 + 「共 N 位成员」 + chevron */}
         <ScalePressable
-          style={[styles.pickerRow, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
+          style={[styles.pickerRow, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
           onPress={() => setPickerOpen(true)}
           pressedScale={0.98}
           activeOpacity={0.9}
@@ -141,12 +158,12 @@ export default function MessagesScreen() {
             </ScalePressable>
           ) : null}
         </View>
-      </GlassSurface>
+      </View>
 
       {/* 成员选择底部 sheet */}
       <Modal visible={pickerOpen} transparent animationType="slide" onRequestClose={() => setPickerOpen(false)}>
         <View style={[styles.sheetShade, { backgroundColor: usePageBackground() }]}>
-          <GlassSurface radius={20} role="card" style={[styles.sheetPanel, { backgroundColor: 'transparent', borderColor: palette.innerStroke, borderWidth: StyleSheet.hairlineWidth }]}>
+          <View style={[styles.sheetPanel, { backgroundColor: palette.surface, borderColor: palette.innerStroke, borderWidth: StyleSheet.hairlineWidth }]}>
             {/* 顶部 handle */}
             <View style={styles.sheetHandleWrap}>
               <View style={[styles.sheetHandle, { backgroundColor: palette.fill3 }]} />
@@ -175,7 +192,8 @@ export default function MessagesScreen() {
             <PerfFlatList
               data={pickerList}
               keyExtractor={(item) => `${item.id}-${item.channelId}`}
-              renderItem={({ item }) => (
+              renderItem={({ item, index }) => (
+                <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={260} distance={8}>
                   <ScalePressable
                     style={styles.memberRow}
                     onPress={() => {
@@ -195,6 +213,7 @@ export default function MessagesScreen() {
                     </View>
                     <MaterialCommunityIcons name="chevron-right" color={palette.labelTertiary} size={18} />
                   </ScalePressable>
+                </FadeInView>
               )}
               ListEmptyComponent={<EmptyState icon="account-search-outline" title={t('成员列表为空')} />}
             />
@@ -206,7 +225,7 @@ export default function MessagesScreen() {
             >
               <Text style={[typography.headline, { color: palette.label, fontWeight: '600' }]}>{t('关闭')}</Text>
             </ScalePressable>
-          </GlassSurface>
+          </View>
         </View>
       </Modal>
 
@@ -269,14 +288,14 @@ const styles = StyleSheet.create({
   pickerAvatar: {
     width: 48,
     height: 48,
-    borderRadius: 22,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
   pickerTag: {
     width: 32,
     height: 32,
-    borderRadius: 20,
+    borderRadius: 16,
     backgroundColor: 'rgba(0,0,0,0.04)',
     alignItems: 'center',
     justifyContent: 'center',

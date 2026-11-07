@@ -61,10 +61,7 @@ export function normalizeUrl(value: any): string {
   const raw = String(value).trim();
   if (!raw) return '';
   if (raw.startsWith('//')) return `https:${raw}`;
-  // ⚠️ 相对路径按「宿主」拼，不能一律拼 source.48.cn：
-  // 48 图床（avatar/mediasource/backstage…）→ source.48.cn；
-  // 用户徽章/头像框等资源实际在 source1.48.cn（拼错域名 → 勋章框加载 404/不渲染，2026-10-19 用户反馈）。
-  if (raw.startsWith('/')) return `https://${/^(avatar|mediasource|backstage)\b/i.test(raw.slice(1)) ? 'source.48.cn' : 'source1.48.cn'}${raw}`;
+  if (raw.startsWith('/')) return `https://source.48.cn${raw}`;
   return raw;
 }
 
@@ -72,47 +69,28 @@ export function parseMaybeJson(value: any): any {
   if (!value) return null;
   if (typeof value === 'object') return value;
   if (typeof value !== 'string') return null;
-  // ⚠️ 必须先替换长数字再 parse：JSON.parse 对 15+ 位数字**不会失败**，只会静默丢精度，
-  // 「先 parse 失败再修」的写法永远走不到修复分支（2026-10-19 审计 D3）。
-  const fixed = value.replace(/:\s*([0-9]{15,})/g, ':"$1"');
-  try { return JSON.parse(fixed); } catch {
-    // 替换后仍失败 → 按原始文本再试一次（可能是转义/编码问题，非长数字导致）
-    try { return JSON.parse(value); } catch { return null; }
+  try { return JSON.parse(value); } catch {
+    const fixed = value.replace(/:\s*([0-9]{15,})/g, ':"$1"');
+    try { return JSON.parse(fixed); } catch { return null; }
   }
 }
 
-// 表情映射：官方 PopoEmoticons 107 tag → 本地表情图（require 资源，与官方客户端同款表情）。
-// 文本里的 [xx] 标签渲染为表情图片而非 unicode 近似字符（[发呆] 等此前直接漏渲染，2026-10-19 用户反馈）。
-// 映射表见 ./emojiMap（生成自官方 emoji.xml Tag↔File）。
-import EMOJI_MAP from './emojiMap';
-
-export type EmojiPart = string | { emoji: string; source: any };
-
-/** 把文本按 [表情] 标签切成 文本/表情图 片段（供消息气泡内联渲染） */
-export function splitEmojiParts(text: string): EmojiPart[] {
-  if (!text) return [];
-  const parts: EmojiPart[] = [];
-  const re = /\[([^\]]+)\]/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const src = EMOJI_MAP[m[0]];
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    if (src) parts.push({ emoji: m[0], source: src });
-    else parts.push(m[0]);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
-}
+const EMOJI_MAP: Record<string, string> = {
+  '[色]': '😍', '[爱心]': '❤️', '[亲亲]': '😚', '[生病]': '😷', '[大哭]': '😭', '[微笑]': '🙂', '[酷]': '😎', '[坏笑]': '😏',
+  '[惊恐]': '😱', '[愉快]': '😊', '[憨笑]': '😄', '[悠闲]': '😌', '[奋斗]': '💪', '[大笑]': '😆', '[疑问]': '❓', '[嘘]': '🤫',
+  '[晕]': '😵', '[衰]': '😞', '[骷髅]': '💀', '[敲打]': '🔨', '[再见]': '👋', '[擦汗]': '😓', '[抠鼻]': '👃', '[鼓掌]': '👏',
+  '[糗大了]': '😳', '[左哼哼]': '😤', '[右哼哼]': '😤', '[哈欠]': '🥱', '[鄙视]': '👎', '[委屈]': '🥺', '[快哭了]': '😿', '[阴险]': '😈',
+  '[吓]': '😨', '[可怜]': '🥺', '[菜刀]': '🔪', '[西瓜]': '🍉', '[啤酒]': '🍺', '[篮球]': '🏀', '[乒乓]': '🏓', '[咖啡]': '☕',
+  '[饭]': '🍚', '[猪头]': '🐷', '[玫瑰]': '🌹', '[凋谢]': '🥀', '[嘴唇]': '💋', '[心碎]': '💔', '[蛋糕]': '🎂', '[闪电]': '⚡',
+  '[炸弹]': '💣', '[刀]': '🔪', '[足球]': '⚽', '[瓢虫]': '🐞', '[便便]': '💩', '[月亮]': '🌙', '[太阳]': '☀️', '[礼物]': '🎁',
+  '[拥抱]': '🤗', '[强]': '👍', '[弱]': '👎', '[握手]': '🤝', '[胜利]': '✌️', '[抱拳]': '🙏', '[勾引]': '☝️', '[拳头]': '✊',
+  '[差劲]': '👎', '[爱你]': '🤟', '[NO]': '🙅', '[OK]': '👌', '[跳跳]': '💃', '[发抖]': '🥶', '[怄火]': '😡', '[转圈]': '💫',
+  '[磕头]': '🙇', '[回头]': '🔙', '[跳绳]': '🏃', '[挥手]': '🙋', '[激动]': '🤩', '[街舞]': '🕺', '[献吻]': '😽', '[左太极]': '☯️', '[右太极]': '☯️',
+};
 
 export function replaceEmojiText(text: string): string {
   if (!text) return text;
-  return text.replace(/\[([^\]]+)\]/g, (match: string) => {
-    const src = EMOJI_MAP[match];
-    // 图片映射在纯文本场景（消息列表预览/搜索）保留原始 [xx] 标签（避免出现 [object Object]）
-    return typeof src === 'string' ? src : match;
-  });
+  return text.replace(/\[([^\]]+)\]/g, (match: string) => EMOJI_MAP[match] || match);
 }
 
 export function messagePayload(item: any): any {
@@ -120,40 +98,9 @@ export function messagePayload(item: any): any {
   const body = parseMaybeJson(raw);
   if (body?.message) return parseMaybeJson(body.message);
   if (body?.msg) return parseMaybeJson(body.msg);
-  if (body && typeof body === 'object') {
-    // 实时推送把官方 bodys 原文塞进了 bodys.text（JSON 字符串）。不解析的话，
-    // REPLY 消息在气泡里会原样显示 {"replyInfo":{...},"messageType":"REPLY"}。
-    const inlineText = typeof body.text === 'string' ? body.text.trim() : '';
-    if (inlineText.startsWith('{')) {
-      const inner = parseMaybeJson(inlineText);
-      if (inner && typeof inner === 'object' && (inner.replyInfo || inner.giftReplyInfo || inner.messageType)) {
-        return { ...body, ...inner };
-      }
-    }
-    return body;
-  }
+  if (body) return body;
   if (typeof raw === 'string') return raw;
   return null;
-}
-
-/**
- * 复制 / 引用用的兜底：如果拿到的仍是整段 JSON（别人把 REPLY 原文当文本粘出来了），
- * 只取正文，别让 {"replyInfo":...} 继续被复制、引用、再发出去。
- */
-export function humanizeRawMessageText(raw: string): string {
-  const text = String(raw || '').trim();
-  if (!text.startsWith('{')) return text;
-  try {
-    const body = JSON.parse(text);
-    const info = body?.replyInfo || body?.giftReplyInfo;
-    if (!info) return text;
-    const own = String(info.text || '').trim();
-    const quoted = String(info.replyText || '').trim();
-    const name = String(info.replyName || '').trim();
-    return own || (name ? `回复 ${name}：${quoted}` : quoted) || text;
-  } catch {
-    return text;
-  }
 }
 
 export function messageText(item: any): string {
@@ -173,13 +120,6 @@ export function messageText(item: any): string {
   }
 
   if (typeof body === 'string') return replaceEmojiText(body);
-
-  // last/message/get 返回的 lastMsgList[] 只有 msgContent（无 bodys/msgType）——
-  // 房间列表大/小房间预览走的就是这条，缺这段兜底会导致「有最新消息但预览空白」
-  const lastPreview = item?.msgContent ?? item?.content ?? item?.message;
-  if (typeof lastPreview === 'string' && lastPreview.trim() && !lastPreview.startsWith('{') && !lastPreview.startsWith('[')) {
-    return replaceEmojiText(lastPreview);
-  }
 
   if (type === 'TEXT') {
     if (body && typeof body === 'object') {

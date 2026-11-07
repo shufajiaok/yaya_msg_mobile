@@ -1,50 +1,34 @@
-/**
- * 房间相册 —— 重写版（2026-10-12）
- *
- * 旧实现（531 行，`0ee880f` 以「有问题未实现」删除后本轮短暂恢复）实测三处硬伤，本版针对性重写：
- *  1. **2 列网格整行塌成一张全宽变形图、50 张图一张都看不见** —— 旧版每个网格项外面包了
- *     `FadeInView` 但没给它宽度，内层卡片的 `flex:1` 没有可依据的宽度。
- *     本版：**格容器自己 `width:'50%'`**（不用 flex:1，奇数张时最后一张也不会被拉成整行），
- *     且**不再逐项包 FadeInView**（50 项逐个入场动画既卡又容易出布局问题）。
- *  2. **相册页顶部挂着一张房间背景大图** —— 相册页不该出现房间背景图，本版**整块删除**，
- *     连带那次多余的 roomMeta 请求（房间名对浏览相册没有价值，模式由分段控件表达）。
- *  3. **状态文案混乱**：`status` 初值就是「暂无数据」，加载完成后又同时弹 toast + 行内文字。
- *     本版：状态机收敛为「未选成员 / 加载中 / 失败 / 空 / 列表」五态，只在一处渲染。
- *
- * 列表图片一律走 48 图床缩略图（`NetworkImage thumbnail`），滚动不拉原图；点开大图才用原图。
- */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { PerfFlatList } from '../components/PerfFlatList';
+import { NetworkImage } from '../components/NetworkImage';
+
 import {
+  Image,
   RefreshControl,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
-import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import PlayerScreen, { buildPocketHeaders } from '../player';
 import { useNavigation } from '@react-navigation/native';
-
-import ScreenHeader from '../components/ScreenHeader';
-import { HeaderAction } from '../components/HeaderAction';
-import { PerfFlatList } from '../components/PerfFlatList';
-import { NetworkImage } from '../components/NetworkImage';
+import { Member } from '../types';
 import MemberPicker from '../components/MemberPicker';
 import ZoomImageModal from '../components/ZoomImageModal';
-import { GlassSegmented } from '../components/GlassSegmented';
-import { ScalePressable } from '../components/Motion';
-import { Skeleton } from '../components/Skeleton';
+import { useSettingsStore, useUiStore } from '../store';
+import { FadeInView, ScalePressable } from '../components/Motion';
+import { CenterSpinner } from '../components/Loaders';
 import { EmptyState, ErrorState } from '../components/StateViews';
-import PlayerScreen from '../player';
-import { buildPocketHeaders } from '../player/resolve/streamResolver';
-
+import { HeaderAction } from '../components/HeaderAction';
+import { Skeleton } from '../components/Skeleton';
 import pocketApi from '../api/pocket48';
 import { enqueueDownload } from '../services/downloads';
-import { useUiStore } from '../store';
-import { useI18n } from '../i18n';
 import { errorMessage, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
-import { formatDuration } from '../utils/format';
-import { usePalette, radiiAlias } from '../theme';
-import { typography } from '../theme/typography';
-import type { Member } from '../types';
+import { formatTimestamp, formatDuration } from '../utils/format';
+import ScreenHeader from '../components/ScreenHeader';
+import { usePalette, radii, spacing } from '../theme';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import { translate, useI18n } from '../i18n';
 
 type RoomMode = 'big' | 'small';
 
@@ -53,41 +37,49 @@ type AlbumItem = {
   url: string;
   type: 'image' | 'video';
   title: string;
-  time: number;
-  mode: RoomMode;
+  time: any;
+  roomMode: RoomMode;
+  raw: any;
 };
 
-const COLUMNS = 2;
-/** 网格态缩略图宽度（48 图床 resize 参数） */
-const THUMB_W = 360;
-
-/** 相册条目正文可能被双层转义成字符串（\" → "），逐层降级解析 */
-function parseAlbumBody(item: any): any {
+function parseAlbumBody(item: any) {
   const raw = item?.bodys ?? item?.body ?? item?.msgContent ?? item?.content ?? item?.message;
   if (raw && typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return {};
   const direct = parseMaybeJson(raw);
   if (direct && typeof direct === 'object') return direct;
-  let clean = raw.replace(/\\\\"/g, '"').replace(/\\\\\\\\/g, '\\\\');
-  if (clean.startsWith('"') && clean.endsWith('"')) clean = clean.slice(1, -1);
-  const again = parseMaybeJson(clean);
-  return again && typeof again === 'object' ? again : {};
+  try {
+    // Only attempt cleaning if JSON parse fails
+    const direct = parseMaybeJson(raw);
+    if (direct && typeof direct === 'object') return direct;
+    // Clean double-escaped strings: \\" -> " and \\ -> \
+    let clean = raw.replace(/\\\\"/g, '"').replace(/\\\\\\\\/g, '\\\\');
+    if (clean.startsWith('"') && clean.endsWith('"')) clean = clean.slice(1, -1);
+    try { return JSON.parse(clean) || {}; } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
-function mediaUrl(item: any): string {
+function mediaUrl(item: any) {
   const body = parseAlbumBody(item);
-  return normalizeUrl(
-    pickText(body, ['url', 'imageUrl', 'videoUrl', 'mediaUrl', 'msg.url', 'message.url'])
-    || pickText(item, ['url', 'imageUrl', 'videoUrl']),
-  );
+  return normalizeUrl(pickText(body, [
+    'url',
+    'imageUrl',
+    'videoUrl',
+    'mediaUrl',
+    'msg.url',
+    'message.url',
+  ]) || pickText(item, ['url', 'imageUrl', 'videoUrl']));
 }
 
-function isVideoItem(item: any, url: string): boolean {
+function isVideoItem(item: any, url: string) {
   const body = parseAlbumBody(item);
   const marker = `${item?.sourceType || ''} ${item?.msgType || ''} ${body?.ext || ''} ${body?.type || ''} ${url}`.toUpperCase();
   return marker.includes('VIDEO') || /\.(mp4|mov|m4v|3gp|webm)(\?|$)/i.test(url);
 }
 
+/** 从条目里尝试提取视频时长（秒），无则 0 */
 function mediaDuration(item: any): number {
   const body = parseAlbumBody(item);
   const n = Number(
@@ -97,8 +89,7 @@ function mediaDuration(item: any): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** 列表 → 视图模型（丢掉没解析出 url 的脏条目） */
-function toItems(res: any, mode: RoomMode): AlbumItem[] {
+function normalizeAlbumItems(res: any, mode: RoomMode): AlbumItem[] {
   const list = unwrapList(res, [
     'content.messageList',
     'content.message',
@@ -109,221 +100,161 @@ function toItems(res: any, mode: RoomMode): AlbumItem[] {
     'message',
     'list',
   ]);
-  return list
-    .map((raw: any, index: number) => {
-      const url = mediaUrl(raw);
-      const body = parseAlbumBody(raw);
-      const type: AlbumItem['type'] = isVideoItem(raw, url) ? 'video' : 'image';
-      const time = Number(raw?.createTime || raw?.msgTime || raw?.ctime || body?.time || 0);
-      return {
-        id: String(raw?.id || raw?.msgId || raw?.messageId || `${mode}-${time}-${index}`),
-        url,
-        type,
-        title: pickText(raw, ['starName', 'senderName', 'senderNickName', 'nickName'], ''),
-        time: Number.isFinite(time) ? time : 0,
-        mode,
-      };
-    })
-    .filter((item: AlbumItem) => !!item.url);
+
+  return list.map((item, index) => {
+    const body = parseAlbumBody(item);
+    const url = mediaUrl(item);
+    const type: AlbumItem['type'] = isVideoItem(item, url) ? 'video' : 'image';
+    return {
+      id: String(item.id || item.msgId || item.messageId || `${mode}-${item.createTime || item.msgTime || index}-${url}`),
+      url,
+      type,
+      title: pickText(item, ['starName', 'senderName', 'senderNickName', 'nickName'], type === 'video' ? translate('房间视频') : translate('房间图片')),
+      time: item.createTime || item.msgTime || item.ctime || body.time,
+      roomMode: mode,
+      raw: item,
+    };
+  }).filter((item) => item.url);
 }
 
-/** 下一页游标：优先取响应体，退化到本页最早一条的时间戳 */
-function nextCursor(res: any, list: AlbumItem[]): number {
+function nextTimeFrom(res: any, list: AlbumItem[]) {
   const direct = Number(pickText(res, ['content.nextTime', 'content.next', 'data.nextTime', 'nextTime']));
   if (Number.isFinite(direct) && direct > 0) return direct;
-  const times = list.map((item) => item.time).filter((time) => Number.isFinite(time) && time > 0);
+  const times = list.map((item) => Number(item.time)).filter((time) => Number.isFinite(time) && time > 0);
   return times.length ? Math.min(...times) : 0;
 }
 
+function uniqueMerge(prev: AlbumItem[], next: AlbumItem[]) {
+  const seen = new Set(prev.map((item) => `${item.roomMode}:${item.url || item.id}`));
+  const merged = [...prev];
+  next.forEach((item) => {
+    const key = `${item.roomMode}:${item.url || item.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+  return merged.sort((a, b) => Number(b.time || 0) - Number(a.time || 0));
+}
+
+function channelFor(member: Member, mode: RoomMode) {
+  return String(mode === 'small' ? (member.yklzId || '') : (member.channelId || ''));
+}
+
 export default function RoomAlbumScreen() {
-  const navigation = useNavigation<any>();
   const palette = usePalette();
   const { t } = useI18n();
   const showToast = useUiStore((state) => state.showToast);
-
-  const [member, setMember] = useState<Member | null>(null);
-  const [mode, setMode] = useState<RoomMode>('big');
+  const [selectedMember, setSelectedMember] = useState<Member | null>(null);
+  const [roomMode, setRoomMode] = useState<RoomMode>('big');
   const [items, setItems] = useState<AlbumItem[]>([]);
-  const [cursor, setCursor] = useState(0);
+  const [nextTime, setNextTime] = useState(0);
   const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [preview, setPreview] = useState<AlbumItem | null>(null);
+  const [previewUrl, setPreviewUrl] = useState('');
   const [playing, setPlaying] = useState<AlbumItem | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState(t('暂无数据'));
+  const [loadError, setLoadError] = useState('');
+  // 小房间名字/背景解析（用户指定实现）：getRoomInfo → channelInfoList 匹配 channelId
+  const [roomName, setRoomName] = useState('');
+  const [roomBg, setRoomBg] = useState('');
+  const loadingRef = useRef(false);
 
-  /** 请求序号：切成员/切房间时丢弃过期响应（否则旧请求会把新列表覆盖回去） */
-  const reqRef = useRef(0);
-  const busyRef = useRef(false);
-  const cursorRef = useRef(0);
+  const currentChannelId = useMemo(() => selectedMember ? channelFor(selectedMember, roomMode) : '', [roomMode, selectedMember]);
 
-  const load = useCallback(
-    async (target: Member, roomMode: RoomMode, append: boolean) => {
-      const channelId = roomMode === 'small' ? target.yklzId : target.channelId;
-      if (!channelId) {
-        ++reqRef.current;
-        busyRef.current = false;
-        setLoading(false);
-        setError(roomMode === 'small' ? t('这个成员没有小房间') : t('这个成员没有大房间'));
-        setItems([]);
-        setHasMore(false);
-        return;
-      }
-      const rid = ++reqRef.current;
-      busyRef.current = true;
-      setLoading(true);
-      if (!append) setError('');
-      const sentCursor = append ? cursorRef.current : 0;
-      try {
-        const res = await pocketApi.getRoomAlbum({ channelId: String(channelId), nextTime: sentCursor });
-        if (rid !== reqRef.current) return; // 已切走，丢弃
-        const page = toItems(res, roomMode);
-        const next = nextCursor(res, page);
-        setItems((prev) => {
-          if (!append) return page;
-          const seen = new Set(prev.map((item) => item.id));
-          return [...prev, ...page.filter((item) => !seen.has(item.id))];
-        });
-        // 游标没前进（或本页为空）就终止，防死循环
-        const advanced = next > 0 && next !== sentCursor;
-        cursorRef.current = advanced ? next : cursorRef.current;
-        setCursor(cursorRef.current);
-        setHasMore(page.length > 0 && advanced);
-      } catch (e) {
-        if (rid !== reqRef.current) return;
-        setError(errorMessage(e));
-        if (!append) setItems([]);
-        setHasMore(false);
-      } finally {
-        if (rid === reqRef.current) {
-          busyRef.current = false;
-          setLoading(false);
-        }
-      }
-    },
-    [t],
-  );
-
-  const pickMember = useCallback(
-    (next: Member) => {
-      setMember(next);
-      setMode('big');
+  const loadAlbum = async (member: Member, mode: RoomMode = roomMode, append = false) => {
+    if (loadingRef.current) return;
+    const channelId = channelFor(member, mode);
+    if (!channelId) {
+      setStatus(mode === 'small' ? t('这个成员没有小房间 channelId。') : t('这个成员没有大房间 channelId。'));
       setItems([]);
       setHasMore(false);
-      cursorRef.current = 0;
-      setCursor(0);
-      load(next, 'big', false);
-    },
-    [load],
-  );
+      return;
+    }
 
-  const switchMode = useCallback(
-    (next: RoomMode) => {
-      if (!member || next === mode) return;
-      setMode(next);
-      setItems([]);
-      setHasMore(false);
-      cursorRef.current = 0;
-      setCursor(0);
-      load(member, next, false);
-    },
-    [member, mode, load],
-  );
+    loadingRef.current = true;
+    setSelectedMember(member);
+    setRoomMode(mode);
+    setLoading(true);
+    setLoadError('');
+    setStatus('');
+    setRoomName(''); setRoomBg('');
+    // 小房间/大房间名字 + 背景解析：room/info → 塞纳河 server/detail（channelInfoList 房间名 + 背景墙图）
+    pocketApi.getRoomMeta(channelId, mode === 'small' ? member.channelId : undefined, member.serverId).then((meta) => {
+      if (meta?.name) setRoomName(meta.name);
+      if (meta?.bg) setRoomBg(meta.bg);
+    }).catch(() => {});
+    try {
+      const res = await pocketApi.getRoomAlbum({ channelId, nextTime: append ? nextTime : 0 });
+      const nextItems = normalizeAlbumItems(res, mode);
+      const merged = append ? uniqueMerge(items, nextItems) : uniqueMerge([], nextItems);
+      const next = nextTimeFrom(res, nextItems);
+      setItems(merged);
+      setNextTime(next);
+      // 游标无前进（恒同本次请求值）即终止，防死循环
+      setHasMore(nextItems.length > 0 && next > 0 && (append ? next !== nextTime : true));
+      const imageCount = merged.filter((item) => item.type === 'image').length;
+      const videoCount = merged.filter((item) => item.type === 'video').length;
+      const text = t('已加载 {count} 条 · 图片 {image} · 视频 {video}', { count: merged.length, image: imageCount, video: videoCount });
+      setStatus(text);
+      showToast(text);
+    } catch (error) {
+      setLoadError(errorMessage(error));
+      setStatus(t('加载失败：{msg}', { msg: errorMessage(error) }));
+      if (!append) setItems([]);
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
+    }
+  };
 
-  const refresh = useCallback(() => {
-    if (!member) return;
-    cursorRef.current = 0;
-    setCursor(0);
-    load(member, mode, false);
-  }, [member, mode, load]);
+  const switchMode = (mode: RoomMode) => {
+    if (!selectedMember || mode === roomMode) return;
+    setItems([]);
+    setNextTime(0);
+    setHasMore(false);
+    setRoomMode(mode); // update UI immediately, don't wait for loadAlbum
+    loadAlbum(selectedMember, mode, false);
+  };
 
-  const loadMore = useCallback(() => {
-    if (!member || loading || busyRef.current || !hasMore) return;
-    load(member, mode, true);
-  }, [member, mode, loading, hasMore, load]);
+  const loadMoreAlbum = () => {
+    if (!selectedMember || loading || loadingRef.current || !hasMore) return;
+    loadAlbum(selectedMember, roomMode, true);
+  };
 
-  /** 长按下载（图片/视频都以原图地址入队） */
-  const download = useCallback(
-    async (item: AlbumItem) => {
-      try {
-        await enqueueDownload({
-          url: item.url,
-          type: item.type,
-          name: `${member?.ownerName || 'room'}-${item.mode === 'small' ? t('小房间') : t('大房间')}-${item.id}`,
-        });
-        showToast(t('已加入下载管理'));
-      } catch (e) {
-        showToast(t('下载失败：{msg}', { msg: errorMessage(e) }));
-      }
-    },
-    [member, showToast, t],
-  );
+  const downloadItem = useCallback(async (item: AlbumItem) => {
+    try {
+      await enqueueDownload({
+        url: item.url,
+        type: item.type,
+        name: selectedMember ? `${selectedMember.ownerName}-${item.roomMode}-${item.type}` : `room-${item.type}`,
+      });
+      showToast(t('已加入下载管理'));
+    } catch (error) {
+      showToast(t('下载失败：{msg}', { msg: errorMessage(error) }));
+    }
+  }, [selectedMember, showToast]);
 
-  const openItem = useCallback((item: AlbumItem) => {
+  // 稳定回调：让网格行组件可被 React.memo 记忆，避免父组件状态变化引发整网格重渲染/重解码。
+  const handleOpen = useCallback((item: AlbumItem) => {
     if (item.type === 'video') setPlaying(item);
-    else setPreview(item);
-  }, []);
+    else setPreviewUrl(item.url);
+  }, [setPlaying, setPreviewUrl]);
 
-  const counts = useMemo(() => {
-    let image = 0;
-    let video = 0;
-    for (const item of items) {
-      if (item.type === 'video') video += 1;
-      else image += 1;
-    }
-    return { image, video };
-  }, [items]);
+  const handleLong = useCallback((item: AlbumItem) => {
+    downloadItem(item);
+  }, [downloadItem]);
 
-  const renderItem = useCallback(
-    ({ item }: { item: AlbumItem }) => (
-      <View style={styles.cell}>
-        <ScalePressable
-          style={[styles.card, { backgroundColor: palette.fill3 }]}
-          onPress={() => openItem(item)}
-          onLongPress={() => download(item)}
-          pressedScale={0.96}
-        >
-          <NetworkImage
-            source={{ uri: item.url }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            thumbnail={THUMB_W}
-          />
-          {item.type === 'video' ? (
-            <>
-              <View style={styles.videoShade} pointerEvents="none" />
-              <View style={styles.playWrap} pointerEvents="none">
-                <MaterialCommunityIcons name="play" size={20} color="#FFFFFF" />
-              </View>
-              {mediaDuration(item) > 0 ? (
-                <View style={styles.durationBadge} pointerEvents="none">
-                  <Text style={styles.durationText}>{formatDuration(mediaDuration(item))}</Text>
-                </View>
-              ) : null}
-            </>
-          ) : null}
-        </ScalePressable>
-      </View>
-    ),
-    [palette.fill3, openItem, download],
-  );
+  const renderAlbumItem = useCallback(({ item, index }: { item: AlbumItem; index: number }) => (
+    <AlbumGridItem item={item} index={index} palette={palette} onOpen={handleOpen} onLongPress={handleLong} />
+  ), [palette, handleOpen, handleLong]);
 
-  const renderFooter = useCallback(() => {
-    if (loading && items.length > 0) {
-      return <Text style={[styles.footer, { color: palette.labelTertiary }]}>{t('加载中…')}</Text>;
-    }
-    if (items.length > 0 && !hasMore) {
-      return <Text style={[styles.footer, { color: palette.labelTertiary }]}>{t('没有更多了')}</Text>;
-    }
-    return null;
-  }, [loading, items.length, hasMore, palette.labelTertiary, t]);
-
-  // 视频播放：整页交给统一播放器（控制条/全屏/内核切换/错误重试都在里面）
   if (playing) {
+    // 统一播放器（重写）：相册视频 → PlayerScreen（控制条/全屏/内核切换/错误重试内置）
     return (
       <View style={styles.playerPage}>
         <PlayerScreen
           source={{ kind: 'vod', url: playing.url, headers: buildPocketHeaders() }}
-          meta={{ title: playing.title || t('房间视频') }}
+          meta={{ title: playing.title }}
           features={{ kernelSwitch: true }}
           onClose={() => setPlaying(null)}
           persistent
@@ -332,152 +263,269 @@ export default function RoomAlbumScreen() {
     );
   }
 
-  const modeOptions = [
-    { key: 'big' as const, label: t('大房间') },
-    { key: 'small' as const, label: t('小房间') },
-  ];
-
   return (
     <View style={styles.container}>
-      <ScreenHeader
-        title={t('房间相册')}
-        right={member
-          ? <HeaderAction label={t('刷新')} onPress={refresh} loading={loading && items.length > 0} />
-          : undefined}
-      />
+      <ScreenHeader title={t('房间相册')} right={
+        <HeaderAction label={t('刷新')} onPress={() => selectedMember && loadAlbum(selectedMember, roomMode, false)} />
+      } />
 
-      <View style={styles.top}>
-        <MemberPicker
-              activeOnly
-          selectedMember={member}
-          onSelect={pickMember}
-          placeholder={t('输入成员名搜索，如“柏欣妤”')}
-        />
-        {member?.yklzId ? (
-          <GlassSegmented options={modeOptions} value={mode} onChange={switchMode} />
-        ) : null}
-        {member && items.length > 0 ? (
-          <View style={styles.countRow}>
-            <MaterialCommunityIcons name="image-multiple" size={13} color={palette.labelTertiary} />
-            <Text style={[styles.countText, { color: palette.labelTertiary }]}>
-              {t('图片 {image} · 视频 {video}', { image: counts.image, video: counts.video })}
-            </Text>
+      <FadeInView delay={60} duration={300} style={{ flex: 1 }}>
+        <View style={styles.pickerWrap}>
+          <MemberPicker selectedMember={selectedMember} onSelect={(member) => loadAlbum(member, 'big', false)} />
+          <View style={styles.segmentRow}>
+            {/* 分段控件：fill2 底 + 选中白胶囊 */}
+            <View style={[styles.segment, { backgroundColor: palette.fill2 }]}>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[styles.segmentBtn, roomMode === 'big' && { backgroundColor: palette.surface }]}
+                onPress={() => switchMode('big')}
+              >
+                <Text style={[styles.segmentText, { color: roomMode === 'big' ? palette.label : palette.labelTertiary, fontWeight: roomMode === 'big' ? '700' : '400' }]}>{t('大房间')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[styles.segmentBtn, roomMode === 'small' && { backgroundColor: palette.surface }, !selectedMember?.yklzId && styles.modeBtnDisabled]}
+                onPress={() => switchMode('small')}
+              >
+                <Text style={[styles.segmentText, { color: roomMode === 'small' ? palette.label : palette.labelTertiary, fontWeight: roomMode === 'small' ? '700' : '400' }]}>{t('小房间')}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          {status && !loading ? <Text style={[styles.status, { color: palette.labelSecondary }]}>{status}</Text> : null}
+          {(roomName || selectedMember) && !loadError ? (
+            <View style={styles.roomMetaRow}>
+              <MaterialCommunityIcons name="home-account" size={14} color={palette.tint} />
+              <Text style={[styles.roomMetaText, { color: palette.labelSecondary }]} numberOfLines={1}>
+                {t('{mode} · {name}', { mode: roomMode === 'small' ? t('小房间') : t('大房间'), name: roomName || selectedMember?.ownerName || '' })}
+              </Text>
+            </View>
+          ) : null}
+          {loadError && !loading ? (
+            <ErrorState
+              title={t('加载失败')}
+              hint={loadError}
+              onAction={() => selectedMember && loadAlbum(selectedMember, roomMode, false)}
+            />
+          ) : null}
+        </View>
+
+        {/* 房间背景横幅（小房间/大房间背景解析） */}
+        {roomBg && !playing ? (
+          <View style={[styles.roomBanner, { borderColor: palette.hairline }]}>
+            <Image source={{ uri: roomBg }} style={styles.roomBannerBg} resizeMode="cover" />
+            <View style={styles.roomBannerScrim} />
+            <View style={styles.roomBannerInfo}>
+              <MaterialCommunityIcons name="image-multiple" size={14} color="#FFFFFF" />
+              <Text style={styles.roomBannerTitle} numberOfLines={1}>
+                {roomName || (roomMode === 'small' ? t('小房间') : t('大房间'))}
+              </Text>
+            </View>
           </View>
         ) : null}
-      </View>
 
-      {!member ? (
-        <EmptyState
-          icon="account-search-outline"
-          title={t('先选一位成员')}
-          hint={t('在上方搜索框输入成员名（支持拼音），点选后即可浏览 TA 的房间相册')}
-        />
-      ) : error ? (
-        <ErrorState title={t('加载失败')} hint={error} onAction={refresh} />
-      ) : loading && items.length === 0 ? (
-        <SkeletonGrid />
-      ) : items.length === 0 ? (
-        <EmptyState
-          icon="image-multiple-outline"
-          title={t('暂无相册内容')}
-          hint={mode === 'small' ? t('该成员的小房间还没有图片或视频') : t('该成员的大房间还没有图片或视频')}
-        />
-      ) : (
+        <ZoomImageModal url={previewUrl} onClose={() => setPreviewUrl('')} />
+        {loading && items.length === 0 ? (
+          <AlbumSkeletonGrid />
+        ) : (
         <PerfFlatList
           data={items}
-          numColumns={COLUMNS}
-          keyExtractor={(item) => `${item.mode}-${item.id}`}
-          renderItem={renderItem}
-          contentContainerStyle={styles.grid}
-          initialNumToRender={12}
-          maxToRenderPerBatch={12}
-          windowSize={7}
-          removeClippedSubviews
-          onEndReached={loadMore}
-          onEndReachedThreshold={0.4}
-          ListFooterComponent={renderFooter}
+          numColumns={2}
+            keyExtractor={(item) => `${item.roomMode}-${item.id}`}
+            contentContainerStyle={styles.grid}
+            initialNumToRender={12}
+            maxToRenderPerBatch={12}
+            windowSize={7}
+            removeClippedSubviews
+            renderItem={renderAlbumItem}
+          ListEmptyComponent={<EmptyState icon="image-multiple-outline" title={t('暂无相册内容')} hint={t('选择成员后查看房间相册')} />}
+          onEndReached={loadMoreAlbum}
+          onEndReachedThreshold={0.35}
           refreshControl={
             <RefreshControl
               refreshing={loading && items.length > 0}
-              onRefresh={refresh}
+              onRefresh={() => selectedMember && loadAlbum(selectedMember, roomMode, false)}
               tintColor={palette.tint}
               colors={[palette.tint]}
             />
           }
+          ListFooterComponent={hasMore ? (
+            <Text style={[styles.footerText, { color: palette.labelSecondary }]}>{loading ? '' : t('上滑加载更多')}</Text>
+          ) : null}
         />
-      )}
-
-      <ZoomImageModal url={preview ? preview.url : ''} onClose={() => setPreview(null)} />
+        )}
+      </FadeInView>
     </View>
   );
 }
 
-/** 首屏骨架：与真实网格同构（2 列 · 3:4），避免「先空后跳」的观感 */
-function SkeletonGrid() {
+// --- 模块级记忆化网格项：避免翻页/loading 状态变化引发整网格重渲染 ---
+const AlbumGridItem = React.memo(function AlbumGridItem({
+  item,
+  index,
+  palette,
+  onOpen,
+  onLongPress,
+}: {
+  item: AlbumItem;
+  index: number;
+  palette: any;
+  onOpen: (item: AlbumItem) => void;
+  onLongPress: (item: AlbumItem) => void;
+}) {
+  const { t } = useI18n();
+  const duration = mediaDuration(item);
+  return (
+    <FadeInView delay={index < 12 ? 60 + index * 25 : 0} distance={8}>
+      <ScalePressable
+        style={[styles.mediaCard, { backgroundColor: palette.fill3 }]}
+        onPress={() => onOpen(item)}
+        onLongPress={() => onLongPress(item)}
+        pressedScale={0.96}
+      >
+        {item.type === 'video' ? (
+          <View style={[styles.videoThumb, { backgroundColor: palette.fill3 }]}>
+            {item.url ? (
+              <NetworkImage source={{ uri: item.url }} style={styles.photo} resizeMode="cover" />
+            ) : (
+              <MaterialCommunityIcons name="video-outline" size={26} color={palette.labelTertiary} />
+            )}
+            {/* 播放遮罩 + 播放按钮 */}
+            <View pointerEvents="none" style={styles.playShade} />
+            <View style={styles.playCenter}>
+              <View style={styles.playBtn}>
+                <MaterialCommunityIcons name="play" size={18} color="#FFFFFF" />
+              </View>
+            </View>
+            {duration > 0 ? (
+              <View style={[styles.videoBadge, { backgroundColor: 'rgba(0,0,0,0.55)' }]}>
+                <MaterialCommunityIcons name="play-circle" size={10} color="#FFFFFF" style={{ marginRight: 2 }} />
+                <Text style={styles.videoBadgeText}>{formatDuration(duration)}</Text>
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          item.url ? (
+            <NetworkImage source={{ uri: item.url }} style={styles.photo} resizeMode="cover" />
+          ) : (
+            <View style={[styles.photo, styles.photoFallback, { backgroundColor: palette.fill3 }]}>
+              <MaterialCommunityIcons name="image-off-outline" size={22} color={palette.labelTertiary} />
+            </View>
+          )
+        )}
+        {/* 底部渐变遮罩 + 标题上浮 */}
+        <View pointerEvents="none" style={styles.gridShade} />
+        <View style={styles.infoOverlay}>
+          <Text style={styles.mediaTitleOverlay} numberOfLines={1}>
+            {item.title || (item.roomMode === 'small' ? t('小房间') : t('大房间'))}
+          </Text>
+        </View>
+      </ScalePressable>
+    </FadeInView>
+  );
+});
+
+/** 网格骨架占位（与 2 列 3:4 网格同构） */
+function AlbumSkeletonGrid() {
+  const palette = usePalette();
+  const { t } = useI18n();
   return (
     <View style={styles.skeletonWrap}>
-      {[0, 1, 2].map((row) => (
-        <View key={row} style={styles.skeletonRow}>
-          {Array.from({ length: COLUMNS }).map((_, col) => (
-            <View key={col} style={styles.cell}>
-              <Skeleton height={0} style={styles.skeletonCard} radius={radiiAlias.cardCompact} />
-            </View>
+      {[0, 1, 2, 3].map((r) => (
+        <View key={r} style={styles.skeletonRow}>
+          {[0, 1].map((c) => (
+            <Skeleton key={`${r}-${c}`} height={176} radius={16} style={{ flex: 1, marginHorizontal: 6 }} />
           ))}
         </View>
       ))}
+      <Text style={[styles.footerText, { color: palette.labelSecondary }]}>{t('加载中…')}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  top: { paddingHorizontal: 16, gap: 10, paddingBottom: 12 },
-  countRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 2 },
-  countText: { ...typography.footnote },
-
-  grid: { paddingHorizontal: 11, paddingTop: 2, paddingBottom: 110 },
-  /** 格：自己占半宽。**不用 flex:1** —— 奇数张时最后一张不会被拉成整行 */
-  cell: { width: `${100 / COLUMNS}%` as any, padding: 5 },
-  card: {
-    width: '100%',
-    aspectRatio: 3 / 4,
-    borderRadius: radiiAlias.cardCompact,
+  pickerWrap: { paddingHorizontal: 16, gap: 12 },
+  segmentRow: { flexDirection: 'row' },
+  roomMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 8, paddingHorizontal: 2 },
+  roomMetaText: { fontSize: 12, flex: 1 },
+  roomBanner: {
+    marginHorizontal: 14,
+    marginTop: 4,
+    marginBottom: 2,
+    height: 92,
+    borderRadius: 16,
     overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
   },
-
-  videoShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.16)' },
-  playWrap: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    width: 40,
-    height: 40,
-    marginTop: -20,
-    marginLeft: -20,
-    borderRadius: 20,
+  roomBannerBg: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%', height: '100%' },
+  roomBannerScrim: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.35)' },
+  roomBannerInfo: { flex: 1, flexDirection: 'row', alignItems: 'flex-end', padding: 12, gap: 6 },
+  roomBannerTitle: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', flex: 1, textShadowColor: 'rgba(0,0,0,0.6)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
+  segment: { flex: 1, flexDirection: 'row', padding: 3, borderRadius: radii.sm, gap: 3 },
+  segmentBtn: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: radii.sm,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.42)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.55)',
+    paddingHorizontal: 8,
   },
-  durationBadge: {
+  segmentText: { fontSize: 13, lineHeight: 18 },
+  modeBtnDisabled: { opacity: 0.48 },
+  status: { fontSize: 12, textAlign: 'center' },
+  grid: { padding: 12, paddingBottom: 112 },
+  mediaCard: { flex: 1, margin: 6, borderRadius: 16, overflow: 'hidden', aspectRatio: 3 / 4 },
+  photo: { width: '100%', height: '100%' },
+  photoFallback: { alignItems: 'center', justifyContent: 'center' },
+  videoThumb: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' },
+  videoBadge: {
     position: 'absolute',
-    top: 6,
-    right: 6,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    borderRadius: 6,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    top: 8,
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
   },
-  durationText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
-
-  footer: { ...typography.footnote, textAlign: 'center', paddingVertical: 14 },
-
-  skeletonWrap: { paddingHorizontal: 11, paddingTop: 2 },
-  skeletonRow: { flexDirection: 'row' },
-  /** 用 aspectRatio 撑出与真实卡片同高的占位 */
-  skeletonCard: { width: '100%' as any, aspectRatio: 3 / 4, height: undefined },
-
+  videoBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
+  // play 遮罩 + 中央播放按钮
+  playShade: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.18)' },
+  playCenter: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  playBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // 底部渐变遮罩（模拟 0.55→0 由下而上收紧）+ 标题白字
+  gridShade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: '45%',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  infoOverlay: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingBottom: 8 },
+  mediaTitleOverlay: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 17,
+    textShadowColor: 'rgba(0,0,0,0.55)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  footerText: { marginTop: 12, marginBottom: 6, textAlign: 'center', fontSize: 12, fontWeight: '600' },
+  skeletonWrap: { paddingHorizontal: 12, paddingTop: 12 },
+  skeletonRow: { flexDirection: 'row', marginBottom: 12 },
   playerPage: { flex: 1, backgroundColor: '#000000' },
+  player: { flex: 1, backgroundColor: '#000000' },
+  playerErrorWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
+  playerErrorText: { fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  playerRetryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 9, borderRadius: 18 },
+  playerRetryText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
 });

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useMemberStore } from '../store';
 import { Member } from '../types';
-import { normalizeMember, memberSearchText, isRoomMember } from '../utils/members';
+import { normalizeMember, memberSearchText } from '../utils/members';
 import { useI18n } from '../i18n';
 import { usePalette, radii, spacing } from '../theme';
 import { typography } from '../theme/typography';
@@ -21,7 +21,6 @@ interface MemberPickerProps {
   onSelect: (member: Member) => void;
   placeholder?: string;
   limit?: number;
-  activeOnly?: boolean;
 }
 
 function memberShortName(member: Member): string {
@@ -33,7 +32,6 @@ export default function MemberPicker({
   onSelect,
   placeholder = '搜索成员...',
   limit = 80,
-  activeOnly = false,
 }: MemberPickerProps) {
   const palette = usePalette();
   const { t } = useI18n();
@@ -45,9 +43,9 @@ export default function MemberPicker({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
-    const list = members.filter((member) => (!activeOnly || isRoomMember(member)) && memberSearchText(member).includes(q));
+    const list = members.filter((member) => memberSearchText(member).includes(q));
     return list.slice(0, limit);
-  }, [members, query, limit, activeOnly]);
+  }, [members, query, limit]);
 
   return (
     <View style={[styles.wrapper, { paddingHorizontal: spacing.md }]}>
@@ -94,14 +92,9 @@ export default function MemberPicker({
           );
         }}
         ListEmptyComponent={
-          /* ⚠️ 查询为空时不渲染任何文字（2026-10-06 修复）：
-             此前这里回退成 placeholder 原文 → 输入框的占位符 + 下方空态文字**一模一样**，
-             同一句话在一屏出现两遍（鸡腿榜「成员贡献」页实测截图）。 */
-          query.trim() ? (
-            <Text style={[typography.footnote, { color: palette.labelTertiary, paddingVertical: spacing.xs }]}>
-              {membersLoaded ? t('没有匹配成员') : t('暂无成员数据')}
-            </Text>
-          ) : null
+          <Text style={[typography.footnote, { color: palette.labelTertiary, paddingVertical: spacing.xs }]}>
+            {query.trim() ? (membersLoaded ? t('没有匹配成员') : t('暂无成员数据')) : ph}
+          </Text>
         }
       />
     </View>

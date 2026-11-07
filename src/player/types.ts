@@ -15,8 +15,6 @@ export interface PlayerSource {
   needsNativeExo?: boolean;
   /** 纯音频渲染（房间语音/上麦/电台） */
   audioOnly?: boolean;
-  /** 口袋竖屏视频在竖屏播放器内裁边铺满，横屏仍完整显示。 */
-  coverPortrait?: boolean;
   /** 音量（B站流响度补偿 1.5 等） */
   volume?: number;
   /** 网页内核音量增益（>1，经 WebAudio GainNode；原生 Exo 音量被系统 clamp ≤1） */
@@ -26,28 +24,6 @@ export interface PlayerSource {
 export interface PlayerMeta {
   title: string;
   cover?: string;
-}
-
-export interface PocketPlayerInfo {
-  name: string;
-  avatar?: string;
-  liveId?: string;
-  audience?: string;
-  rankAvatars?: string[];
-  comments?: Array<PocketComment>;
-  replayComments?: Array<{ time: number; text: string; nick?: string; userId?: string; avatar?: string; level?: number }>;
-  onRankPress?: () => void;
-  onCommentPress?: (comment: PocketComment) => void;
-}
-
-export interface PocketComment {
-  id: string;
-  text: string;
-  nick?: string;
-  level?: number;
-  kind?: string;
-  userId?: number | string;
-  avatar?: string;
 }
 
 /** 弹幕源（三引擎统一）：poll=口袋直播 HTTP 轮询；lrc=录播 LRC 文件；ws=B站 WebSocket */
@@ -78,7 +54,6 @@ export interface PlayerFeatures {
 export interface PlayerScreenProps {
   source: PlayerSource;
   meta: PlayerMeta;
-  pocket?: PocketPlayerInfo;
   danmaku?: DanmakuSource;
   features?: PlayerFeatures;
   /** 底部控制坞额外动作（礼物/贡献榜等由外部实现） */
@@ -90,11 +65,4 @@ export interface PlayerScreenProps {
     onPress: () => void;
   }>;
   onClose?: () => void;
-  /**
-   * 隐藏整套播放器 chrome（标题栏/中央播放键/底部控制坞/更多面板）。
-   * 用于系统画中画小窗：窗口只有几百 dp，chrome 会挤成一团叠在画面上（2026-10-17 修）。
-   * 画面层与弹幕 children 不受影响，小窗里仍能看直播与弹幕。
-   */
-  chromeHidden?: boolean;
-  liveTransitionKey?: number;
 }

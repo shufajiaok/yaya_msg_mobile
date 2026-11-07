@@ -104,14 +104,6 @@ interface MusicPlayerState {
    * 不持久化（持久化 seek 位置通过 position 字段实现）。
    */
   seekTarget: number;
-  seekNonce: number;
-  /**
-   * seek 粘滞守卫（根因修复「进度条回弹」）：
-   * seek 发出瞬间记住「旧位置」与时间戳；守卫窗口内，若播放器仍在上报旧位置
-   * （离目标比出发时更远），就丢弃该上报——否则进度条会先跳到目标、再被旧值拽回去。
-   */
-  seekFrom: number;
-  seekIssuedAt: number;
 
   // Actions
   setQueue: (tracks: Track[]) => void;
@@ -128,7 +120,6 @@ interface MusicPlayerState {
   setLyrics: (lines: LyricLine[]) => void;
   setError: (e: string | null) => void;
   setSeekTarget: (t: number) => void;
-  consumeSeekTarget: () => void;
   isFavorite: (id: string, track?: any) => boolean;
   toggleFavorite: (id: string, track?: any) => void;
   next: () => Track | null;
@@ -166,9 +157,6 @@ export const useMusicPlayerStore = create<MusicPlayerState>()(
       error: null,
       favorites: [],
       seekTarget: 0,
-      seekNonce: 0,
-      seekFrom: 0,
-      seekIssuedAt: 0,
 
       setQueue: (tracks) => set({ queue: tracks, currentIndex: tracks.length > 0 ? 0 : -1 }),
 
@@ -212,9 +200,6 @@ export const useMusicPlayerStore = create<MusicPlayerState>()(
           lyrics: [],
           error: null,
           seekTarget: resumePos,
-          seekNonce: resumePos > 0 ? s.seekNonce + 1 : s.seekNonce,
-          seekFrom: s.position,
-          seekIssuedAt: resumePos > 0 ? Date.now() : 0,
         };
       }),
 
@@ -228,60 +213,15 @@ export const useMusicPlayerStore = create<MusicPlayerState>()(
 
       setMode: (playMode) => set({ playMode }),
 
-      // 只存当前曲时长（进度条用）；不再维护 durations 映射（列表已不显示时长）。
-      // 心跳每 0.5s 报一次相同时长——值没变就不写 store，避免无谓重渲染与持久化序列化。
-      setDuration: (duration) => {
-        if (Math.abs(Number(get().duration) - Number(duration)) < 0.5) return;
-        set({ duration });
-      },
+      setDuration: (duration) => set({ duration }),
 
-      /**
-       * 位置上报唯一入口（原生 onProgress / Exo 回调都走这里）。
-       *
-       * seek 粘滞守卫：seek 发出后的守卫窗口内，只接受「离目标不比出发时更远」的上报；
-       * 播放器还没真正跳过去时上报的旧位置一律丢弃 —— 这才是「进度条回弹」的根因修复，
-       * 上层不需要再写 heldRatio 之类的补丁（补丁会在超时后照样弹一次）。
-       */
-      setPosition: (position) => {
-        const s = get();
-        if (!Number.isFinite(position) || position < 0 || position === s.position) return;
-        const GUARD_MS = 1500;
-        const seekPending = s.seekIssuedAt > 0 && Date.now() - s.seekIssuedAt < GUARD_MS;
-        if (seekPending) {
-          const dNow = Math.abs(position - s.seekTarget);
-          const dFrom = Math.abs(s.seekFrom - s.seekTarget) + 0.3;
-          if (dNow > dFrom) return; // 旧位置（还没跳到目标）→ 丢弃，防回弹
-          // ⚠️ seek 窗口内必须直接放行（含向后 seek）。
-          // 此前落到下面的「回退守卫」：s.position 仍是 seek 前的旧值，新位置更小 → 被当陈旧帧丢掉，
-          // 表现为「点了/拖了进度，音乐跳了但进度条和歌词定在原地，等播放追上旧位置才恢复」（2026-10-18）。
-          set({ position });
-          return;
-        }
-        // 无 seek 时的回退守卫（2026-10-18）：
-        // 每次进音乐页/进度条重新挂载，原生或 JS 播放器会先推一帧 0 或早期帧，
-        // 进度条就会「先缩到 0.00 → 再跳到当前 → 附近抖动」。非 seek 场景下
-        // 进度倒退超过 3s 一律视为陈旧帧丢弃；真正的后退都走 setSeekTarget。
-        const naturalSingleLoop = s.playMode === 'single' && s.duration > 0 && s.position >= s.duration - 3 && position <= 2;
-        if (Number.isFinite(position) && s.position - position > 0.5 && s.playbackState !== 'idle' && !naturalSingleLoop) return;
-        set({ position });
-      },
+      setPosition: (position) => set({ position }),
 
       setLyrics: (lyrics) => set({ lyrics }),
 
       setError: (error) => set({ error, playbackState: error ? 'error' : 'idle' }),
 
-      /** 下发 seek 指令，并记录「出发位置 + 时间戳」给 setPosition 的粘滞守卫用 */
-      setSeekTarget: (seekTarget) =>
-        set((s) => ({
-          seekTarget,
-          seekNonce: s.seekNonce + 1,
-          seekFrom: s.position,
-          seekIssuedAt: Date.now(),
-          // 乐观跳转：进度条/歌词立即到目标位，原生心跳到达后自然校准。
-          // 只在 target > 0 时写（消费完毕会把 seekTarget 清 0，不能把 position 也清掉）。
-          position: seekTarget >= 0 ? seekTarget : s.position,
-        })),
-      consumeSeekTarget: () => set({ seekTarget: 0 }),
+      setSeekTarget: (seekTarget) => set({ seekTarget }),
 
       /**
        * B7 收藏键归一：收藏统一存 `title|artist` 键（旧数据仍为 musicId，双兼容）——
@@ -366,8 +306,7 @@ export const useMusicPlayerStore = create<MusicPlayerState>()(
           // 续播：把持久化的 position 转成 seekTarget，等 Video onLoad 就绪后 seek 回去。
           // （此前 position 只写不读，重启后进度记忆形同虚设，音频永远从 0 开始）
           const pos = state.position || 0;
-          useMusicPlayerStore.setState({ playbackState: 'paused' });
-          if (pos > 0) state.setSeekTarget(pos);
+          useMusicPlayerStore.setState({ playbackState: 'paused', seekTarget: pos > 0 ? pos : 0 });
         }
       },
     },

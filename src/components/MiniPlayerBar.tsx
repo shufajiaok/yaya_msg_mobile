@@ -28,7 +28,6 @@ import CoverArt from './CoverArt';
 import { useI18n } from '../i18n';
 import { joinMeta } from '../utils/format';
 import { useVinylSpin } from '../hooks/useVinylSpin';
-import { GlassSurface } from '../components/GlassSurface';
 
 interface Props {
   onOpenFullScreen?: () => void;
@@ -168,14 +167,12 @@ export default function MiniPlayerBar({ onOpenFullScreen }: Props) {
   if (!track || playbackState === 'idle') return null;
 
   return (
-    <GlassSurface radius={20} role="card"
-      // 提高不透明度：此前太透，后面卡片的爱心/封面会透出来（用户反馈「有点乱」）
-      tintColor={palette.name === 'dark' ? 'rgba(22,22,26,0.90)' : 'rgba(255,255,255,0.90)'}
+    <Animated.View
       style={[
         styles.bar,
         shadows.md,
         {
-          backgroundColor: 'transparent',
+          backgroundColor: palette.surfaceGlassStrong,
           borderColor: palette.innerStroke,
           transform: [{ translateY }],
           // 音乐页为栈页面（无悬浮 TabBar），贴底悬浮；覆盖 shadows.md 的 elevation（过高会渲染深色边缘）
@@ -254,7 +251,7 @@ export default function MiniPlayerBar({ onOpenFullScreen }: Props) {
           </Pressable>
         </View>
       </Pressable>
-    </GlassSurface>
+    </Animated.View>
   );
 }
 
@@ -263,7 +260,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 12,
     right: 12,
-    borderRadius: 28,
+    borderRadius: 26,
     borderWidth: StyleSheet.hairlineWidth,
     paddingTop: 6,
     paddingBottom: 8,
@@ -271,6 +268,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   progressBar: { height: 28, justifyContent: 'center', paddingHorizontal: 4 },
+  // track/fill/thumb 垂直中心对齐（容器 28、track 3、thumb 14 → 中心 14）
   progressTrack: { position: 'absolute', left: 4, right: 4, top: 12.5, height: 3, borderRadius: 2 },
   progressFill: { position: 'absolute', left: 4, right: 4, top: 12.5, height: 3, borderRadius: 2 },
   progressThumbWrap: { position: 'absolute', left: 4, top: 7, width: 14, height: 14 },
@@ -281,10 +279,10 @@ const styles = StyleSheet.create({
     borderWidth: 2,
   },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 4, paddingRight: 4 },
-  cover: { width: 48, height: 48, borderRadius: 22, backgroundColor: '#1a1a1a', overflow: 'hidden' },
+  cover: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#1a1a1a', overflow: 'hidden' },
   info: { flex: 1, minWidth: 0 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 0 },
   playBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
-  smallCtrlBtn: { width: 34, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
+  smallCtrlBtn: { width: 34, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 19 },
   modeBtn: { width: 34, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
 });

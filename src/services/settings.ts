@@ -13,7 +13,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'light',
   language: 'system',
   p48Token: '',
-  p48ClientProfile: 'pocket48',
   bilibiliCookie: '',
   bilibiliUserInfo: null,
   msg_sort_order: 'desc',
@@ -29,18 +28,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customBackgroundUpdatedAt: 0,
   meet48Auth: null,
   pip_auto: false,
-  // 个性装扮（消息 ext.user.pfUrl / teamLogo / badge），留空 = 不带
-  yaya_send_pfurl: '',
-  yaya_send_teamlogo: '',
-  yaya_send_is_star: '',
-  yaya_send_badge: '',
-  yaya_send_bubble_id: '0',
-  // 直播装扮：进场特效 / 弹幕气泡（账号级，选中即同步到口袋）
-  yaya_live_effect_id: '',
-  yaya_live_effect_name: '',
-  yaya_live_bubble_id: '',
-  yaya_live_bubble_name: '',
-  yaya_pm_unread_badge: true,
 };
 
 export async function loadSettings(): Promise<AppSettings> {

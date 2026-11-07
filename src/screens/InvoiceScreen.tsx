@@ -1,9 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import {KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
+import {
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { showDialog } from '../components/AppDialog';
 import { useUiStore } from '../store';
 import ScreenHeader from '../components/ScreenHeader';
+import { FadeInView } from '../components/Motion';
 import { HeaderAction } from '../components/HeaderAction';
 import { Button } from '../components/Button';
 import { Pill } from '../components/Pill';
@@ -13,7 +22,6 @@ import pocketApi from '../api/pocket48';
 import { errorMessage, unwrapList } from '../utils/data';
 import { usePalette, radiiAlias } from '../theme';
 import { useI18n } from '../i18n';
-import { GlassSurface } from '../components/GlassSurface';
 
 interface OrderItem {
   dataId: string;
@@ -76,9 +84,9 @@ export default function InvoiceScreen() {
 
   const handleSubmit = async () => {
     const selected = orders.filter((o) => o.selected);
-    if (!selected.length) { showDialog(t('提示'), t('请选择要开票的订单')); return; }
-    if (!buyerName.trim()) { showDialog(t('提示'), t('请填写发票抬头')); return; }
-    if (!notifyEmail.trim()) { showDialog(t('提示'), t('请填写接收邮箱')); return; }
+    if (!selected.length) { Alert.alert(t('提示'), t('请选择要开票的订单')); return; }
+    if (!buyerName.trim()) { Alert.alert(t('提示'), t('请填写发票抬头')); return; }
+    if (!notifyEmail.trim()) { Alert.alert(t('提示'), t('请填写接收邮箱')); return; }
     setSubmitting(true);
     try {
       await pocketApi.applyElectronicInvoice({
@@ -88,11 +96,11 @@ export default function InvoiceScreen() {
       });
       showToast(t('开票申请已提交'));
       fetchOrders();
-    } catch (e: any) { showDialog(t('提交失败'), errorMessage(e)); }
+    } catch (e: any) { Alert.alert(t('提交失败'), errorMessage(e)); }
     finally { setSubmitting(false); }
   };
 
-  const renderOrder = ({ item }: { item: OrderItem; index: number }) => {
+  const renderOrder = ({ item, index }: { item: OrderItem; index: number }) => {
     const disabled = item.invoiceStatus !== 0;
     const selected = item.selected;
     const statusLabel = statusLabels[item.invoiceStatus] || t('未知');
@@ -103,7 +111,8 @@ export default function InvoiceScreen() {
         ? palette.fill2
         : palette.labelTertiary;
     return (
-      <View style={[styles.orderCard, { backgroundColor: palette.surfaceGlassStrong, borderColor: selected ? palette.tint : palette.hairline, borderWidth: StyleSheet.hairlineWidth, borderRadius: 20 }, disabled && styles.cardDisabled]}>
+      <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={300}>
+        <View style={[styles.orderCard, { backgroundColor: palette.surface, borderColor: selected ? palette.tint : palette.hairline }, disabled && styles.cardDisabled]}>
           {/* 订单信息 */}
           <View style={styles.orderInfo}>
             <Text style={[styles.orderName, { color: palette.label }]} numberOfLines={2}>{item.goodsName}</Text>
@@ -135,7 +144,8 @@ export default function InvoiceScreen() {
               ]}
             />
           )}
-      </View>
+        </View>
+      </FadeInView>
     );
   };
 
@@ -160,11 +170,11 @@ export default function InvoiceScreen() {
           <EmptyState icon="receipt-outline" title={t('暂无订单')} />
         ) : null}
 
-        <GlassSurface radius={20} role="card"
+        <View
           style={[
             styles.formCard,
             {
-              backgroundColor: 'transparent',
+              backgroundColor: palette.surface,
               borderColor: palette.hairline,
             },
           ]}
@@ -225,7 +235,7 @@ export default function InvoiceScreen() {
             fullWidth
             style={styles.submitBtn}
           />
-        </GlassSurface>
+        </View>
       </ScrollView>
     </View>
     </KeyboardAvoidingView>

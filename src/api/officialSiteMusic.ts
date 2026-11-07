@@ -1,4 +1,5 @@
 // 官方音乐库（口袋48官网源）
+// 源数据来自 yk1z/yaya_msg 电脑版（github.com/yk1z/yaya_msg）的 official-site-music-feature，
 // 一次性全量、无 token。关键修正：
 //   - ix_mp3list_xxx 每首只有 mp3/artist/title，且 artist 字段其实是「专辑名」（全都写成"热恋专属 Love Ver."），
 //     所以不能直接拿 artist 当专辑/歌手。
@@ -212,6 +213,7 @@ function parseTrackDuration(durationText: string): number {
   return parts.reduce((acc, p) => acc * 60 + p, 0);
 }
 
+// SNH：mp3 文件名前缀 → 专辑名（yk1z 电脑版同款硬编码映射，保证专辑名正确）
 const SNH_ALBUM_BY_AUDIO_GROUP = new Map<string, string>([
   ['fly', 'F.L.Y成长三部曲'],
   ['wmlc', '我们的旅程'],
@@ -443,7 +445,7 @@ function buildTracks(
     .filter(Boolean) as OfficialSiteTrack[];
 }
 
-const CACHE_KEY = 'yaya_official_site_music_cache_v7';
+const CACHE_KEY = 'yaya_official_site_music_cache_v6';
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 export async function loadOfficialSiteMusic(force = false): Promise<OfficialSiteTrack[]> {
@@ -508,12 +510,10 @@ export async function loadOfficialSiteMusic(force = false): Promise<OfficialSite
     }
     throw new Error('官网音乐列表为空');
   }
-  if (groupDataArr.every((r) => r.status === 'fulfilled')) {
-    try {
-      await AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), list: all }));
-    } catch {
-      /* ignore */
-    }
+  try {
+    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), list: all }));
+  } catch {
+    /* ignore */
   }
   return all;
 }

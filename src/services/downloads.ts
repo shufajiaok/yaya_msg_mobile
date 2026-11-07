@@ -2,7 +2,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import { logError } from '../utils/runtimeLog';
-import { Linking, Platform, Alert, NativeModules } from 'react-native';
+import { Linking, Platform, Alert } from 'react-native';
+import { useSettingsStore } from '../store';
+
+function getToken(): string {
+  try {
+    return useSettingsStore.getState().settings.p48Token || '';
+  } catch {
+    return '';
+  }
+}
 
 export type DownloadType = 'replay' | 'voice' | 'image' | 'video' | 'audio' | 'file';
 export type DownloadStatus = 'queued' | 'downloading' | 'done' | 'failed';
@@ -15,8 +24,6 @@ export interface DownloadItem {
   status: DownloadStatus;
   progress: number;
   localUri?: string;
-  publicUri?: string;
-  exportError?: string;
   error?: string;
   createdAt: number;
   totalBytes?: number;
@@ -71,41 +78,6 @@ function extensionFromUrl(url: string, fallback: DownloadType) {
   return '.bin';
 }
 
-function mimeTypeForDownload(name: string): string {
-  const extension = name.toLowerCase().split('.').pop();
-  const types: Record<string, string> = {
-    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
-    mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', amr: 'audio/amr', wav: 'audio/wav',
-    mp4: 'video/mp4', mov: 'video/quicktime', pdf: 'application/pdf', json: 'application/json',
-  };
-  return types[extension || ''] || 'application/octet-stream';
-}
-
-async function exportToPublicDownloads(localUri: string, name: string): Promise<string> {
-  const native = NativeModules.PublicDownloads;
-  if (!native?.saveToDownloads) throw new Error('系统下载目录保存功能不可用，请更新应用');
-  return native.saveToDownloads(localUri, name, mimeTypeForDownload(name));
-}
-
-/**
- * 导出到系统下载目录是「锦上添花」：原生模块缺失（旧版 APK / 开发包）或写入失败时
- * 只记录 exportError，文件已经在应用目录里，下载本身仍算成功。
- * 此前直接 await，一次导出失败会把已完成的下载判成 failed。
- */
-async function tryExportToPublicDownloads(localUri: string, name: string): Promise<{ publicUri?: string; exportError?: string }> {
-  if (Platform.OS !== 'android') return {};
-  try {
-    return { publicUri: await exportToPublicDownloads(localUri, name) };
-  } catch (error: any) {
-    return { exportError: error?.message || String(error) };
-  }
-}
-
-async function deletePublicCopy(uri?: string) {
-  if (Platform.OS !== 'android' || !uri || !NativeModules.PublicDownloads?.deletePublicDownload) return;
-  await NativeModules.PublicDownloads.deletePublicDownload(uri).catch(() => undefined);
-}
-
 export function guessDownloadName(url: string, type: DownloadType, title?: string) {
   const fromUrl = String(url || '').split('?')[0].split('/').pop() || '';
   const base = sanitizeName(title || decodeURIComponent(fromUrl || `${type}-${Date.now()}`));
@@ -118,12 +90,7 @@ export async function loadDownloadItems(): Promise<DownloadItem[]> {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    // 下载执行器只存在于当前进程；重启后没有任务会继续这些状态，恢复为可重试失败项。
-    return Array.isArray(parsed)
-      ? parsed.map((item) => item.status === 'downloading' || item.status === 'queued'
-        ? { ...item, status: 'failed' as const, error: '应用重启后下载中断，请重试' }
-        : item)
-      : [];
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -133,24 +100,11 @@ export async function saveDownloadItems(items: DownloadItem[]) {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(items));
 }
 
-/**
- * 写盘串行链：updateItem / enqueue 都是「读整表 → 改 → 写整表」，
- * 两个下载同时进行时，各自的整表写会覆盖对方最新状态 → 进度丢失或回跳（2026-10-03 修复）。
- */
-let downloadWriteChain: Promise<unknown> = Promise.resolve();
-function withDownloadWrite<T>(fn: () => Promise<T>): Promise<T> {
-  const run = downloadWriteChain.then(fn);
-  downloadWriteChain = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-function updateItem(id: string, patch: Partial<DownloadItem>): Promise<DownloadItem[]> {
-  return withDownloadWrite(async () => {
-    const items = await loadDownloadItems();
-    const next = items.map((item) => (item.id === id ? { ...item, ...patch } : item));
-    await saveDownloadItems(next);
-    return next;
-  });
+async function updateItem(id: string, patch: Partial<DownloadItem>) {
+  const items = await loadDownloadItems();
+  const next = items.map((item) => (item.id === id ? { ...item, ...patch } : item));
+  await saveDownloadItems(next);
+  return next;
 }
 
 export async function enqueueDownload(params: {
@@ -181,42 +135,32 @@ export async function enqueueDownload(params: {
     createdAt: Date.now(),
   };
 
-  await withDownloadWrite(async () => {
-    const existing = await loadDownloadItems();
-    await saveDownloadItems([item, ...existing.filter((old) => old.url !== url)]);
-  });
+  const existing = await loadDownloadItems();
+  await saveDownloadItems([item, ...existing.filter((old) => old.url !== url)]);
 
   const localUri = `${DOWNLOAD_DIR}${item.id}-${item.name}`;
-  let progressTimer: ReturnType<typeof setTimeout> | null = null;
-  let latestPatch: Partial<DownloadItem> | null = null;
-  let progressWrite: Promise<unknown> = Promise.resolve();
-  let progressClosed = false;
-  const stopProgress = async () => {
-    progressClosed = true;
-    if (progressTimer) clearTimeout(progressTimer);
-    progressTimer = null;
-    latestPatch = null;
-    await progressWrite.catch(() => undefined);
-  };
   try {
+    const token = getToken();
     const headers: Record<string, string> = {
       'User-Agent': 'PocketFans201807/7.0.41 (iPhone; iOS 16.3.1; Scale/2.00)',
       Referer: 'https://h5.48.cn/',
     };
+    if (token) headers['token'] = token;
 
     const createDownloadResumable = (FileSystem as any).createDownloadResumable;
     if (typeof createDownloadResumable === 'function') {
+      let progressTimer: ReturnType<typeof setTimeout> | null = null;
+      let latestPatch: Partial<DownloadItem> | null = null;
+
       const flushProgress = async () => {
-        if (progressClosed || !latestPatch) return;
+        if (!latestPatch) return;
         const patch = latestPatch;
         latestPatch = null;
         progressTimer = null;
-        progressWrite = updateItem(item.id, patch);
-        await progressWrite;
+        await updateItem(item.id, patch);
       };
 
       const updateProgress = (written: number, expected: number) => {
-        if (progressClosed) return;
         const total = Number(expected) || 0;
         const done = Number(written) || 0;
         const progress = total > 0 ? Math.max(0, Math.min(1, done / total)) : 0;
@@ -230,11 +174,10 @@ export async function enqueueDownload(params: {
       });
 
       const result = await dl.downloadAsync();
-      await stopProgress();
+      if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+      await flushProgress();
       const downloadedUri = result?.uri;
-      const savedUri = downloadedUri || localUri;
-      const exported = await tryExportToPublicDownloads(savedUri, item.name);
-      const done = { status: 'done' as const, progress: 1, localUri: savedUri, publicUri: exported.publicUri, exportError: exported.exportError };
+      const done = { status: 'done' as const, progress: 1, localUri: downloadedUri || localUri };
       await updateItem(item.id, done);
       // 下载完成后按额度淘汰最早的缓存（离线优先但不过度占存储）
       await enforceCacheQuota().catch(() => undefined);
@@ -254,8 +197,7 @@ export async function enqueueDownload(params: {
     }
 
     const { uri: downloadedUri } = await FileSystem.downloadAsync(url, localUri, { headers });
-    const exported = await tryExportToPublicDownloads(downloadedUri || localUri, item.name);
-    const done = { status: 'done' as const, progress: 1, localUri: downloadedUri || localUri, publicUri: exported.publicUri, exportError: exported.exportError };
+    const done = { status: 'done' as const, progress: 1, localUri: downloadedUri || localUri };
     await updateItem(item.id, done);
     await enforceCacheQuota().catch(() => undefined);
 
@@ -274,7 +216,6 @@ export async function enqueueDownload(params: {
 
     return { ...item, ...done };
   } catch (error: any) {
-    await stopProgress();
     const failed = { status: 'failed' as const, error: error?.message || String(error) };
     await updateItem(item.id, failed);
     throw error;
@@ -282,29 +223,21 @@ export async function enqueueDownload(params: {
 }
 
 export async function deleteDownloadItem(id: string) {
-  await withDownloadWrite(async () => {
-    const items = await loadDownloadItems();
-    const target = items.find((item) => item.id === id);
-    if (target?.localUri) {
-      await FileSystem.deleteAsync(target.localUri, { idempotent: true }).catch(() => undefined);
-    }
-    await deletePublicCopy(target?.publicUri);
-    await saveDownloadItems(items.filter((item) => item.id !== id));
-  });
+  const items = await loadDownloadItems();
+  const target = items.find((item) => item.id === id);
+  if (target?.localUri) {
+    await FileSystem.deleteAsync(target.localUri, { idempotent: true }).catch(() => undefined);
+  }
+  await saveDownloadItems(items.filter((item) => item.id !== id));
 }
 
 export async function clearFinishedDownloads() {
-  await withDownloadWrite(async () => {
-    const items = await loadDownloadItems();
-    const finished = items.filter((item) => item.status === 'done' || item.status === 'failed');
-    await Promise.all(finished.map((item) =>
-      Promise.all([
-        item.localUri ? FileSystem.deleteAsync(item.localUri, { idempotent: true }).catch(() => undefined) : Promise.resolve(),
-        deletePublicCopy(item.publicUri),
-      ]),
-    ));
-    await saveDownloadItems(items.filter((item) => item.status === 'downloading' || item.status === 'queued'));
-  });
+  const items = await loadDownloadItems();
+  const finished = items.filter((item) => item.status === 'done' || item.status === 'failed');
+  await Promise.all(finished.map((item) =>
+    item.localUri ? FileSystem.deleteAsync(item.localUri, { idempotent: true }).catch(() => undefined) : Promise.resolve(),
+  ));
+  await saveDownloadItems(items.filter((item) => item.status === 'downloading' || item.status === 'queued'));
 }
 
 /**
@@ -312,35 +245,33 @@ export async function clearFinishedDownloads() {
  * 在每次下载完成时调用：超出 MAX_CACHE_BYTES 后，从最早的「已完成」项开始删文件，直到回到额度内。
  */
 export async function enforceCacheQuota(maxBytes: number = MAX_CACHE_BYTES): Promise<void> {
-  return withDownloadWrite(async () => {
-    let items = await loadDownloadItems();
-    const done = items.filter((i) => i.status === 'done' && i.localUri);
-    // totalBytes 可能缺失（服务端无 Content-Length / fallback 路径下载），这类文件
-    // 之前永不参与淘汰。这里用实际文件大小兜底，确保 4GB 额度对全部完成项生效。
-    const entries = (
-      await Promise.all(
-        done.map(async (i) => {
-          let bytes = i.totalBytes || 0;
-          if (bytes <= 0) {
-            const info = await FileSystem.getInfoAsync(i.localUri!).catch(() => null);
-            bytes = info && info.exists ? info.size || 0 : 0;
-          }
-          return { item: i, bytes };
-        }),
-      )
-    ).filter((e) => e.bytes > 0);
-    let total = entries.reduce((sum, e) => sum + e.bytes, 0);
-    if (total <= maxBytes) return;
+  let items = await loadDownloadItems();
+  const done = items.filter((i) => i.status === 'done' && i.localUri);
+  // totalBytes 可能缺失（服务端无 Content-Length / fallback 路径下载），这类文件
+  // 之前永不参与淘汰。这里用实际文件大小兜底，确保 4GB 额度对全部完成项生效。
+  const entries = (
+    await Promise.all(
+      done.map(async (i) => {
+        let bytes = i.totalBytes || 0;
+        if (bytes <= 0) {
+          const info = await FileSystem.getInfoAsync(i.localUri!).catch(() => null);
+          bytes = info && info.exists ? info.size || 0 : 0;
+        }
+        return { item: i, bytes };
+      }),
+    )
+  ).filter((e) => e.bytes > 0);
+  let total = entries.reduce((sum, e) => sum + e.bytes, 0);
+  if (total <= maxBytes) return;
 
-    const oldestFirst = [...entries].sort((a, b) => a.item.createdAt - b.item.createdAt);
-    for (const { item: target, bytes } of oldestFirst) {
-      if (total <= maxBytes) break;
-      await FileSystem.deleteAsync(target.localUri!, { idempotent: true }).catch(() => undefined);
-      items = items.map((i) => i.id === target.id && i.publicUri ? { ...i, localUri: undefined } : i).filter((i) => i.id !== target.id || !!i.publicUri);
-      total -= bytes;
-    }
-    await saveDownloadItems(items);
-  });
+  const oldestFirst = [...entries].sort((a, b) => a.item.createdAt - b.item.createdAt);
+  for (const { item: target, bytes } of oldestFirst) {
+    if (total <= maxBytes) break;
+    await FileSystem.deleteAsync(target.localUri!, { idempotent: true }).catch(() => undefined);
+    items = items.filter((i) => i.id !== target.id);
+    total -= bytes;
+  }
+  await saveDownloadItems(items);
 }
 
 /**
@@ -351,20 +282,13 @@ export async function resolvePlayableUri(url: string): Promise<string | null> {
   const target = String(url || '').trim();
   if (!/^https?:\/\//i.test(target)) return null;
   const items = await loadDownloadItems();
-  const hit = items.find((i) => i.status === 'done' && i.url === target && (i.localUri || i.publicUri));
+  const hit = items.find((i) => i.status === 'done' && i.url === target && i.localUri);
   if (!hit) return null;
-  if (hit.localUri) {
-    const info = await FileSystem.getInfoAsync(hit.localUri).catch(() => null);
-    if (info?.exists) return hit.localUri;
-  }
-  return hit.publicUri || null;
+  const info = await FileSystem.getInfoAsync(hit.localUri!).catch(() => null);
+  return info && info.exists ? hit.localUri! : null;
 }
 
 export async function openDownloadItem(item: DownloadItem) {
-  if (Platform.OS === 'android' && item.publicUri && NativeModules.PublicDownloads?.openPublicDownload) {
-    await NativeModules.PublicDownloads.openPublicDownload(item.publicUri, mimeTypeForDownload(item.name));
-    return;
-  }
   let target: string | undefined = item.localUri || undefined;
 
   // 离线兜底：本地文件若已被系统清理/丢失，优雅降级而非崩溃
@@ -429,15 +353,4 @@ export async function openDownloadItem(item: DownloadItem) {
     } catch {}
   }
   await Linking.openURL(target);
-}
-
-export async function exportExistingDownload(item: DownloadItem): Promise<DownloadItem> {
-  if (Platform.OS !== 'android') return item;
-  if (!item.localUri) throw new Error('应用内下载文件已不存在，请重新下载');
-  const info = await FileSystem.getInfoAsync(item.localUri).catch(() => null);
-  if (!info?.exists || (info.size || 0) <= 0) throw new Error('应用内下载文件不存在或为空');
-  const publicUri = await exportToPublicDownloads(item.localUri, item.name);
-  const next = { ...item, publicUri, exportError: undefined };
-  await updateItem(item.id, { publicUri, exportError: undefined });
-  return next;
 }

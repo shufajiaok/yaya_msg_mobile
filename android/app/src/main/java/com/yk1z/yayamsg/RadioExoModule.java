@@ -3,8 +3,6 @@ package com.yk1z.yayamsg;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 
 import androidx.annotation.NonNull;
 
@@ -12,7 +10,6 @@ import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
-import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
@@ -22,7 +19,6 @@ import java.util.Map;
 /** 原生 Exo 播放桥（exo-native-music）：下发队列/命令，进度等事件回流 JS。 */
 public class RadioExoModule extends ReactContextBaseJavaModule {
   private static WeakReference<ReactApplicationContext> contextRef;
-  private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
   public RadioExoModule(ReactApplicationContext reactContext) {
     super(reactContext);
@@ -32,9 +28,9 @@ public class RadioExoModule extends ReactContextBaseJavaModule {
   @NonNull @Override
   public String getName() { return "RadioExoModule"; }
 
-  static boolean emitJs(Context ctx, String type, Map<String, Object> extra) {
+  static void emitJs(Context ctx, String type, Map<String, Object> extra) {
     ReactApplicationContext rc = contextRef == null ? null : contextRef.get();
-    if (rc == null || !rc.hasActiveCatalystInstance()) return false;
+    if (rc == null || !rc.hasActiveCatalystInstance()) return;
     WritableMap payload = Arguments.createMap();
     payload.putString("type", type);
     if (extra != null) {
@@ -50,10 +46,7 @@ public class RadioExoModule extends ReactContextBaseJavaModule {
     }
     try {
       rc.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit("YayaExoEvent", payload);
-      return true;
-    } catch (Throwable ignored) {
-      return false;
-    }
+    } catch (Throwable ignored) {}
   }
 
   private void send(Intent i) {
@@ -86,25 +79,6 @@ public class RadioExoModule extends ReactContextBaseJavaModule {
         .putExtra("position", positionSec);
     if ("repeat".equals(cmd)) i.putExtra("repeat", (int) positionSec); // repeat 模式：0 顺序 / 1 单曲循环
     send(i);
-  }
-
-  @ReactMethod
-  public void getPlaybackSnapshot(Promise promise) {
-    mainHandler.post(() -> {
-      try {
-        Map<String, Object> snapshot = YayaExoService.getPlaybackSnapshot();
-        WritableMap result = Arguments.createMap();
-        for (Map.Entry<String, Object> e : snapshot.entrySet()) {
-          Object v = e.getValue();
-          if (v instanceof String) result.putString(e.getKey(), (String) v);
-          else if (v instanceof Boolean) result.putBoolean(e.getKey(), (Boolean) v);
-          else if (v instanceof Number) result.putDouble(e.getKey(), ((Number) v).doubleValue());
-        }
-        promise.resolve(result);
-      } catch (Throwable t) {
-        promise.reject("snapshot_error", t);
-      }
-    });
   }
 
   /** 推送下一首/上一首单跳提示（后台切歌走 service 本地，不依赖 JS 异步链路） */

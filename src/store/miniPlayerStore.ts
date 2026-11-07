@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { useMusicPlayerStore } from './musicPlayerStore';
 
 /** 应用内悬浮小窗播放信息 */
 export interface MiniPlayerInfo {
@@ -7,22 +6,14 @@ export interface MiniPlayerInfo {
   title: string;
   cover?: string;
   isLive: boolean;
-  /** 纯音频源（上麦/电台）：小窗渲染为紧凑胶囊（扁 pill）而非视频框 */
-  audioOnly?: boolean;
   /** 交棒给小窗时的播放位置（秒），小窗 onLoad 后 seek 续播 */
   position?: number;
-  /** ⚠️ 大窗已知的视频宽高（PlayerCore onVideoSize 上报）：小窗用它**立刻**按比例适配容器。
-   *  部分流（rtmp/flv 原生视图、部分录播）onLoad/onVideoSizeChanged 拿不到尺寸，
-   *  此前小窗一直停在默认 180×104，竖屏内容被 cover 裁得只剩中间（用户反馈「没自适应/空间不对」）。 */
-  aspectW?: number;
-  aspectH?: number;
   /** 公演/B站直播走网页内核播放（去 LIVE 标 + WebAudio 增益） */
   web?: { headers?: Record<string, string>; volumeBoost?: number };
   /** 点击小窗回放（全屏）参数：直接传回 MediaScreen 路由参数 */
   backTo: {
     mode: 'live' | 'vod';
     playUrl: string;
-    playLiveId?: string;
     playTitle?: string;
     playCover?: string;
     /** 小窗→大窗续播位置（仅录播；MediaScreen 直接按此 seek） */
@@ -54,18 +45,7 @@ export const useMiniPlayerStore = create<MiniPlayerState>((set) => ({
   playing: true,
   currentPos: 0,
   sysToggleSeq: 0,
-  open: (info) => {
-    // 播放互斥（后播者胜）：与 playerStore.open 同款 —— 小窗/音频胶囊开播时暂停后台音乐。
-    // 此前这里完全不触碰音乐 store →「正在听音乐 + 点房间上麦」变成双路声音（2026-10-03 修复）。
-    try {
-      const mst = useMusicPlayerStore.getState();
-      if (mst.queue.length && (mst.playbackState === 'playing' || mst.playbackState === 'paused')) {
-        mst.setPlaybackState('paused');
-      }
-    } catch {}
-    const position = info.position;
-    set({ info, visible: true, playing: true, currentPos: !info.isLive && position != null && Number.isFinite(position) ? Math.max(0, position) : 0 });
-  },
+  open: (info) => set({ info, visible: true, playing: true, currentPos: 0 }),
   close: () => set({ visible: false, info: null, currentPos: 0 }),
   setPlaying: (playing) => set({ playing }),
   setCurrentPos: (currentPos) => set({ currentPos }),

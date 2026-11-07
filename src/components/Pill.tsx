@@ -1,69 +1,67 @@
 /**
- * Pill / Chip —— 玻璃胶囊
- *
- * 保留原 API（label / selected / onPress / accent / style），全站调用点无需改动。
- * 实现走 GlassSurface（chip 材质），旧 reactnatively Chip 已移除。
+ * Pill / Chip：圆角胶囊小标签 / 可交互切换控件
+ * iOS 26 风格：pill (完全圆角)、玻璃底、可选中态
  */
 import React from 'react';
-import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
-import { GlassSurface } from './GlassSurface';
-import { usePalette } from '../theme';
+import { Pressable, StyleProp, StyleSheet, Text, ViewStyle } from 'react-native';
+import { usePalette, radii } from '../theme';
 import { typography } from '../theme/typography';
 
 export interface PillProps {
   label: string;
   selected?: boolean;
   onPress?: () => void;
-  /** 强调填充（实心 tint 底 + 白字），默认 off（玻璃底 + 描边） */
+  /** 强调填充（粉色实底白字），默认 off（玻璃底 + 描边） */
   accent?: boolean;
   style?: StyleProp<ViewStyle>;
 }
 
 export function Pill({ label, selected, onPress, accent, style }: PillProps) {
   const palette = usePalette();
-  const solid = accent || selected;
-
-  const content = (
-    <Text
-      numberOfLines={1}
-      style={[
-        typography.footnote,
-        { fontWeight: '600' },
-        { color: solid ? '#fff' : palette.label },
-      ]}
-    >
-      {label}
-    </Text>
-  );
-
-  // 实心强调态不做玻璃（玻璃底下压一层实心色既看不出玻璃，也浪费一次 backdrop 采样）
-  if (solid) {
-    return (
-      <Pressable
-        onPress={onPress}
-        disabled={!onPress}
-        style={[styles.box, { backgroundColor: palette.tint }, style]}
-      >
-        {content}
-      </Pressable>
-    );
-  }
+  const filled = accent || selected;
+  const bg = filled ? palette.tint : palette.fill3;
+  const fg = filled ? palette.onTint : palette.label;
 
   return (
-    <Pressable onPress={onPress} disabled={!onPress} style={style}>
-      <GlassSurface role="chip" radius={999} style={styles.box} interactive={!!onPress}>
-        {content}
-      </GlassSurface>
+    <Pressable
+      onPress={onPress}
+      hitSlop={{ top: 4, bottom: 4, left: 5, right: 5 }}
+      style={({ pressed }) => [
+        styles.pill,
+        {
+          backgroundColor: bg,
+          borderColor: filled ? 'transparent' : palette.hairline,
+          transform: [{ scale: pressed ? 0.96 : 1 }],
+        },
+        style,
+      ]}
+    >
+      <Text
+        numberOfLines={1}
+        ellipsizeMode="tail"
+        style={[
+          typography.subhead,
+          {
+            color: fg,
+            fontWeight: '600',
+            fontSize: 14,
+            lineHeight: 18,
+            flexShrink: 1,
+          },
+        ]}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  box: {
+  pill: {
     paddingHorizontal: 14,
     paddingVertical: 7,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 999,
+    borderRadius: radii.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignSelf: 'flex-start',
   },
 });

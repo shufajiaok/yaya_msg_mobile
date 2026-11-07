@@ -24,7 +24,6 @@ import { typography } from '../theme/typography';
 import { useI18n } from '../i18n';
 import { joinMeta } from '../utils/format';
 import { useVinylSpin } from '../hooks/useVinylSpin';
-import { GlassSurface } from '../components/GlassSurface';
 
 const ANIM_DURATION = 300;
 
@@ -84,6 +83,10 @@ function FullScreenPlayerInner({
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const dragRatioRef = useRef<number>(0);
   const gestureActive = useRef(false);
+  // 松手后的保持目标：播放器位置追上之前进度不回落（去「双击回退/回弹」）
+  const [heldRatio, setHeldRatio] = useState<number | null>(null);
+  const heldRatioRef = useRef<number | null>(null);
+  const heldTimeRef = useRef(0);
   const [showQueue, setShowQueue] = useState(false);
 
   // 用 pageX - 条起点换算：locationX 在 Android 上相对「事件目标视图」，
@@ -103,6 +106,8 @@ function FullScreenPlayerInner({
     gestureActive.current = true;
     if (progRaf.current) cancelAnimationFrame(progRaf.current);
     progRaf.current = 0;
+    heldRatioRef.current = null;
+    setHeldRatio(null);
     dragRatioRef.current = r;
     pendingRatio.current = r;
     setDragRatio(r);
@@ -125,20 +130,26 @@ function FullScreenPlayerInner({
     progRaf.current = 0;
     const r = dragRatioRef.current;
     if (gestureActive.current && duration > 0) {
-      const target = r * duration;
-      const st = useMusicPlayerStore.getState();
-      st.setSeekTarget(target);
-      // 乐观写：进度条立即停在松手位置。
-      // 「回弹」的根因修复在 store.setPosition 的 seek 粘滞守卫里 ——
-      // 播放器还没真正跳过去时上报的旧位置会被丢弃，这里不再需要 heldRatio 补丁。
-      st.setPosition(target);
+      useMusicPlayerStore.getState().setSeekTarget(r * duration);
+      // 松手后保持目标进度直到播放器追上，避免进度条回弹
+      heldRatioRef.current = r;
+      heldTimeRef.current = Date.now();
+      setHeldRatio(r);
     }
     gestureActive.current = false;
     dragRatioRef.current = 0;
     pendingRatio.current = 0;
     setDragRatio(null);
   };
-  const shownRatio = dragRatio ?? progress;
+  // 播放器追上目标（或 2.5s 超时）后释放保持
+  useEffect(() => {
+    if (heldRatio == null) return;
+    if (Math.abs(progress - heldRatio) < 0.012 || Date.now() - heldTimeRef.current > 2500) {
+      heldRatioRef.current = null;
+      setHeldRatio(null);
+    }
+  }, [progress, heldRatio]);
+  const shownRatio = dragRatio ?? heldRatio ?? progress;
 
   const [showLyrics, setShowLyrics] = useState(false);
   const [lyricSize, setLyricSize] = useState(17);
@@ -284,13 +295,13 @@ function FullScreenPlayerInner({
             <Pressable onPress={() => { MusicEngine.cycleMode(); }} style={({ pressed }) => [styles.sideBtn, pressed && { opacity: 0.6 }]}>
               <Icon name={playMode === 'single' ? 'repeat-once' : playMode === 'random' ? 'shuffle-variant' : 'repeat'} size={22} color={iconSecondary} />
             </Pressable>
-            <Pressable onPress={() => { void MusicEngine.prev().catch(() => {}); }} style={({ pressed }) => [styles.sideBtn, pressed && { opacity: 0.6 }]}>
+            <Pressable onPress={() => { MusicEngine.prev(); }} style={({ pressed }) => [styles.sideBtn, pressed && { opacity: 0.6 }]}>
               <Icon name="skip-previous" size={30} color={iconStrong} />
             </Pressable>
-            <Pressable onPress={() => { try { MusicEngine.togglePause(); } catch {} }} style={({ pressed }) => [styles.playBtn, { backgroundColor: palette.tint }, pressed && { transform: [{ scale: 0.94 }] }]}>
+            <Pressable onPress={() => { MusicEngine.togglePause(); }} style={({ pressed }) => [styles.playBtn, { backgroundColor: palette.tint }, pressed && { transform: [{ scale: 0.94 }] }]}>
               <Icon name={isPlaying ? 'pause' : 'play'} size={38} color={palette.onTint} />
             </Pressable>
-            <Pressable onPress={() => { void MusicEngine.next().catch(() => {}); }} style={({ pressed }) => [styles.sideBtn, pressed && { opacity: 0.6 }]}>
+            <Pressable onPress={() => { MusicEngine.next(); }} style={({ pressed }) => [styles.sideBtn, pressed && { opacity: 0.6 }]}>
               <Icon name="skip-next" size={30} color={iconStrong} />
             </Pressable>
             <Pressable onPress={() => setShowLyrics(!showLyrics)} style={({ pressed }) => [styles.sideBtn, showLyrics && { backgroundColor: palette.tintSoft }, pressed && { opacity: 0.6 }]}>
@@ -304,11 +315,11 @@ function FullScreenPlayerInner({
       </Animated.View>
       <Modal visible={showQueue} transparent animationType="slide" onRequestClose={() => setShowQueue(false)}>
         <TouchableOpacity style={styles.queueMask} activeOpacity={1} onPress={() => setShowQueue(false)}>
-          <GlassSurface radius={20} role="card"
+          <View
             style={[
               styles.queueSheet,
               {
-                backgroundColor: 'transparent',
+                backgroundColor: palette.surface,
                 borderTopLeftRadius: radii.sheet,
                 borderTopRightRadius: radii.sheet,
               },
@@ -362,7 +373,7 @@ function FullScreenPlayerInner({
                 );
               }}
             />
-          </GlassSurface>
+          </View>
         </TouchableOpacity>
       </Modal>
     </View>

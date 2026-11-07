@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { parseMaybeJson } from '../utils/data';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppSettings, Member } from '../types';
 import { APP_VERSION } from '../constants';
@@ -44,29 +43,19 @@ export const useMemberStore = create<MemberState>((set) => ({
 }));
 
 interface UiState {
-  tabBarHiddenByRoute: { Media: boolean; Rooms: boolean };
+  tabBarHidden: boolean;
   toastMessage: string;
-  /**
-   * 当前屏幕的「玻璃折射背景」：房间页打开时挂成员房间的背景图（+遮罩色），
-   * 让房间里的玻璃折射房间背景而不是全局软件背景；离开屏幕清 null 还原全局。
-   */
-  screenBackdrop: { uri: string; scrim: string } | null;
-  setTabBarHidden: (hidden: boolean, route: 'Media' | 'Rooms') => void;
+  setTabBarHidden: (hidden: boolean) => void;
   showToast: (message: string) => void;
   hideToast: () => void;
-  setScreenBackdrop: (v: { uri: string; scrim: string } | null) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  tabBarHiddenByRoute: { Media: false, Rooms: false },
+  tabBarHidden: false,
   toastMessage: '',
-  screenBackdrop: null,
-  setTabBarHidden: (hidden, route) => set((state) => state.tabBarHiddenByRoute[route] === hidden
-    ? state
-    : { tabBarHiddenByRoute: { ...state.tabBarHiddenByRoute, [route]: hidden } }),
+  setTabBarHidden: (hidden) => set({ tabBarHidden: hidden }),
   showToast: (message) => set({ toastMessage: message }),
   hideToast: () => set({ toastMessage: '' }),
-  setScreenBackdrop: (v) => set({ screenBackdrop: v }),
 }));
 
 // --- v2.6: Announcement store ---
@@ -114,7 +103,7 @@ const GITHUB_RELEASES_URL = 'https://api.github.com/repos/Xenia0922/yaya_msg_mob
 // 降级源：GitHub release 页面 HTML（无 API 匿名限流；共享出口 IP 触发 403 时自动切换）
 const GITHUB_RELEASES_PAGE = 'https://github.com/Xenia0922/yaya_msg_mobile/releases/latest';
 // 更新跳转链接：统一指向用户自建下载页（夸克网盘 + GitHub 双渠道，可随时改页内链接无需发版）
-const UPDATE_DOWNLOAD_PAGE = 'https://gnz48.tech/app/';
+const UPDATE_DOWNLOAD_PAGE = 'https://010push.a23xyz.xyz/app/';
 const UPDATE_TIMEOUT = 8000;
 // 检查结果持久化，24h 内不重复打 GitHub API（未认证限流 60/h，冷启全打会快速耗尽）
 const UPDATE_LAST_CHECK_KEY = 'yaya_update_last_check';
@@ -192,7 +181,7 @@ export const useUpdateStore = create<UpdateState>((set) => ({
           new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), UPDATE_TIMEOUT)),
         ]);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data: any = parseMaybeJson(await res.text());
+        const data: any = await res.json();
         tag = String(data.tag_name || data.name || '');
       } catch {
         // 源2：GitHub release 页面 HTML（无 API 匿名限流）：重定向 URL 提取 tag

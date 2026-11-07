@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 import PlayerScreen, { buildPocketHeaders } from '../player';
-import { RouteProp, useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import MemberPicker from '../components/MemberPicker';
 import ScreenHeader from '../components/ScreenHeader';
@@ -23,18 +23,16 @@ import { ScalePressable } from '../components/Motion';
 import { EmptyState, ErrorState } from '../components/StateViews';
 import { LoginPrompt } from '../components/LoginPrompt';
 import { RootStackParamList } from '../navigation/types';
-import { useSettingsStore, useUiStore } from '../store';
+import { useSettingsStore } from '../store';
 import pocketApi from '../api/pocket48';
 import { FadeInView } from '../components/Motion';
 import { Member } from '../types';
 import { errorMessage, normalizeUrl, pickText, unwrapList } from '../utils/data';
 import { formatTimestamp , toMs } from '../utils/format';
 import { parseDurationSeconds } from '../utils/duration';
-import { enqueueDownload } from '../services/downloads';
 import { usePalette, radii, radiiAlias } from '../theme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useI18n } from '../i18n';
-import { GlassSurface } from '../components/GlassSurface';
 
 type FlipNavProp = StackNavigationProp<RootStackParamList, 'FlipScreen'>;
 type FlipRouteProp = RouteProp<RootStackParamList, 'FlipScreen'>;
@@ -53,11 +51,6 @@ const PRIVACY_OPTIONS: { value: PrivacyType; label: string }[] = [
   { value: '2', label: '私密' },
   { value: '3', label: '匿名' },
 ];
-
-function flipDeadline(timestamp: number | string): number {
-  const start = toMs(timestamp);
-  return start ? start + 8 * 86400000 : 0;
-}
 
 function normalizeFlipList(res: any): any[] {
   return unwrapList(res, [
@@ -139,8 +132,7 @@ function statusLabel(status: any): string {
   if (Number(status) === 1) return '等待回复中';
   if (Number(status) === 2) return '已翻牌';
   if (Number(status) === 3) return '已退款';
-  if (Number(status) === 5) return '翻牌中';
-  return '状态未知';
+  return '等待回复中';
 }
 
 function questionText(item: any): string {
@@ -161,34 +153,16 @@ function parseMedia(raw: string): { text: string; url: string; duration: number 
 }
 
 function parseAnswer(item: any, voiceLabel = '语音回复', videoLabel = '视频回复'): { text: string; url: string; duration: number } {
-  if (Number(item?.status) !== 2) return { text: '', url: '', duration: 0 };
   const raw = pickText(item, ['answerContent', 'answer', 'answerText', 'replyContent']);
-  let url = '';
-  let duration = 0;
-  let text = '';
-  if (raw) {
-    const m = parseMedia(raw);
-    url = m.url; duration = m.duration; text = m.text;
-  }
-  // 兜底：语音/视频的 URL 与时长可能不在 answerContent 里，而在条目自身字段上。
-  //（用户反馈：翻牌统计里语音翻牌没有播放按钮、也没有秒数 —— 之前只解析 answerContent）
-  if (!url) {
-    url = normalizeUrl(pickText(item, [
-      'answerUrl', 'ansUrl', 'voiceUrl', 'audioUrl', 'videoUrl', 'mediaUrl',
-      'answerMedia', 'answerMediaUrl', 'answerPath', 'answerVoiceUrl', 'answerVideoUrl',
-    ]));
-  }
-  if (!duration) {
-    const d = parseDurationSeconds(pickText(item, ['answerDuration', 'answerSecond', 'duration']) || 0);
-    duration = Number.isFinite(d) ? Math.round(d) : 0;
-  }
+  if (!raw) return { text: '', url: '', duration: 0 };
+  const m = parseMedia(raw);
   // For audio/video, set appropriate text labels
-  if (Number(item.answerType) === 2 && !text) text = voiceLabel;
-  if (Number(item.answerType) === 3 && !text) text = videoLabel;
+  if (Number(item.answerType) === 2 && !m.text) m.text = voiceLabel;
+  if (Number(item.answerType) === 3 && !m.text) m.text = videoLabel;
   // Fallback to raw text if nothing else
-  if (!text && !url) text = raw;
-  else if (!text && url) text = raw || url;
-  return { text, url, duration };
+  if (!m.text && !m.url) m.text = raw;
+  else if (!m.text && m.url) m.text = m.url; // fallback: show URL if no text
+  return m;
 }
 
 function answerMediaUrl(item: any): string { return parseAnswer(item).url; }
@@ -206,7 +180,6 @@ export default function FlipScreen() {
   const navigation = useNavigation<FlipNavProp>();
   const route = useRoute<FlipRouteProp>();
   const palette = usePalette();
-  const showToast = useUiStore((st) => st.showToast);
   const { t } = useI18n();
   const mode = route.params?.mode || 'view';
 
@@ -214,38 +187,15 @@ export default function FlipScreen() {
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [status, setStatus] = useState('');
-  /**
-   * 状态是「错误」还是「信息」：以前靠 `/失败|错误/.test(status)` 反推，切到英文/繁體
-   * 就失效（错误提示被染成主题色、重试按钮也不出现）。改成显式状态。
-   * 公版没有 flashStatus（那是 plus 的自动消失方案），这里只维护配色/重试用的标记。
-   */
-  const [statusError, setStatusError] = useState(false);
-  /**
-   * 成功/信息类状态的自动消失定时器。
-   * 状态行在 FlatList 之外，常驻会一直占一行高度，列表滚动时内容从它下面经过，
-   * 顶部那条会被切掉一半（用户反馈「功能被挡住字」）。错误态仍然常驻（要配重试按钮）。
-   */
-  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flashStatus = useCallback((text: string, ms = 2600) => {
-    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-    setStatusError(false);
-    setStatus(text);
-    statusTimerRef.current = setTimeout(() => { setStatus(''); statusTimerRef.current = null; }, ms);
-  }, []);
-  useEffect(() => () => {
-    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-  }, []);
   const pageRef = useRef(1);
   const loadingRef = useRef(false);
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
-  const priceRequestRef = useRef(0);
   const [prices, setPrices] = useState<FlipPriceConfig[]>([]);
   const [answerType, setAnswerType] = useState<number | null>(null);
   const [privacyType, setPrivacyType] = useState<PrivacyType>('1');
   const [cost, setCost] = useState('');
   const [content, setContent] = useState('');
   const [balance, setBalance] = useState('');
-  const [memberFilter, setMemberFilter] = useState('');
   const [playingAnswerUrl, setPlayingAnswerUrl] = useState('');
 
   const selectedPrice = useMemo(
@@ -268,10 +218,9 @@ export default function FlipScreen() {
       if (list.length === 0 && replace) {
         setStatus('');
       } else if (replace) {
-        flashStatus(t('已加载 {count} 条翻牌记录', { count: list.length }));
+        setStatus(t('已加载 {count} 条翻牌记录', { count: list.length }));
       }
     } catch (error) {
-      setStatusError(true);
       setStatus(t('加载翻牌记录失败：{err}', { err: errorMessage(error) }));
     } finally {
       loadingRef.current = false;
@@ -279,12 +228,12 @@ export default function FlipScreen() {
     }
   }, []);
 
-  useFocusEffect(useCallback(() => {
+  useEffect(() => {
     if (mode === 'view') {
       pageRef.current = 1;
       loadFlips(1, true);
     }
-  }, [loadFlips, mode]));
+  }, [loadFlips, mode]);
 
   useEffect(() => {
     if (mode !== 'send') return;
@@ -305,7 +254,6 @@ export default function FlipScreen() {
   }, [minCost, selectedPrice]);
 
   const selectMemberForPrice = async (member: Member) => {
-    const requestId = ++priceRequestRef.current;
     setSelectedMember(member);
     setPrices([]);
     setAnswerType(null);
@@ -313,48 +261,45 @@ export default function FlipScreen() {
     setCost('');
     setStatus('');
     if (!useSettingsStore.getState().settings.p48Token) {
-      setStatusError(true);
       setStatus(t('未登录口袋账号，无法获取翻牌配置'));
       return;
     }
     try {
       const res = await pocketApi.getFlipPrices(member.id);
-      if (requestId !== priceRequestRef.current) return;
       const list = normalizePriceList(res);
       setPrices(list);
       setAnswerType(list[0]?.answerType ?? null);
-      flashStatus(list.length ? t('已加载 {count} 种回复形式', { count: list.length }) : t('该成员暂未开放翻牌'));
+      setStatus(list.length ? t('已加载 {count} 种回复形式', { count: list.length }) : t('该成员暂未开放翻牌'));
     } catch (error) {
-      if (requestId === priceRequestRef.current) { setStatusError(true); setStatus(t('加载翻牌配置失败：{err}', { err: errorMessage(error) })); }
+      setStatus(t('加载翻牌配置失败：{err}', { err: errorMessage(error) }));
     }
   };
 
   const sendFlip = async () => {
     const finalCost = toNumber(cost);
     if (!selectedMember) {
-      flashStatus(t('请先选择成员'));
+      setStatus(t('请先选择成员'));
       return;
     }
     if (!answerType || !selectedPrice) {
-      flashStatus(t('请选择文字、语音或视频翻牌'));
+      setStatus(t('请选择文字、语音或视频翻牌'));
       return;
     }
     if (!content.trim()) {
-      flashStatus(t('请输入翻牌内容'));
+      setStatus(t('请输入翻牌内容'));
       return;
     }
     if (!minCost) {
-      flashStatus(t('{type}翻牌的{privacy}设置暂未开放', { type: t(answerTypeLabel(answerType)), privacy: t(privacyLabel(privacyType)) }));
+      setStatus(t('{type}翻牌的{privacy}设置暂未开放', { type: t(answerTypeLabel(answerType)), privacy: t(privacyLabel(privacyType)) }));
       return;
     }
     if (finalCost < minCost) {
-      flashStatus(t('鸡腿数不能低于官方底价 {min}', { min: minCost }));
+      setStatus(t('鸡腿数不能低于官方底价 {min}', { min: minCost }));
       setCost(String(minCost));
       return;
     }
 
     setLoading(true);
-    setStatusError(false);
     setStatus(t('正在发送翻牌...'));
     try {
       await pocketApi.sendFlipQuestion({
@@ -365,9 +310,8 @@ export default function FlipScreen() {
         answerType,
       });
       setContent('');
-      flashStatus(t('发送成功，已提交到口袋翻牌'));
+      setStatus(t('发送成功，已提交到口袋翻牌'));
     } catch (error) {
-      setStatusError(true);
       setStatus(t('发送翻牌失败：{err}', { err: errorMessage(error) }));
     } finally {
       setLoading(false);
@@ -379,17 +323,6 @@ export default function FlipScreen() {
   // 翻牌记录按提问月份分组（倒序）
   // 注意：必须在所有条件 return 之前调用（hooks 规则），否则 view↔send 切换时
   // 「Rendered fewer hooks than expected」崩溃，发送页打不开。
-  // 成员筛选（原「数据统计」页的翻牌成员筛选，搬到本页）
-  const flipMemberNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const f of flips) set.add(memberName(f as any, t('成员')));
-    return ['全部成员', ...Array.from(set).sort()];
-  }, [flips, t]);
-  const filteredFlips = useMemo(
-    () => (!memberFilter || memberFilter === '全部成员' ? flips : flips.filter((f: any) => memberName(f, t('成员')) === memberFilter)),
-    [flips, memberFilter, t],
-  );
-
   const flipRows = useMemo(() => {
     const monthOf = (ts: number): string => {
       if (!ts) return t('未知时间');
@@ -398,7 +331,7 @@ export default function FlipScreen() {
     };
     const order: string[] = [];
     const map = new Map<string, any[]>();
-    for (const f of filteredFlips) {
+    for (const f of flips) {
       const key = monthOf(Number(f.qtime || f.createTime || 0));
       if (!map.has(key)) { map.set(key, []); order.push(key); }
       map.get(key)!.push(f);
@@ -411,100 +344,7 @@ export default function FlipScreen() {
       map.get(k)!.forEach((it, idx) => flat.push({ type: 'item', key: `i-${String(it.questionId || it.id || 'x')}-${idx}`, item: it }));
     }
     return flat;
-  }, [filteredFlips, t]);
-
-  /** 翻牌统计：原「数据统计」页的翻牌统计已删除，改为本页整页呈现（任务 #5） */
-  const flipStatsView = useMemo(() => {
-    let totalCost = 0;
-    let durSum = 0;
-    let answered = 0;
-    const typeStats = { text: 0, audio: 0, video: 0 };
-    const memberMap = new Map<string, { name: string; count: number; cost: number }>();
-    for (const f of filteredFlips) {
-      const rec = f as any;
-      const cost = Number(rec.cost) || 0;
-      totalCost += cost;
-      const at = Number(rec.answerType);
-      if (at === 1) typeStats.text += 1; else if (at === 2) typeStats.audio += 1; else if (at === 3) typeStats.video += 1;
-      const mn = memberName(rec, t('成员'));
-      const m = memberMap.get(mn) || { name: mn, count: 0, cost: 0 };
-      m.count += 1; m.cost += cost; memberMap.set(mn, m);
-      if (Number(rec.status) === 2 && rec.qtime && rec.answerTime) {
-        const diff = Number(rec.answerTime) - Number(rec.qtime);
-        if (diff > 0) { durSum += diff; answered += 1; }
-      }
-    }
-    const memberRank = [...memberMap.values()].sort((a, b) => b.cost - a.cost);
-    const typeMax = Math.max(1, typeStats.text, typeStats.audio, typeStats.video);
-    const fmtDur = (ms: number) => {
-      if (ms <= 0) return '-';
-      const s = Math.floor(ms / 1000);
-      const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60);
-      return d > 0 ? `${d}天${h}时` : h > 0 ? `${h}时${mm}分` : `${mm}分`;
-    };
-    return { totalCount: filteredFlips.length, totalCost, typeStats, typeMax, memberRank, avgStr: fmtDur(answered > 0 ? durSum / answered : 0) };
-  }, [filteredFlips, t]);
-
-  const statsHeader = (
-    <View style={styles.statsWrap}>
-      <GlassSurface radius={20} role="card" style={styles.statsOverview}>
-        <View style={styles.statCell}>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} style={[styles.statValue, { color: palette.tint }]}>{flipStatsView.totalCount}</Text>
-          <Text style={[styles.statLabel, { color: palette.labelSecondary }]}>{t('总翻牌数')}</Text>
-        </View>
-        <View style={styles.statCell}>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} style={[styles.statValue, { color: palette.tint }]}>{flipStatsView.totalCost}</Text>
-          <Text style={[styles.statLabel, { color: palette.labelSecondary }]}>{t('总鸡腿')}</Text>
-        </View>
-        <View style={styles.statCell}>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} style={[styles.statValue, { color: palette.tint }]}>{flipStatsView.avgStr}</Text>
-          <Text style={[styles.statLabel, { color: palette.labelSecondary }]}>{t('平均回复')}</Text>
-        </View>
-      </GlassSurface>
-
-      <GlassSurface radius={20} role="card" style={styles.statsGroup}>
-        <Text style={[styles.groupLabel, { color: palette.label }]}>{t('类型分布')}</Text>
-        {([
-          { key: 'text', label: t('文字'), count: flipStatsView.typeStats.text },
-          { key: 'audio', label: t('语音'), count: flipStatsView.typeStats.audio },
-          { key: 'video', label: t('视频'), count: flipStatsView.typeStats.video },
-        ]).map((row) => (
-          <View key={row.key} style={styles.typeRow}>
-            <Text style={[styles.typeRowLabel, { color: palette.labelSecondary }]}>{row.label}</Text>
-            <View style={[styles.typeTrack, { backgroundColor: palette.fill2 }]}>
-              <View style={[styles.typeFill, { width: `${(row.count / flipStatsView.typeMax) * 100}%`, backgroundColor: palette.tint }]} />
-            </View>
-            <Text style={[styles.typeCount, { color: palette.labelTertiary }]}>{row.count}</Text>
-          </View>
-        ))}
-      </GlassSurface>
-
-      {flipStatsView.memberRank.length > 1 ? (
-        <GlassSurface radius={20} role="card" style={styles.statsGroup}>
-          <Text style={[styles.groupLabel, { color: palette.label }]}>{t('成员排名')}</Text>
-          {flipStatsView.memberRank.slice(0, 10).map((m, idx) => (
-            <View key={`${m.name}-${idx}`} style={styles.rankRow}>
-              <Text style={[styles.rankNo, { color: palette.tint }]}>{idx + 1}</Text>
-              <Text style={[styles.rankName, { color: palette.label }]} numberOfLines={1}>{m.name}</Text>
-              <Text style={[styles.rankVal, { color: palette.labelSecondary }]}>{m.cost} · {m.count}</Text>
-            </View>
-          ))}
-        </GlassSurface>
-      ) : null}
-      {/* 成员筛选（原数据统计页的翻牌成员筛选） */}
-      <View style={styles.filterWrap}>
-        {flipMemberNames.map((name) => (
-          <Pill
-            key={name}
-            label={name === '全部成员' ? t(name) : name}
-            selected={memberFilter === name || (name === '全部成员' && !memberFilter)}
-            onPress={() => setMemberFilter(name === '全部成员' ? '' : name)}
-          />
-        ))}
-      </View>
-      <Text style={[styles.sectionTitle, { color: palette.labelSecondary }]}>{t('翻牌明细 · 共 {count} 条', { count: flipStatsView.totalCount })}</Text>
-    </View>
-  );
+  }, [flips, t]);
 
   if (mode === 'send') {
     return (
@@ -517,7 +357,7 @@ export default function FlipScreen() {
 
         <FadeInView delay={60} duration={300}>
           {/* 成员选择行 */}
-          <GlassSurface radius={20} role="card" style={[styles.sendGroup, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+          <View style={[styles.sendGroup, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
             <View style={styles.groupRowTop}>
               <View style={[styles.groupIcon, { backgroundColor: palette.tintSoft }]}>
                 <MaterialCommunityIcons name="account-heart-outline" size={18} color={palette.tint} />
@@ -525,10 +365,10 @@ export default function FlipScreen() {
               <Text style={[styles.groupLabel, { color: palette.label }]}>{t('选择成员')}</Text>
             </View>
             <MemberPicker selectedMember={selectedMember} onSelect={selectMemberForPrice} />
-          </GlassSurface>
+          </View>
 
           {/* 回复形式 */}
-          <GlassSurface radius={20} role="card" style={[styles.sendGroup, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+          <View style={[styles.sendGroup, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
             <View style={styles.groupRowTop}>
               <View style={[styles.groupIcon, { backgroundColor: palette.tintSoft }]}>
                 <MaterialCommunityIcons name="message-reply-outline" size={18} color={palette.tint} />
@@ -550,10 +390,10 @@ export default function FlipScreen() {
               })}
             </View>
             {!prices.length ? <Text style={[styles.hint, { color: palette.labelTertiary }]}>{t('选择成员后显示可用的文字、语音、视频翻牌')}</Text> : null}
-          </GlassSurface>
+          </View>
 
           {/* 公开设置 */}
-          <GlassSurface radius={20} role="card" style={[styles.sendGroup, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+          <View style={[styles.sendGroup, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
             <View style={styles.groupRowTop}>
               <View style={[styles.groupIcon, { backgroundColor: palette.tintSoft }]}>
                 <MaterialCommunityIcons name="eye-outline" size={18} color={palette.tint} />
@@ -576,10 +416,10 @@ export default function FlipScreen() {
                 );
               })}
             </View>
-          </GlassSurface>
+          </View>
 
           {/* 输入区 */}
-          <GlassSurface radius={20} role="card" style={[styles.sendGroup, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+          <View style={[styles.sendGroup, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
             <View style={styles.groupRowTop}>
               <View style={[styles.groupIcon, { backgroundColor: palette.tintSoft }]}>
                 <MaterialCommunityIcons name="pencil-outline" size={18} color={palette.tint} />
@@ -618,11 +458,11 @@ export default function FlipScreen() {
               </View>
             ) : null}
             <Text style={[styles.costHint, { color: palette.labelTertiary }]}>{t('当前最低：{min} 鸡腿', { min: minCost || 0 })}</Text>
-          </GlassSurface>
+          </View>
 
           <View style={styles.sendFooter}>
             <Button title={t('发送翻牌')} variant="filled" size="lg" onPress={sendFlip} disabled={loading} loading={loading} fullWidth />
-            {status ? <Text style={[styles.statusText, { color: statusError ? palette.danger : palette.tint }]}>{status}</Text> : null}
+            {status ? <Text style={[styles.statusText, { color: /失败|错误/.test(status) ? palette.danger : palette.tint }]}>{status}</Text> : null}
           </View>
         </FadeInView>
       </ScrollView>
@@ -632,11 +472,11 @@ export default function FlipScreen() {
 
   return (
       <View style={pageStyle}>
-      <ScreenHeader title={t('翻牌统计')} right={
+      <ScreenHeader title={t('翻牌记录')} right={
         <HeaderAction label={t('发送翻牌')} onPress={() => navigation.navigate('FlipScreen', { mode: 'send' })} />
       } />
-      {status ? <Text style={[styles.statusText, { color: statusError ? palette.danger : palette.tint }]}>{status}</Text> : null}
-      {statusError ? (
+      {status ? <Text style={[styles.statusText, { color: /失败|错误/.test(status) ? palette.danger : palette.tint }]}>{status}</Text> : null}
+      {/失败|错误/.test(status) ? (
         <View style={styles.retryWrap}>
           <Button title={t('重试')} variant="filled" size="sm" onPress={() => loadFlips(1, true)} />
         </View>
@@ -645,21 +485,11 @@ export default function FlipScreen() {
         <PerfFlatList
           data={flipRows}
           keyExtractor={(row) => row.key}
-          ListHeaderComponent={statsHeader}
-          // 末条不再贴死屏幕底（手势导航条会压住最后一行文字）
-          contentContainerStyle={{ paddingBottom: 32 }}
-          keyboardDismissMode="on-drag"
           initialNumToRender={12}
           maxToRenderPerBatch={12}
           windowSize={7}
           removeClippedSubviews
-          refreshing={loading && pageRef.current === 1}
-          onRefresh={() => {
-            if (loadingRef.current) return;
-            pageRef.current = 1;
-            void loadFlips(1, true);
-          }}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             if (item.type === 'header') {
               return (
                 <Text style={[styles.monthGroup, { color: palette.labelTertiary }]}>{item.title}</Text>
@@ -671,22 +501,22 @@ export default function FlipScreen() {
             const answerUrl = parsed.url;
             const flipAnswerType = Number(flip.answerType);
             const ansDur = parsed.duration;
-            const qTime = toMs(flip.qtime || flip.createTime || 0);
-            const aTime = toMs(flip.answerTime || 0);
-            const deadline = flipDeadline(qTime);
+            const qTime = Number(flip.qtime || flip.createTime || 0);
+            const aTime = Number(flip.answerTime || 0);
+            const deadline = qTime ? qTime + 7 * 86400000 : 0;
             const remaining = deadline - Date.now();
             const remainingDays = Math.max(0, Math.floor(remaining / 86400000));
             const remainingHours = Math.max(0, Math.floor((remaining % 86400000) / 3600000));
             const remainingMinutes = Math.max(0, Math.floor((remaining % 3600000) / 60000));
-            const isPending = Number(flip.status) === 1 || Number(flip.status) === 5;
-            const remainingStr = isPending && qTime ? (remaining > 0 ? t('剩{time}', { time: `${remainingDays > 0 ? t('{m}天', { m: remainingDays }) : ''}${remainingHours > 0 ? t('{m}小时', { m: remainingHours }) : ''}${t('{m}分', { m: remainingMinutes })}` }) : t('已过期')) : '';
+            const remainingStr = aTime ? '' : (remaining > 0 ? t('剩{time}', { time: `${remainingDays > 0 ? t('{m}天', { m: remainingDays }) : ''}${remainingHours > 0 ? t('{m}小时', { m: remainingHours }) : ''}${t('{m}分', { m: remainingMinutes })}` }) : t('已过期'));
             const elapsed = aTime && qTime ? aTime - qTime : 0;
             const elapsedDays = Math.floor(elapsed / 86400000);
             const elapsedHours = Math.floor((elapsed % 86400000) / 3600000);
             const elapsedMinutes = Math.floor((elapsed % 3600000) / 60000);
             const elapsedStr = elapsed > 0 ? t('耗时 {time}', { time: `${elapsedDays > 0 ? t('{m}天', { m: elapsedDays }) : ''}${elapsedHours > 0 ? t('{m}小时', { m: elapsedHours }) : ''}${t('{m}分', { m: elapsedMinutes })}` }) : '';
             return (
-              <View style={[styles.card, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
+              <FadeInView delay={index < 12 ? 60 + index * 25 : 0} distance={8}>
+                <View style={[styles.card, { backgroundColor: palette.fill2 }]}>
                   <View style={styles.cardTop}>
                     <View style={styles.tagRow}>
                       <View style={[styles.typeTag, { backgroundColor: palette.tintSoft }]}>
@@ -704,13 +534,9 @@ export default function FlipScreen() {
                         <View style={[styles.statusBadge, { backgroundColor: 'rgba(52,199,89,0.14)' }]}>
                           <Text style={[styles.statusBadgeText, { color: palette.success }]}>{t(statusLabel(flip.status))}</Text>
                         </View>
-                      ) : Number(flip.status) === 5 ? (
-                        <View style={[styles.statusBadge, { backgroundColor: 'rgba(24,144,255,0.14)' }]}>
-                          <Text style={[styles.statusBadgeText, { color: '#1890ff' }]}>{t(statusLabel(flip.status))}</Text>
-                        </View>
                       ) : (
-                        <View style={[styles.statusBadge, { backgroundColor: Number(flip.status) === 3 ? 'rgba(255,59,48,0.12)' : palette.fill3 }]}>
-                          <Text style={[styles.statusBadgeText, { color: Number(flip.status) === 3 ? palette.danger : palette.labelSecondary }]}>{t(statusLabel(flip.status))}</Text>
+                        <View style={[styles.statusBadge, { backgroundColor: 'rgba(255,59,48,0.12)' }]}>
+                          <Text style={[styles.statusBadgeText, { color: palette.danger }]}>{t(statusLabel(flip.status))}</Text>
                         </View>
                       )}
                     </View>
@@ -718,46 +544,20 @@ export default function FlipScreen() {
                   </View>
 
                   <Text style={[styles.memberName, { color: palette.label }]}>{memberName(flip, t('成员'))}</Text>
-                  <Text style={[styles.cardQ, { color: palette.label }]}>{t('问：{text}', { text: questionText(flip) || t('未返回问题内容') })}</Text>
+                  <Text style={[styles.cardQ, { color: palette.label }]} numberOfLines={3}>{t('问：{text}', { text: questionText(flip) || t('未返回问题内容') })}</Text>
 
                   {answer ? (
                     <View style={styles.answerRow}>
-                      <Text style={[styles.cardA, { color: palette.labelSecondary }]}>{t('答：{text}', { text: answer })}</Text>
-                      {/* 语音/视频翻牌：回复时长（此前只解析不显示，用户反馈「秒数没了」） */}
-                      {ansDur > 0 && (flipAnswerType === 2 || flipAnswerType === 3) ? (
-                        <Text style={[styles.answerDur, { color: palette.labelTertiary }]}>
-                          {`${Math.floor(ansDur / 60)}:${String(ansDur % 60).padStart(2, '0')}`}
-                        </Text>
-                      ) : null}
+                      <Text style={[styles.cardA, { color: palette.labelSecondary }]} numberOfLines={2}>{t('答：{text}', { text: answer })}</Text>
                       {answerUrl && (flipAnswerType === 2 || flipAnswerType === 3) ? (
-                        <>
-                          <ScalePressable
-                            style={[styles.answerBtn, { backgroundColor: palette.tintSoft }]}
-                            onPress={() => setPlayingAnswerUrl((prev) => (prev === answerUrl ? '' : answerUrl))}
-                            pressedScale={0.96}
-                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                          >
-                            <MaterialCommunityIcons name={playingAnswerUrl === answerUrl ? 'chevron-up' : 'play'} size={16} color={palette.tint} />
-                          </ScalePressable>
-                          {/* 下载按钮（此前缺失） */}
-                          <ScalePressable
-                            style={[styles.answerBtn, { backgroundColor: palette.fill2 }]}
-                            pressedScale={0.96}
-                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                            onPress={() => {
-                              const isVoice = flipAnswerType === 2;
-                              void enqueueDownload({
-                                url: answerUrl,
-                                type: isVoice ? 'voice' : 'video',
-                                name: `${memberName(flip, t('成员'))}-${t(isVoice ? '语音翻牌' : '视频翻牌')}-${formatTimestamp(flip.answerTime || flip.qtime || flip.createTime)}`,
-                              })
-                                .then(() => showToast(t('已加入下载管理')))
-                                .catch((e) => showToast(t('下载失败：{msg}', { msg: errorMessage(e) })));
-                            }}
-                          >
-                            <MaterialCommunityIcons name="download" size={16} color={palette.labelSecondary} />
-                          </ScalePressable>
-                        </>
+                        <ScalePressable
+                          style={[styles.answerBtn, { backgroundColor: palette.tintSoft }]}
+                          onPress={() => setPlayingAnswerUrl((prev) => (prev === answerUrl ? '' : answerUrl))}
+                          pressedScale={0.96}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <MaterialCommunityIcons name={playingAnswerUrl === answerUrl ? 'chevron-up' : 'play'} size={16} color={palette.tint} />
+                        </ScalePressable>
                       ) : null}
                     </View>
                   ) : (
@@ -787,7 +587,8 @@ export default function FlipScreen() {
                     {elapsedStr ? ` · ${elapsedStr}` : ''}
                     {flip.answerTime ? ` · ${t('回复于 {time}', { time: formatTimestamp(flip.answerTime) })}` : ''}
                   </Text>
-              </View>
+                </View>
+              </FadeInView>
             );
           }}
           onEndReached={() => {
@@ -797,17 +598,7 @@ export default function FlipScreen() {
             loadFlips(nextPage);
           }}
           onEndReachedThreshold={0.5}
-          ListEmptyComponent={
-            !useSettingsStore.getState().settings.p48Token
-              ? <LoginPrompt hint={t('查看翻牌记录需要登录')} />
-              // ⚠️ 必须区分「加载中」与「真的没有」：此前缺 loading 分支，
-              // 首屏/切页在数据回来前就显示「暂无翻牌记录」，用户以为没数据（2026-10-03 修复）
-              : loading
-                ? <CenterSpinner />
-                : statusError
-                  ? <ErrorState title={t('加载失败')} hint={status} onAction={() => loadFlips(1, true)} />
-                  : <EmptyState icon="card-text-outline" title={t('暂无翻牌记录')} hint={t('去发送翻牌查询历史记录')} />
-          }
+          ListEmptyComponent={!useSettingsStore.getState().settings.p48Token ? <LoginPrompt hint={t('查看翻牌记录需要登录')} /> : /失败|错误/.test(status) ? <ErrorState title={t('加载失败')} hint={status} onAction={() => loadFlips(1, true)} /> : <EmptyState icon="card-text-outline" title={t('暂无翻牌记录')} hint={t('去发送翻牌查询历史记录')} />}
         />
       </FadeInView>
     </View>
@@ -815,14 +606,13 @@ export default function FlipScreen() {
 }
 
 const styles = StyleSheet.create({
-  answerDur: { fontSize: 12, fontWeight: '700', marginLeft: 6 },
   container: { flex: 1, backgroundColor: 'transparent' },
   sendContainer: { paddingBottom: 48 },
   retryWrap: { alignItems: 'center', marginTop: 6 },
   // 发送表单分组
-  sendGroup: { padding: 14, marginHorizontal: 16, marginVertical: 6, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
+  sendGroup: { padding: 14, marginHorizontal: 16, marginVertical: 6, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
   groupRowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  groupIcon: { width: 32, height: 32, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  groupIcon: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   groupLabel: { fontSize: 15, fontWeight: '700' },
   optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   optionPill: { marginBottom: 0 },
@@ -851,25 +641,6 @@ const styles = StyleSheet.create({
   hint: { marginTop: 8, fontSize: 12 },
   balanceText: { fontSize: 13, fontWeight: '600' },
   sendFooter: { marginTop: 16, marginHorizontal: 16 },
-  // 翻牌统计（本页整页呈现）
-  statsWrap: { paddingBottom: 8 },
-  statsOverview: { flexDirection: 'row', padding: 14, marginHorizontal: 16, marginVertical: 6, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
-  statCell: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: 18, fontWeight: '900' },
-  statLabel: { fontSize: 11, marginTop: 2 },
-  statsGroup: { padding: 14, marginHorizontal: 16, marginVertical: 6, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
-  typeRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 3 },
-  // ⚠️ 文字格一律 minWidth 不用 width：系统字体放大后固定宽度会把「文字/语音/视频」裁掉半个字
-  typeRowLabel: { minWidth: 34, fontSize: 12 },
-  typeTrack: { flex: 1, height: 8, borderRadius: 4, overflow: 'hidden', marginHorizontal: 8 },
-  typeFill: { height: 8, borderRadius: 4 },
-  typeCount: { minWidth: 30, fontSize: 11, textAlign: 'right' },
-  rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5 },
-  rankNo: { minWidth: 22, fontSize: 12, fontWeight: '900' },
-  rankName: { flex: 1, fontSize: 13 },
-  rankVal: { fontSize: 12, marginLeft: 8 },
-  sectionTitle: { fontSize: 12, marginHorizontal: 16, marginTop: 12, marginBottom: 4 },
-  filterWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginTop: 10 },
   statusText: { margin: 12, textAlign: 'center', fontSize: 13 },
   // 历史记录行卡
   card: {
@@ -900,8 +671,8 @@ const styles = StyleSheet.create({
     paddingLeft: 2,
   },
   answerMediaCard: { marginTop: 8 },
-  answerAudio: { height: 52, marginTop: 8, borderRadius: 14 },
-  answerVideo: { height: 190, marginTop: 8, backgroundColor: '#000', borderRadius: 14 },
+  answerAudio: { height: 52, marginTop: 8, borderRadius: 12 },
+  answerVideo: { height: 190, marginTop: 8, backgroundColor: '#000', borderRadius: 12 },
   cardPending: { fontSize: 13, fontWeight: '700' },
   cardMeta: { fontSize: 11, marginTop: 8 },
   monthGroup: { fontSize: 13, fontWeight: '700', marginTop: 12, marginBottom: 2, paddingHorizontal: 16 },

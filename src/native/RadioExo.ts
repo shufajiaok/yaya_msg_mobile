@@ -11,45 +11,8 @@ export interface ExoTrackItem {
   title: string;
   artist: string;
   album: string;
-  trackId?: string;
   /** 封面：优先 file://（RN 下载落盘，OPPO 可靠）；http(s) 原生会尝试自拉 */
   art?: string;
-}
-
-export interface ExoPlaybackSnapshot {
-  active: boolean;
-  url: string;
-  trackId: string;
-  title: string;
-  artist: string;
-  album: string;
-  position: number;
-  duration: number;
-  playing: boolean;
-}
-
-export async function exoGetPlaybackSnapshot(): Promise<ExoPlaybackSnapshot> {
-  const empty: ExoPlaybackSnapshot = {
-    active: false, url: '', trackId: '', title: '', artist: '', album: '',
-    position: 0, duration: 0, playing: false,
-  };
-  if (Platform.OS !== 'android' || !M?.getPlaybackSnapshot) return empty;
-  try {
-    const value = await M.getPlaybackSnapshot();
-    return {
-      active: !!value?.active,
-      url: String(value?.url || ''),
-      trackId: String(value?.trackId || ''),
-      title: String(value?.title || ''),
-      artist: String(value?.artist || ''),
-      album: String(value?.album || ''),
-      position: Math.max(0, Number(value?.position) || 0),
-      duration: Math.max(0, Number(value?.duration) || 0),
-      playing: !!value?.playing,
-    };
-  } catch {
-    return empty;
-  }
 }
 
 /** 下发当前单曲并播放（media3 系统卡/锁屏/流体云由此驱动） */
@@ -68,19 +31,10 @@ export function exoPlayTrack(
 }
 
 export function exoControl(cmd: 'pause' | 'resume' | 'seek' | 'stop' | 'next' | 'prev' | 'repeat', positionSec = 0) {
-  if (Platform.OS !== 'android') return;
-  // ⚠️ 不能只依赖模块加载时抓到的 M：启动早期 NativeModules 可能尚未就绪，
-  // 那之后所有控制（尤其 stop）都会静默失效 —— 声音停不下来。
-  const mod: any = NativeModules.RadioExoModule || M;
-  if (!mod?.control) {
-    console.warn('[exo] control unavailable:', cmd);
-    return;
-  }
+  if (Platform.OS !== 'android' || !M?.control) return;
   try {
-    mod.control(cmd, Number(positionSec) || 0);
-  } catch (e) {
-    console.warn('[exo] control failed:', cmd, e);
-  }
+    M.control(cmd, Number(positionSec) || 0);
+  } catch {}
 }
 
 /**

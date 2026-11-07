@@ -7,9 +7,8 @@ import { Member } from '../types';
 import MemberPicker from '../components/MemberPicker';
 import ScreenHeader from '../components/ScreenHeader';
 import { useI18n } from '../i18n';
-import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
+import { RouteProp, useRoute } from '@react-navigation/native';
 import { RootStackParamList } from '../navigation/types';
-import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import { FadeInView, ScalePressable } from '../components/Motion';
 import { CenterSpinner } from '../components/Loaders';
 import { EmptyState, ErrorState } from '../components/StateViews';
@@ -25,7 +24,6 @@ import { LiveExoView, startRadioForeground, stopRadioForeground, onRadioStopRequ
 import { ensureNotificationPermission } from '../utils/notifications';
 import { usePalette, makeShadows } from '../theme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 /** 上麦/电台流是否 rtmp（react-native-video 不支持，需原生 LiveExoView） */
 function isRtmpUrl(url: string): boolean {
@@ -37,7 +35,6 @@ export default function RoomRadioScreen() {
   const shadows = makeShadows(palette.name === 'dark');
   const { t } = useI18n();
   const route = useRoute<RouteProp<RootStackParamList, 'RoomRadioScreen'>>();
-  const navigation = useNavigation<any>();
   const [selectedMember, setSelectedMember] = useState<Member | null>(route.params?.member || null);
   const [radioUrl, setRadioUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -121,7 +118,7 @@ export default function RoomRadioScreen() {
 
   /** 应用流地址并强制重建播放器（url 变化 → LiveExoView key 变化 → 热换流） */
   const applyStreamUrl = (url: string, member: Member, mode: 'big' | 'small') => {
-    if (__DEV__) console.warn(`[radio] ${member.ownerName} ${mode} (rtmp=${isRtmpUrl(url)})`);
+    console.warn(`[radio] ${member.ownerName} ${mode} 流地址=${String(url).slice(0, 160)} (rtmp=${isRtmpUrl(url)})`);
     // 播放互斥：电台开播 → 后台音乐自动暂停（后播者胜）
     try {
       const mst = useMusicPlayerStore.getState();
@@ -162,9 +159,6 @@ export default function RoomRadioScreen() {
   };
 
   const startRadio = async (member: Member, opts: { instantUrl?: string; mode?: 'big' | 'small' } = {}) => {
-    // ⚠️ 本页自带一路播放器（不使用统一 PlayerScreen），小窗/胶囊若在播会与之并存 →
-    // 双路音频且无法单独静音。开播前先收掉小窗（2026-10-03 修复）。
-    try { useMiniPlayerStore.getState().close(); } catch {}
     // 显式 mode 优先（R3：setRoomMode 同 tick 调 startRadio 时 state/ref 均还是旧值，必须显式传参）
     const mode = opts.mode ?? roomModeRef.current;
     setSelectedMember(member);
@@ -220,27 +214,6 @@ export default function RoomRadioScreen() {
     stopRadioForeground();
   };
 
-  /**
-   * 「切换上麦胶囊」（用户要求）：把当前流交给全局音频胶囊跨页续播，
-   * 停掉本页播放（含前台服务）并返回上一页 —— 播放由胶囊接管。
-   */
-  const toCapsule = () => {
-    const m = selectedMember;
-    const url = radioUrl;
-    if (!m || !url) return;
-    const title = `${m.ownerName || ''} · ${t('上麦')}`;
-    useMiniPlayerStore.getState().open({
-      url,
-      title,
-      cover: m.avatar,
-      isLive: true,
-      audioOnly: true,
-      backTo: { mode: 'live', playUrl: url, playTitle: title, playCover: m.avatar },
-    });
-    stopRadio();
-    navigation.goBack();
-  };
-
   const subtitle = audioOnly && playing
     ? `${t('纯音频')} · ${t('正在播放')}`
     : (muted ? t('已静音') : (playing ? t('正在播放') : (status || t('暂无电台地址'))));
@@ -286,7 +259,7 @@ export default function RoomRadioScreen() {
 
       <FadeInView delay={60} duration={360} style={{ flex: 1 }}>
         <View style={styles.pickerWrap}>
-          <MemberPicker selectedMember={selectedMember} onSelect={startRadio} activeOnly placeholder={t('选择成员获取上麦音频...')} />
+          <MemberPicker selectedMember={selectedMember} onSelect={startRadio} placeholder={t('选择成员获取上麦音频...')} />
           <View style={styles.modeRow}>
             <Pill
               label={t('大房间')}
@@ -335,7 +308,7 @@ export default function RoomRadioScreen() {
 
         <View style={styles.scroll}>
           {/* 播放器大卡 */}
-          <GlassSurface radius={20} role="card" style={[styles.playerCard, { backgroundColor: 'transparent', borderColor: palette.hairline }, shadows.sm]}>
+          <View style={[styles.playerCard, { backgroundColor: palette.surface, borderColor: palette.hairline }, shadows.sm]}>
             {/* 封面 120 圆角 20 居中；纯音频播放时环绕旋转细环 + 耳机角标 */}
             {selectedMember ? (
               <View style={styles.coverWrap}>
@@ -444,18 +417,9 @@ export default function RoomRadioScreen() {
                     <MaterialCommunityIcons name="stop" size={20} color={palette.label} />
                     <Text style={[styles.secondaryCtrlText, { color: palette.label }]}>{t('停止')}</Text>
                   </ScalePressable>
-                  {/* 切换上麦胶囊：交给全局音频胶囊跨页续播（用户要求） */}
-                  <ScalePressable
-                    onPress={toCapsule}
-                    pressedScale={0.9}
-                    style={[styles.secondaryCtrl, { backgroundColor: palette.tintSoft }]}
-                    activeOpacity={0.7}
-                  >
-                    <MaterialCommunityIcons name="microphone" size={20} color={palette.tint} />
-                    <Text style={[styles.secondaryCtrlText, { color: palette.tint }]}>{t('胶囊')}</Text>
-                  </ScalePressable>
                 </View>
                 {playing ? (
+                  // v2.7.4：上麦流多为 rtmp（48tools 类型定义 VoiceOperate.streamUrl = rtmp://），
                   // react-native-video 播不了 → 用原生 LiveExoView（内置 ExoPlayer RTMP 扩展）播放
                   isRtmpUrl(radioUrl) && Platform.OS === 'android' && LiveExoView ? (
                     <LiveExoView
@@ -481,7 +445,7 @@ export default function RoomRadioScreen() {
                 ) : null}
               </>
             ) : null}
-          </GlassSurface>
+          </View>
         </View>
       </FadeInView>
     </View>
@@ -516,7 +480,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 132,
     height: 132,
-    borderRadius: 22,
+    borderRadius: 24,
     borderWidth: 2,
     marginTop: 8,
   },
@@ -551,9 +515,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    // 5 个按钮（播放/重播/静音/停止/胶囊）在窄屏放不下 → 允许换行，居中排布
-    flexWrap: 'wrap',
-    gap: 10,
+    gap: 12,
     marginTop: 22,
   },
   primaryCtrl: {
@@ -568,7 +530,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    width: 56,
+    width: 60,
     height: 40,
     borderRadius: 20,
   },
@@ -586,7 +548,7 @@ export function RoomRadioSkeleton() {
         <Skeleton width={80} height={32} radius={999} />
       </View>
       <View style={{ marginTop: 16, alignItems: 'center' }}>
-        <View style={{ backgroundColor: palette.surfaceGlassStrong, borderRadius: 20, padding: 24, width: '100%', alignItems: 'center' }}>
+        <View style={{ backgroundColor: palette.surface, borderRadius: 20, padding: 24, width: '100%', alignItems: 'center' }}>
           <Skeleton width={120} height={120} radius={20} />
           <Skeleton width="40%" height={18} style={{ marginTop: 16 }} />
           <Skeleton width="25%" height={12} style={{ marginTop: 8 }} />

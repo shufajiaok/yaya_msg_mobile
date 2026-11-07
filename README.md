@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner-v2.svg" width="100%" alt="牙牙消息" />
+  <img src="assets/banner.svg" width="100%" alt="牙牙消息" />
 </p>
 <p align="center">
   <img src="assets/logo-rounded.png" width="96" alt="logo" />
@@ -7,69 +7,13 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-ff6f91" alt="license" /></a>
-  <a href="https://github.com/Xenia0922/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.7-ff6f91" alt="release" /></a>
+  <a href="https://github.com/Xenia0922/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.4-ff6f91" alt="release" /></a>
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
 </p>
 
 # 牙牙消息
 
 口袋48 第三方移动客户端（React Native），基于 [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg) 二次开发。
-
-> **⚠️ v2.7.5 之前的旧版本建议卸载后重装；v2.7.5 及之后可直接覆盖安装。**
-
-## 最新更新（v2.7.7 · 2026-11-05）
-
-**新增**
-
-- 新增手机号注册：没有口袋账号也能直接注册
-- 新增密码登录与安全验证：与验证码登录共用设备头，答错可重新取码
-- 新增口袋48 / 塞纳河48 登录身份切换：在塞纳河客户端注册的账号切身份即可登录
-- 新增整账号快速切号：保存多个账号（Token + 登录身份），一键切换
-- 新增房间表情包与贴纸面板：官方表情分组展示，支持搜索
-- 新增翻牌提问卡：问题与提问者一目了然（尊重匿名与仅本人可见）
-- 新增头像框与勋章装扮：选项取自官方接口，仅作用于当前账号
-- 新增公演成员榜
-- 新增直播进场特效与直播弹幕气泡装扮（选中即同步账号）
-- 新增官方全套装扮目录：气泡默认项、勋章拥有态/灰图、头像框多键兜底
-
-**修复**
-
-- 修复私信图片不显示：字段与域名判定修正，图片可点开大图
-- 修复私信头像不显示与资料卡缺失：点开头像看资料（关注 / 私信）
-- 修复私信红点被误清零
-- 修复房间消息不自动刷新：房间页 2s 持续更新，不用切页面
-- 修复上滑看历史被新消息拽回底部：露「回到底部 / N 条新消息」气泡
-- 修复系统小窗唤不出与播放器 UI 残留：按 Home 可正常缩进小窗
-- 修复进出房间偶发闪退（Fabric 挂载竞态）
-- 修复房间页浮出首页内容
-- 修复底栏在媒体页隐藏后影响房间页
-- 修复成员库被旧数据覆盖，导致房间映射丢失、大小房间进不去
-- 修复签名超时导致接口成批失败：并发合并 + 渲染进程失活自愈
-- 修复下载完成却被判失败
-- 修复账号设置页输入框被键盘遮挡
-- 修复私信发送后整屏闪烁
-- 修复媒体页关闭播放器后列表卡骨架屏
-- 修复送礼连点重复扣费
-- 修复私信会话时间分组错误
-- 修复资料卡第二次打开同一人关注失败
-- 修复非中文界面错误提示失效
-- 修复歌词显示「词：…」「录音：…」「歌名 - 歌手」
-- 修复首页工具入口文字被截断
-- 修复个性装扮刷新按钮位置不对、刷新时整块闪空
-- 修复贡献榜点击无反应（整行可点开资料卡）
-- 修复「回到底部」在惯性滑动时按不动（改页面浮层）
-- 修复点 × 停不掉音乐、切曲后歌词错位
-
-**优化**
-
-- 重写直播弹幕浮层：头像自动补全、可过滤进场消息、字号与透明度可调
-- 优化切页与长会话流畅度：切走的页面冻结渲染、消息对象复用、资料卡带缓存
-- 优化房间消息渲染开销
-- 优化进出房间动效（UI 线程驱动）
-- 下线与「翻牌统计」重复的「统计」入口
-- 房间名与背景本地缓存，进房首帧即有标题
-
-明细见 [v2.7.7 发布说明](docs/RELEASE_NOTES_2.7.7.md)。
 
 ## 功能
 
@@ -80,15 +24,15 @@
 - 翻牌统计、成员数据库、鸡腿充值
 
 ## 安装
-从[下载页](https://gnz48.tech/app/)下载
+从[下载页](https://010push.a23xyz.xyz/app/)下载
 
 从[夸克网盘](https://pan.quark.cn/s/5b103245218a)下载
 
 从 [Releases](https://github.com/Xenia0922/yaya_msg_mobile/releases) 下载：
 
-- `yaya-msg-mobile-v2.7.7-universal.apk`：通用包（全 ABI，体积最大）
-- `yaya-msg-mobile-v2.7.7-x64.apk`：x86_64 模拟器专用
-- `yaya-msg-mobile-v2.7.7-v8a.apk` / `-v7a.apk`：真机包（**推荐真机使用**，比通用包小约 60%）
+- `yaya-msg-mobile-v2.7.4.apk`：通用包（全 ABI，体积最大）
+- `yaya-msg-mobile-v2.7.4.x64.apk`：x86_64 模拟器专用
+- `yaya-msg-mobile-v2.7.4.v8a.apk` / `-v7a.apk`：真机包（**推荐真机使用**，比通用包小约 40%）
 
 模拟器请用 x64 包，否则无法启动。App 内「检查更新」始终提供通用包直链，真机如需最小体积请在 Release 页面按架构下载。
 
@@ -104,6 +48,8 @@ node scripts/build-apk.js
 鸿蒙 2/3/4 与 Android 8.0+（minSdk 26）。
 
 ## 已知问题
+
+
 
 ## 致谢
 

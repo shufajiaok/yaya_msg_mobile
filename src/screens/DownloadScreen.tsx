@@ -1,8 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { showDialog } from '../components/AppDialog';
 import { PerfFlatList } from '../components/PerfFlatList';
 
-import {Image, Modal, Platform, StyleSheet, Text, TextInput, View} from 'react-native';
+import {
+  Alert,
+  Image,
+  Modal,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../navigation/types';
@@ -22,11 +29,9 @@ import {
   deleteDownloadItem,
   DownloadItem,
   enqueueDownload,
-  exportExistingDownload,
   loadDownloadItems,
   openDownloadItem,
 } from '../services/downloads';
-import { GlassSurface } from '../components/GlassSurface';
 
 type Nav = StackNavigationProp<RootStackParamList, 'DownloadScreen'>;
 
@@ -76,23 +81,8 @@ export default function DownloadScreen() {
     try { await openDownloadItem(item); } catch (e: any) { showToast(t('打开失败：{msg}', { msg: e?.message || e })); }
   };
 
-  const handleExport = async (item: DownloadItem) => {
-    try {
-      await exportExistingDownload(item);
-      showToast(t('已保存到系统下载目录'));
-      await refresh();
-    } catch (error: any) {
-      showToast(t('保存失败：{msg}', { msg: error?.message || error }));
-    }
-  };
-
   const refresh = useCallback(async () => {
-    const list = await loadDownloadItems();
-    // 列表排序：进行中 > 失败 > 已完成，组内新任务在前 —— 进行中的任务始终置顶可见
-    const order: Record<string, number> = { downloading: 0, failed: 1, done: 2 };
-    setItems([...list].sort(
-      (a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.createdAt - a.createdAt,
-    ));
+    setItems(await loadDownloadItems());
   }, []);
 
   useFocusEffect(useCallback(() => {
@@ -151,7 +141,7 @@ export default function DownloadScreen() {
 
   const remove = async (id: string) => {
     // 删除下载记录 + 本地文件不可恢复，二次确认
-    showDialog(t('删除下载'), t('将删除该下载项及本地文件，确定？'), [
+    Alert.alert(t('删除下载'), t('将删除该下载项及本地文件，确定？'), [
       { text: t('取消'), style: 'cancel' },
       {
         text: t('删除'),
@@ -166,7 +156,7 @@ export default function DownloadScreen() {
 
   const clearDone = async () => {
     // 清理全部已完成/失败项 + 本地文件，不可恢复，二次确认
-    showDialog(t('清理完成'), t('将删除所有已完成和失败的下载项及本地文件，确定？'), [
+    Alert.alert(t('清理完成'), t('将删除所有已完成和失败的下载项及本地文件，确定？'), [
       { text: t('取消'), style: 'cancel' },
       {
         text: t('清理'),
@@ -211,7 +201,7 @@ export default function DownloadScreen() {
       } />
 
       <FadeInView delay={80} duration={300} style={{ flex: 1 }}>
-        <GlassSurface radius={20} role="card" style={[styles.manualCard, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
+        <View style={[styles.manualCard, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
           <View style={styles.manualHead}>
             <MaterialCommunityIcons name="link-variant" size={18} color={palette.tint} />
             <Text style={[styles.manualTitle, { color: palette.label }]}>{t('手动添加下载')}</Text>
@@ -228,7 +218,7 @@ export default function DownloadScreen() {
             blurOnSubmit={false}
           />
           <Button title={t('添加下载')} onPress={startManualDownload} variant="filled" size="md" fullWidth loading={busy} disabled={busy} style={styles.addBtn} />
-        </GlassSurface>
+        </View>
 
         <PerfFlatList
           data={rows}
@@ -236,7 +226,7 @@ export default function DownloadScreen() {
           contentContainerStyle={styles.list}
           ListHeaderComponent={
             items.length > 0 ? (
-              <GlassSurface radius={20} role="card" style={[styles.overviewCard, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
+              <View style={[styles.overviewCard, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
                 <View style={styles.overviewItem}>
                   <Text style={[styles.overviewNum, { color: palette.tint }]}>{activeCount}</Text>
                   <Text style={[styles.overviewLabel, { color: palette.labelSecondary }]}>{t('下载中')}</Text>
@@ -251,7 +241,7 @@ export default function DownloadScreen() {
                   <Text style={[styles.overviewNum, { color: failedCount ? palette.danger : palette.label }]}>{failedCount}</Text>
                   <Text style={[styles.overviewLabel, { color: palette.labelSecondary }]}>{t('失败')}</Text>
                 </View>
-              </GlassSurface>
+              </View>
             ) : null
           }
           ListEmptyComponent={<EmptyState icon="download-off" title={t('暂无下载项目')} hint={t('通过上方输入框粘贴链接下载')} />}
@@ -259,7 +249,7 @@ export default function DownloadScreen() {
           maxToRenderPerBatch={12}
           windowSize={7}
           removeClippedSubviews
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             if (item.type === 'header') {
               return (
                 <Text style={[styles.groupTitle, { color: palette.labelTertiary }]}>{item.title}</Text>
@@ -269,7 +259,8 @@ export default function DownloadScreen() {
             const progress = Math.round((task.progress || 0) * 100);
             const thumbUri = task.type === 'image' ? (task.localUri || task.url) : '';
             return (
-              <View style={[styles.task, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderRadius: 20 }]}>
+              <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={300}>
+                <View style={[styles.task, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
                   {/* 缩略图 44 圆角 10：图片用本地/网络缩略，其余回退为类型图标 */}
                   {thumbUri ? (
                     <NetworkImage source={{ uri: thumbUri }} style={[styles.taskThumb, { backgroundColor: palette.fill3 }]} />
@@ -295,17 +286,12 @@ export default function DownloadScreen() {
                     </View>
                     <View style={styles.taskMetaRow}>
                       <Text style={[styles.taskStatus, { color: task.status === 'failed' ? palette.danger : palette.labelSecondary }]} numberOfLines={1}>
-                        {task.status === 'done' ? task.exportError || (Platform.OS === 'android' && !task.publicUri ? t('仅保存在应用内') : t('完成')) : task.status === 'failed' ? t('失败：{msg}', { msg: task.error || '' }) : t('下载中 {downloaded} / {total}', { downloaded: formatBytes(task.downloadedBytes), total: formatBytes(task.totalBytes) })}
+                        {task.status === 'done' ? t('完成') : task.status === 'failed' ? t('失败：{msg}', { msg: task.error || '' }) : t('下载中 {downloaded} / {total}', { downloaded: formatBytes(task.downloadedBytes), total: formatBytes(task.totalBytes) })}
                       </Text>
                       <Text style={[styles.taskPercent, { color: palette.labelTertiary }]}>{progress}%</Text>
                     </View>
                   </View>
                   <View style={styles.taskActions}>
-                    {task.status === 'done' && Platform.OS === 'android' && !task.publicUri ? (
-                      <ScalePressable accessibilityRole="button" accessibilityLabel={t('保存到系统下载目录')} onPress={() => handleExport(task)} style={[styles.actionBtn, { backgroundColor: palette.tintSoft }]} activeOpacity={0.6} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                        <MaterialCommunityIcons name="folder-download-outline" size={16} color={palette.tint} />
-                      </ScalePressable>
-                    ) : null}
                     {task.status === 'failed' ? (
                       <ScalePressable onPress={() => retryTask(task)} style={[styles.actionBtn, { backgroundColor: palette.tintSoft }]} activeOpacity={0.6} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                         <MaterialCommunityIcons name="refresh" size={16} color={palette.tint} />
@@ -319,7 +305,8 @@ export default function DownloadScreen() {
                       <MaterialCommunityIcons name="delete-outline" size={16} color={palette.danger} />
                     </ScalePressable>
                   </View>
-              </View>
+                </View>
+              </FadeInView>
             );
           }}
         />
@@ -337,7 +324,7 @@ export default function DownloadScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  manualCard: { marginHorizontal: 16, marginBottom: 8, padding: 14, borderRadius: 20 },
+  manualCard: { marginHorizontal: 16, marginBottom: 8, padding: 14, borderRadius: 16 },
   manualHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
   manualTitle: { fontSize: 15, fontWeight: '700', flex: 1 },
   urlInput: { minHeight: 42, paddingHorizontal: 14, borderRadius: 14, fontSize: 13 },

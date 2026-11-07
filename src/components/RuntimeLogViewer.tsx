@@ -1,7 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {Modal, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {
+  Alert,
+  Modal,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import Clipboard from '@react-native-clipboard/clipboard';
-import { showDialog } from '../components/AppDialog';
 import { useUiStore } from '../store';
 import { useI18n } from '../i18n';
 import { usePalette, radii, spacing } from '../theme';
@@ -90,7 +98,7 @@ export default function RuntimeLogViewer({ visible, onClose }: { visible: boolea
   };
 
   const onClear = () => {
-    showDialog(t('清空运行日志'), t('将删除本地保存的全部运行记录，确认？'), [
+    Alert.alert(t('清空运行日志'), t('将删除本地保存的全部运行记录，确认？'), [
       { text: t('取消'), style: 'cancel' },
       {
         text: t('清空'),

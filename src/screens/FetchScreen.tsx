@@ -19,8 +19,6 @@ import { Member } from '../types';
 import { errorMessage, messageText, unwrapList } from '../utils/data';
 import { formatTimestamp } from '../utils/format';
 import { usePalette, radii } from '../theme';
-import { GlassSurface } from '../components/GlassSurface';
-import { GlassSegmented } from '../components/GlassSegmented';
 
 type MessageMode = 'all' | 'owner';
 type RoomMode = 'big' | 'small';
@@ -63,11 +61,6 @@ export default function FetchScreen() {
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
-  /**
-   * 状态是「错误」还是「信息」：以前靠 `/失败|错误/.test(status)` 反推，切到英文/繁體
-   * 就失效（错误提示被染成主题色）。改成显式状态，文案随语言变也不影响配色。
-   */
-  const [statusError, setStatusError] = useState(false);
 
   const fetchOnce = async (member: Member, targetRoomMode: RoomMode, nextTime = 0) => {
     const channelId = getChannelId(member, targetRoomMode);
@@ -83,12 +76,10 @@ export default function FetchScreen() {
 
   const startFetch = async () => {
     if (!selectedMember) {
-      setStatusError(true);
       setStatus(t('请先选择成员'));
       return;
     }
     setLoading(true);
-    setStatusError(false);
     setStatus(t('抓取中...'));
     try {
       // 循环抓取全部历史（成员消息模式同样分页，避免只取一页漏数据）
@@ -101,7 +92,6 @@ export default function FetchScreen() {
         guard += 1;
         const { list, next } = await fetchOnce(selectedMember, usedRoomMode, cursor);
         if (!list.length && usedRoomMode === 'big' && selectedMember.yklzId && all.length === 0) {
-          setStatusError(false);
           setStatus(t('大房间没有返回消息，正在尝试小房间...'));
           usedRoomMode = 'small';
           cursor = 0;
@@ -116,18 +106,16 @@ export default function FetchScreen() {
         all = all.concat(fresh);
         if (!next || next <= cursor || fresh.length === 0) break;
         cursor = next;
-        if (guard % 5 === 0) { setStatusError(false); setStatus(t('已抓取 {count} 条，继续...', { count: all.length })); }
+        if (guard % 5 === 0) setStatus(t('已抓取 {count} 条，继续...', { count: all.length }));
       }
 
       setResults(all);
-      setStatusError(false);
       setStatus(t('抓取完成：{count} 条消息 · {room} · {mode}', {
         count: all.length,
         room: usedRoomMode === 'small' ? t('小房间') : t('大房间'),
         mode: messageMode === 'all' ? t('全部消息') : t('成员消息'),
       }));
     } catch (error) {
-      setStatusError(true);
       setStatus(t('抓取失败：{error}', { error: errorMessage(error) }));
     } finally {
       setLoading(false);
@@ -139,22 +127,22 @@ export default function FetchScreen() {
       <ScreenHeader title={t('抓取消息')} />
 
       <FadeInView delay={60} duration={300} style={{ flex: 1 }}>
-        <GlassSurface radius={20} role="card" style={[styles.panel, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
-          <MemberPicker selectedMember={selectedMember} onSelect={setSelectedMember} activeOnly />
+        <View style={[styles.panel, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
+          <MemberPicker selectedMember={selectedMember} onSelect={setSelectedMember} />
 
           {/* 消息范围分段 */}
           <Text style={[styles.groupLabel, { color: palette.label }]}>{t('消息范围')}</Text>
           <View style={[styles.segment, { backgroundColor: palette.fill2 }]}>
             <TouchableOpacity
               activeOpacity={0.7}
-              style={[styles.segmentBtn, messageMode === 'all' && { backgroundColor: palette.surfaceGlassStrong }]}
+              style={[styles.segmentBtn, messageMode === 'all' && { backgroundColor: palette.surface }]}
               onPress={() => setMessageMode('all')}
             >
               <Text style={[styles.segmentText, { color: messageMode === 'all' ? palette.label : palette.labelTertiary, fontWeight: messageMode === 'all' ? '700' : '400' }]}>{t('全部消息')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               activeOpacity={0.7}
-              style={[styles.segmentBtn, messageMode === 'owner' && { backgroundColor: palette.surfaceGlassStrong }]}
+              style={[styles.segmentBtn, messageMode === 'owner' && { backgroundColor: palette.surface }]}
               onPress={() => setMessageMode('owner')}
             >
               <Text style={[styles.segmentText, { color: messageMode === 'owner' ? palette.label : palette.labelTertiary, fontWeight: messageMode === 'owner' ? '700' : '400' }]}>{t('成员消息')}</Text>
@@ -163,15 +151,22 @@ export default function FetchScreen() {
 
           {/* 房间分区分段 */}
           <Text style={[styles.groupLabel, { color: palette.label }]}>{t('房间分区')}</Text>
-          <GlassSegmented
-            options={[
-              { key: 'big', label: t('大房间') },
-              { key: 'small', label: t('小房间') },
-            ]}
-            value={roomMode}
-            onChange={setRoomMode}
-            style={{ width: '100%' }}
-          />
+          <View style={[styles.segment, { backgroundColor: palette.fill2 }]}>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              style={[styles.segmentBtn, roomMode === 'big' && { backgroundColor: palette.surface }]}
+              onPress={() => setRoomMode('big')}
+            >
+              <Text style={[styles.segmentText, { color: roomMode === 'big' ? palette.label : palette.labelTertiary, fontWeight: roomMode === 'big' ? '700' : '400' }]}>{t('大房间')}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              style={[styles.segmentBtn, roomMode === 'small' && { backgroundColor: palette.surface }]}
+              onPress={() => setRoomMode('small')}
+            >
+              <Text style={[styles.segmentText, { color: roomMode === 'small' ? palette.label : palette.labelTertiary, fontWeight: roomMode === 'small' ? '700' : '400' }]}>{t('小房间')}</Text>
+            </TouchableOpacity>
+          </View>
 
           <View style={styles.fetchBtn}>
             <Button title={t('开始抓取')} variant="filled" size="lg" onPress={startFetch} disabled={loading} loading={loading} fullWidth />
@@ -179,7 +174,7 @@ export default function FetchScreen() {
 
           {/* 状态胶囊条 */}
           {status ? (
-            statusError ? (
+            /失败|错误/.test(status) ? (
               <View style={[styles.statusCapsule, { backgroundColor: 'rgba(255,59,48,0.12)' }]}>
                 <Text style={[styles.statusText, { color: palette.danger }]}>{status}</Text>
               </View>
@@ -189,7 +184,7 @@ export default function FetchScreen() {
               </View>
             )
           ) : null}
-        </GlassSurface>
+        </View>
 
         {results.length > 0 ? (
           <Text style={[styles.resultLabel, { color: palette.labelSecondary }]}>
@@ -205,8 +200,9 @@ export default function FetchScreen() {
           maxToRenderPerBatch={12}
           windowSize={7}
           removeClippedSubviews
-          renderItem={({ item }) => (
-            <View style={[styles.msgItem, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth, borderRadius: 20 }]}>
+          renderItem={({ item, index }) => (
+            <FadeInView delay={index < 12 ? 60 + index * 25 : 0} distance={8}>
+              <View style={[styles.msgItem, { backgroundColor: palette.surface }]}>
                 <View style={styles.msgHead}>
                   <Text style={[styles.msgSender, { color: palette.label }]} numberOfLines={1}>
                     {item.senderName || item.senderNickName || item.extInfo?.user?.nickName || t('成员')}
@@ -218,7 +214,8 @@ export default function FetchScreen() {
                 <Text style={[styles.msgText, { color: palette.labelSecondary }]} numberOfLines={4}>
                   {messageText(item) || t('[空消息]')}
                 </Text>
-            </View>
+              </View>
+            </FadeInView>
           )}
           ListEmptyComponent={loading ? <CenterSpinner text={t('抓取中…')} /> : <EmptyState icon="message-text-outline" title={t('暂无数据')} hint={t('选择成员并点击"开始抓取"获取消息')} />}
         />
@@ -229,7 +226,7 @@ export default function FetchScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  panel: { padding: 14, marginHorizontal: 16, marginTop: 4, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth, gap: 12 },
+  panel: { padding: 14, marginHorizontal: 16, marginTop: 4, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, gap: 12 },
   groupLabel: { fontSize: 13, fontWeight: '700', marginTop: 4 },
   segment: { flexDirection: 'row', padding: 3, borderRadius: radii.sm, gap: 3 },
   segmentBtn: {

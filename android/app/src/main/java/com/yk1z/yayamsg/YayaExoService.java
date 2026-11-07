@@ -61,7 +61,6 @@ public class YayaExoService extends Service {
   public static final String ACTION_SET_HINTS = "yaya.exo.set_hints";
   /** 服务进程存活标记：MainActivity 在视频进 PiP 前据它决定是否给音乐服务发 stop（释放会话防劫持系统控件） */
   public static volatile boolean serviceAlive = false;
-  private static volatile YayaExoService runningInstance;
   /** 音乐是否"真的在出声"（playWhenReady 且 Exo 就绪）：非实播态（暂停/未起播）才允许被视频 PiP 停止 */
   public static volatile boolean musicActuallyPlaying = false;
   private static final String CHANNEL_ID = "yaya_radio_v3";
@@ -80,7 +79,6 @@ public class YayaExoService extends Service {
   // 元数据（来自 playQueue JSON）
   private String title = "";
   private String lastTrackUrl = ""; // 当前已下发曲目 url（progress 事件带出，供 JS 去竞态）
-  private String lastTrackId = "";
   private String artist = "";
   private String album = "";
   private String artPath = "";
@@ -93,8 +91,8 @@ public class YayaExoService extends Service {
   // skip hints（单跳）：服务端本地切歌用，结构 = {url,title,artist,album,art?,index?}
   // index = 引擎语义下的队列下标（供 JS 恢复对账定位曲目）；-1 = 未知
   // art = 封面 file://（JS 已落盘）；后台本地切歌直接展示，不等回前台 JS 补推
-  private String nextUrl = "", nextTrackId = "", nextTitle = "", nextArtist = "", nextAlbum = "", nextArt = "";
-  private String prevUrl = "", prevTrackId = "", prevTitle = "", prevArtist = "", prevAlbum = "", prevArt = "";
+  private String nextUrl = "", nextTitle = "", nextArtist = "", nextAlbum = "", nextArt = "";
+  private String prevUrl = "", prevTitle = "", prevArtist = "", prevAlbum = "", prevArt = "";
   private int nextIndexHint = -1, prevIndexHint = -1;
 
   private final Runnable progressPoller = new Runnable() {
@@ -153,44 +151,6 @@ public class YayaExoService extends Service {
   }
 
   /** 释放当前封面 Bitmap 并置空（换曲/换封面/重建播放器前调用，缓解持续切歌的 Bitmap 堆积累积） */
-  /** 远端封面 → 后台下载解码 → 刷新卡片（失败静默，不影响播放） */
-  private void downloadArt(final String url) {
-    new Thread(new Runnable() {
-      @Override public void run() {
-        java.net.HttpURLConnection conn = null;
-        try {
-          conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-          conn.setConnectTimeout(8000);
-          conn.setReadTimeout(8000);
-          conn.setRequestProperty("User-Agent", "PocketFans201807/7.1.43 (Android)");
-          if (conn.getResponseCode() / 100 != 2) return;
-          java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-          java.io.InputStream in = conn.getInputStream();
-          byte[] buf = new byte[8192];
-          int n;
-          while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-          in.close();
-          final byte[] data = bos.toByteArray();
-          if (data.length == 0) return;
-          final Bitmap bmp = BitmapFactory.decodeByteArray(data, 0, data.length);
-          if (bmp == null) return;
-          new android.os.Handler(getMainLooper()).post(new Runnable() {
-            @Override public void run() {
-              if (!url.equals(artPath)) return; // 期间已切歌
-              recycleArt();
-              artBitmap = bmp;
-              lastMetaSig = null; // 强制重发 metadata（含新封面）
-              pushState();
-            }
-          });
-        } catch (Throwable ignored) {
-        } finally {
-          try { if (conn != null) conn.disconnect(); } catch (Throwable ignored) {}
-        }
-      }
-    }).start();
-  }
-
   private void recycleArt() {
     if (artBitmap != null && !artBitmap.isRecycled()) {
       try { artBitmap.recycle(); } catch (Throwable ignored) {}
@@ -208,27 +168,7 @@ public class YayaExoService extends Service {
   public void onCreate() {
     super.onCreate();
     serviceAlive = true;
-    runningInstance = this;
     ensureChannel();
-  }
-
-  /** 由 React Native 在主线程读取，提供回前台时的真实播放状态。 */
-  public static Map<String, Object> getPlaybackSnapshot() {
-    Map<String, Object> result = new HashMap<>();
-    YayaExoService s = runningInstance;
-    boolean active = s != null && s.exo != null && s.exo.getCurrentMediaItem() != null;
-    result.put("active", active);
-    if (!active) return result;
-    result.put("url", String.valueOf(s.currentMediaUrl() == null ? "" : s.currentMediaUrl()));
-    result.put("trackId", s.lastTrackId == null ? "" : s.lastTrackId);
-    result.put("title", s.title == null ? "" : s.title);
-    result.put("artist", s.artist == null ? "" : s.artist);
-    result.put("album", s.album == null ? "" : s.album);
-    result.put("position", Math.max(0, s.exo.getCurrentPosition()) / 1000.0);
-    long duration = s.exo.getDuration();
-    result.put("duration", duration > 0 ? duration / 1000.0 : 0.0);
-    result.put("playing", s.exo.getPlayWhenReady() && s.exo.getPlaybackState() != Player.STATE_ENDED);
-    return result;
   }
 
   private void ensureChannel() {
@@ -281,32 +221,15 @@ public class YayaExoService extends Service {
       @Override public void onSkipToPrevious() { Log.i("YayaExo", "CMD onSkipToPrevious"); localSkip(false); }
       @Override public void onSeekTo(long pos) { Log.i("YayaExo", "CMD onSeekTo pos=" + pos); if (exo != null) exo.seekTo(Math.max(0, pos)); }
       @Override public void onStop() { Log.i("YayaExo", "CMD onStop"); if (exo != null) exo.pause(); }
-      @Override public void onCustomAction(String action, android.os.Bundle args) {
-        handleCustom(action);
-      }
-
     });
     session.setActive(true);
-    // ⚠️ 不再无条件清空封面（2026-10-18）：回主页/后台唤醒会重建会话，
-    // 清空后又没有页面再推元数据 → 系统卡只剩标题没有封面。
-    // 保留 artPath，并在本地文件仍存在时重新解码出 bitmap。
-    if (artPath != null && artPath.startsWith("file://")) {
-      recycleArt();
-      try { artBitmap = BitmapFactory.decodeFile(artPath.substring("file://".length())); } catch (Throwable ignored) {}
-    }
+    recycleArt();
+    artPath = "";
     lastNotifyMs = 0;
     lastEmitPosMs = Long.MIN_VALUE;
     lastEmitPlaying = false;
     pushState();
   }
-
-  /** 收藏 / 播放列表两个自定义按钮 → JS（音乐引擎桥接） */
-  private void handleCustom(String action) {
-    Log.i("YayaExo", "CMD custom " + action);
-    if (action == null || action.isEmpty()) return;
-    com.yk1z.yayamsg.RadioServiceModule.emitControl(getApplicationContext(), action);
-  }
-
 
   private void destroySession() {
     if (session != null) {
@@ -319,19 +242,12 @@ public class YayaExoService extends Service {
   @Override
   public int onStartCommand(Intent intent, int flags, int startId) {
     if (intent == null) return START_NOT_STICKY;
-    // 任意命令都可能通过 startForegroundService 到达；即使播放器尚未创建，
-    // 也要先满足系统前台服务契约，再处理空服务或停止命令。
-    if (exo == null) {
-      try {
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-      } catch (Throwable ignored) {}
-    }
     String action = intent.getAction();
     if (ACTION_PLAY_QUEUE.equals(action)) {
       try {
         // ⚠️ startForegroundService 5s 契约：解析 JSON/建会话可能耗时，先占位进前台（防 RemoteServiceException）
         try {
-          ServiceCompat.startForeground(this, NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+          startForeground(NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         } catch (Throwable ignored) {}
         String hJson = intent.getStringExtra("headers");
         Map<String, String> nh = new HashMap<>();
@@ -352,11 +268,8 @@ public class YayaExoService extends Service {
         for (int i = 0; i < arr.length(); i++) {
           JSONObject o = arr.getJSONObject(i);
           String url = o.optString("url", "");
-          if (i == 0) {
-            firstUrl = url;
-            lastTrackUrl = url;
-            lastTrackId = o.optString("trackId", "");
-          }
+          if (i == 0) firstUrl = url;
+          if (i == 0) lastTrackUrl = url;
           items.add(new MediaItem.Builder().setUri(url).build());
           title = o.optString("title");
           artist = o.optString("artist");
@@ -367,9 +280,6 @@ public class YayaExoService extends Service {
             recycleArt();
             if (art.startsWith("file://")) {
               try { artBitmap = BitmapFactory.decodeFile(art.substring("file://".length())); } catch (Throwable ignored) {}
-            } else if (art.startsWith("http")) {
-              // 页面不在时（后台/主页）只有远端 URL：后台线程下载后解码，卡片才有封面
-              downloadArt(art);
             }
           }
         }
@@ -395,13 +305,13 @@ public class YayaExoService extends Service {
           if (playing && !exo.getPlayWhenReady()) exo.play();
           // else if (!playing && exo.getPlayWhenReady()) exo.pause();
         } else {
-          Log.i("YayaExo", "SET-ITEMS posMs=" + posMs + " sameTrack=" + sameTrack + " curState=" + (exo.getPlaybackState()));
+          Log.i("YayaExo", "SET-ITEMS url=" + firstUrl + " posMs=" + posMs + " sameTrack=" + sameTrack + " curState=" + (exo.getPlaybackState()));
           exo.setMediaItems(items, Math.max(0, Math.min(index, items.size() - 1)), posMs);
           exo.prepare();
           if (playing) exo.play();
         }
         startPolling();
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
       } catch (Throwable t) {
         Map<String, Object> extra = new HashMap<>();
         extra.put("message", "queue err " + t.getMessage());
@@ -440,13 +350,15 @@ public class YayaExoService extends Service {
         if (exo != null) { try { exo.stop(); exo.clearMediaItems(); } catch (Throwable ignored) {} }
         musicActuallyPlaying = false;
         try {
-          ServiceCompat.startForeground(this, NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+          startForeground(NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         } catch (Throwable ignored) {}
         stopServiceCleanly();
         return START_NOT_STICKY;
       }
       if (exo == null) {
-        stopServiceCleanly();
+        try {
+          startForeground(NOTIFICATION_ID, minimalFg(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } catch (Throwable ignored) {}
         return START_NOT_STICKY;
       }
       if ("pause".equals(cmd)) { exo.pause(); pushState(); }
@@ -479,7 +391,7 @@ public class YayaExoService extends Service {
       if (nextJson != null && nextJson.startsWith("{")) {
         JSONObject o = new JSONObject(nextJson);
         String u = o.optString("url", "");
-        setNextHint(u, o.optString("trackId", ""), o.optString("title", ""), o.optString("artist", ""), o.optString("album", ""),
+        setNextHint(u, o.optString("title", ""), o.optString("artist", ""), o.optString("album", ""),
             o.optString("art", ""),
             o.has("index") ? o.optInt("index", -1) : -1);
       } else {
@@ -490,7 +402,7 @@ public class YayaExoService extends Service {
       if (prevJson != null && prevJson.startsWith("{")) {
         JSONObject o = new JSONObject(prevJson);
         String u = o.optString("url", "");
-        setPrevHint(u, o.optString("trackId", ""), o.optString("title", ""), o.optString("artist", ""), o.optString("album", ""),
+        setPrevHint(u, o.optString("title", ""), o.optString("artist", ""), o.optString("album", ""),
             o.optString("art", ""),
             o.has("index") ? o.optInt("index", -1) : -1);
       } else {
@@ -499,18 +411,18 @@ public class YayaExoService extends Service {
     } catch (Throwable t) { clearPrevHint(); }
   }
 
-  private void setNextHint(String u, String id, String t, String a, String al, String art, int idx) {
-    nextUrl = u == null ? "" : u; nextTrackId = id == null ? "" : id; nextTitle = t == null ? "" : t;
+  private void setNextHint(String u, String t, String a, String al, String art, int idx) {
+    nextUrl = u == null ? "" : u; nextTitle = t == null ? "" : t;
     nextArtist = a == null ? "" : a; nextAlbum = al == null ? "" : al;
     nextArt = art == null ? "" : art; nextIndexHint = idx;
   }
-  private void setPrevHint(String u, String id, String t, String a, String al, String art, int idx) {
-    prevUrl = u == null ? "" : u; prevTrackId = id == null ? "" : id; prevTitle = t == null ? "" : t;
+  private void setPrevHint(String u, String t, String a, String al, String art, int idx) {
+    prevUrl = u == null ? "" : u; prevTitle = t == null ? "" : t;
     prevArtist = a == null ? "" : a; prevAlbum = al == null ? "" : al;
     prevArt = art == null ? "" : art; prevIndexHint = idx;
   }
-  private void clearNextHint() { setNextHint("", "", "", "", "", "", -1); }
-  private void clearPrevHint() { setPrevHint("", "", "", "", "", "", -1); }
+  private void clearNextHint() { setNextHint("", "", "", "", "", -1); }
+  private void clearPrevHint() { setPrevHint("", "", "", "", "", -1); }
 
   /** 当前已下发曲目 url（mediaId/localConfiguration.uri 双回退，与 playQueue 同曲去重逻辑一致） */
   private String currentMediaUrl() {
@@ -528,18 +440,12 @@ public class YayaExoService extends Service {
    */
   private void localSkip(boolean isNext) {
     if (exo == null) return;
-    // ⚠️ 唯一权威 = JS 引擎（队列/播放模式/URL 解析都在 JS）：
-    // 早期直接用本地 hint 切歌且不通知 JS → JS 的 currentIndex 与原生实际播放错位，
-    // 后续每一次切歌都基于错的索引 → 用户看到「切的不是上一首/下一首」（2026-10-18）。
-    // 先把指令交给 JS（它会解析新 URL 再下发），JS 不在（进程被杀/引擎未挂）才退回本地 hint。
-    if (RadioExoModule.emitJs(getApplicationContext(), "cmd", mapOf("cmd", isNext ? "next" : "prev"))) {
-      return;
-    }
     String u = isNext ? nextUrl : prevUrl;
     if (u.isEmpty()) {
+      // 无可用 hint：旧路径（JS 活着时 cmd→引擎 next/prev 仍完整生效）
+      RadioExoModule.emitJs(getApplicationContext(), "cmd", mapOf("cmd", isNext ? "next" : "prev"));
       return;
     }
-    String nTrackId = isNext ? nextTrackId : prevTrackId;
     String nTitle = isNext ? nextTitle : prevTitle;
     String nArtist = isNext ? nextArtist : prevArtist;
     String nAlbum = isNext ? nextAlbum : prevAlbum;
@@ -547,9 +453,9 @@ public class YayaExoService extends Service {
     int nIndex = isNext ? nextIndexHint : prevIndexHint;
     // 反方向槽位 = 刚离开的当前曲（一步 prev/next 可回原曲，含其封面）；已用方向槽位清空
     // （无下一跳元数据，避免二次点击重放同曲；前台 JS 会即刻按新 index 重新推送）
-    if (isNext) { setPrevHint(lastTrackUrl, lastTrackId, title, artist, album, artPath, -1); clearNextHint(); }
-    else { setNextHint(lastTrackUrl, lastTrackId, title, artist, album, artPath, -1); clearPrevHint(); }
-    title = nTitle; artist = nArtist; album = nAlbum; lastTrackUrl = u; lastTrackId = nTrackId;
+    if (isNext) { setPrevHint(lastTrackUrl, title, artist, album, artPath, -1); clearNextHint(); }
+    else { setNextHint(lastTrackUrl, title, artist, album, artPath, -1); clearPrevHint(); }
+    title = nTitle; artist = nArtist; album = nAlbum; lastTrackUrl = u;
     String curU = currentMediaUrl();
     boolean same = curU != null && curU.equals(u);
     try {
@@ -581,7 +487,6 @@ public class YayaExoService extends Service {
     Map<String, Object> ev = new HashMap<>();
     ev.put("cmd", isNext ? "next" : "prev");
     ev.put("url", u);
-    ev.put("trackId", nTrackId);
     ev.put("title", nTitle);
     ev.put("artist", nArtist);
     ev.put("album", nAlbum);
@@ -639,10 +544,6 @@ public class YayaExoService extends Service {
       extra.put("playing", playing);
       extra.put("index", exo.getCurrentMediaItemIndex());
       extra.put("url", lastTrackUrl);
-      extra.put("trackId", lastTrackId);
-      extra.put("title", title);
-      extra.put("artist", artist);
-      extra.put("album", album);
       RadioExoModule.emitJs(getApplicationContext(), "progress", extra);
     } catch (Throwable ignored) {}
   }
@@ -663,11 +564,6 @@ public class YayaExoService extends Service {
       // 用墙钟 currentTimeMillis 会让 ColorOS 算出异常差值 → 播放态进度错乱/归 0（19:59 实测）
       PlaybackState ps = new PlaybackState.Builder()
           .setActions(actions)
-          // 系统媒体卡额外按钮：API21+ 的 PlaybackState.CustomAction（收藏／播放列表）
-          .addCustomAction(new PlaybackState.CustomAction.Builder("favorite",
-              com.yk1z.yayamsg.RadioServiceModule.isFavoriteState() ? "已收藏" : "收藏",
-              com.yk1z.yayamsg.RadioServiceModule.isFavoriteState() ? R.drawable.ic_heart : R.drawable.ic_heart_outline).build())
-          .addCustomAction(new PlaybackState.CustomAction.Builder("playlist", "播放列表", R.drawable.ic_playlist).build())
           .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
               exo.getCurrentPosition(), playing ? 1.0f : 0f, android.os.SystemClock.elapsedRealtime())
           .build();
@@ -733,7 +629,6 @@ public class YayaExoService extends Service {
   @Override
   public void onDestroy() {
     serviceAlive = false;
-    if (runningInstance == this) runningInstance = null;
     musicActuallyPlaying = false;
     stopPolling();
     try {

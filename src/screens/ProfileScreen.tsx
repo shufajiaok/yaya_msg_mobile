@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useRoute } from '@react-navigation/native';
+import React, { useRef, useState } from 'react';
 import { toMs } from '../utils/format';
 import {
   View,
@@ -19,8 +18,6 @@ import MemberPicker from '../components/MemberPicker';
 import pocketApi from '../api/pocket48';
 import { translate, useI18n } from '../i18n';
 import { usePalette } from '../theme';
-import { useMemberStore } from '../store';
-import { GlassSurface } from '../components/GlassSurface';
 
 type ArchiveState = {
   data: any;
@@ -89,34 +86,6 @@ export default function ProfileScreen() {
     }
   };
 
-  /**
-   * 从房间/消息点头像进来：路由带 memberId（或 member 对象）→ 直接加载该成员档案，
-   * 不需要用户再在 MemberPicker 里搜一遍（用户需求：房间内点头像加载对方个人资料）。
-   */
-  const route = useRoute<any>();
-  const members = useMemberStore((s) => s.members);
-  const autoLoadedRef = useRef('');
-  const routeParams = route?.params || {};
-  const routeMemberId = String(routeParams.memberId || routeParams.member?.id || '').trim();
-  const routeNonce = Number(routeParams.nonce) || 0;
-  useEffect(() => {
-    if (!routeMemberId) return;
-    const key = `${routeMemberId}:${routeNonce}`;
-    if (autoLoadedRef.current === key) return; // 同一参数只自动加载一次（避免每次重渲染重打接口）
-    autoLoadedRef.current = key;
-    const found = (members as any[]).find((m) =>
-      [m?.id, m?.userId, m?.memberId].some((v) => String(v ?? '').trim() === routeMemberId),
-    );
-    // 成员库还没加载完时用路由带来的对象兜底；都没有就用最小对象（档案接口只需要 id）
-    const target = (found || routeParams.member || {
-      id: routeMemberId,
-      ownerName: String(routeParams.memberName || routeMemberId),
-      avatar: String(routeParams.memberAvatar || ''),
-    }) as Member;
-    void loadProfile(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeMemberId, routeNonce, members]);
-
   const starInfo = archive.data?.starInfo || archive.data?.star || archive.data || {};
   const fanRanks = normalizeList(archive.data?.fansRank || archive.data?.rankList);
   const avatar = firstText(starInfo?.starAvatar, starInfo?.avatar, selectedMember?.avatar);
@@ -133,7 +102,7 @@ export default function ProfileScreen() {
         </View>
 
         {selectedMember ? (
-        <GlassSurface radius={20} role="card" style={[styles.card, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <View style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
           <View style={styles.profileHead}>
             {avatar !== '-' ? <Image source={{ uri: avatar }} style={[styles.avatar, { backgroundColor: palette.fill2 }]} /> : <View style={[styles.avatarFallback, { backgroundColor: palette.tintSoft }]} />}
             <View style={styles.profileTitleWrap}>
@@ -211,7 +180,7 @@ export default function ProfileScreen() {
               </ScrollView>
             </View>
           ) : null}
-        </GlassSurface>
+        </View>
       ) : (
         <View style={styles.emptyCard}>
           <EmptyState icon="account-search-outline" title={t('暂无数据')} hint={t('搜索成员查看档案')} />
@@ -219,7 +188,7 @@ export default function ProfileScreen() {
       )}
 
       {fanRanks.length > 0 ? (
-        <GlassSurface radius={20} role="card" style={[styles.card, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <View style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
           <Text style={[styles.sectionTitle, { color: palette.tint }]}>{t('粉丝排行')}</Text>
           {fanRanks.slice(0, 10).map((fan: any, index: number) => (
             <View key={`${fan.userId || fan.nickName || index}`} style={[styles.rankRow, { borderBottomColor: palette.innerStroke }]}>
@@ -230,11 +199,11 @@ export default function ProfileScreen() {
               <Text style={[styles.rankMeta, { color: palette.labelSecondary }]} numberOfLines={1}>{firstText(fan.userId, fan.level, fan.score)}</Text>
             </View>
           ))}
-        </GlassSurface>
+        </View>
       ) : null}
 
       {archive.history.length > 0 ? (
-        <GlassSurface radius={20} role="card" style={[styles.card, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <View style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
           <Text style={[styles.sectionTitle, { color: palette.tint }]}>{t('重要经历')}</Text>
           {archive.history.slice(0, 20).map((item: any, index: number) => (
             <View key={`${item.ctime || item.time || index}`} style={[styles.timelineRow, { borderBottomColor: palette.innerStroke }]}>
@@ -244,7 +213,7 @@ export default function ProfileScreen() {
               </Text>
             </View>
           ))}
-        </GlassSurface>
+        </View>
       ) : null}
 
       </FadeInView>
@@ -267,11 +236,11 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
   content: { paddingBottom: 36 },
   pickerWrap: { paddingHorizontal: 16, marginBottom: 10 },
-  card: { marginHorizontal: 16, marginVertical: 4, padding: 14, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
-  emptyCard: { marginHorizontal: 16, marginVertical: 4, borderRadius: 20 },
+  card: { marginHorizontal: 16, marginVertical: 4, padding: 14, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
+  emptyCard: { marginHorizontal: 16, marginVertical: 4, borderRadius: 16 },
   profileHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
-  avatar: { width: 68, height: 68, borderRadius: 36 },
-  avatarFallback: { width: 68, height: 68, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
+  avatar: { width: 68, height: 68, borderRadius: 34 },
+  avatarFallback: { width: 68, height: 68, borderRadius: 34, alignItems: 'center', justifyContent: 'center' },
   profileTitleWrap: { flex: 1, marginLeft: 14 },
   name: { fontSize: 22, fontWeight: '800' },
   subLine: { marginTop: 5, fontSize: 13 },
@@ -287,7 +256,7 @@ const styles = StyleSheet.create({
   noteBox: { marginTop: 14, padding: 12, borderRadius: 14 },
   noteLabel: { fontSize: 11, fontWeight: '700', marginBottom: 4 },
   noteText: { fontSize: 13, lineHeight: 20 },
-  photoItem: { width: 120, height: 160, borderRadius: 14, marginRight: 8 },
+  photoItem: { width: 120, height: 160, borderRadius: 12, marginRight: 8 },
   rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth },
   rankNo: { width: 28, fontWeight: '800' },
   rankName: { flex: 1, fontSize: 14, fontWeight: '600' },

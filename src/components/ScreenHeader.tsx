@@ -5,14 +5,11 @@ import { useI18n } from '../i18n';
 import { usePalette } from '../theme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { ScalePressable } from './Motion';
-import { GlassSurface } from './GlassSurface';
 
 interface Props {
   title: string;
   onBack?: () => void;
   right?: React.ReactNode;
-  /** 标题左侧的额外元素（如私信会话页的对方头像），传了才占位 */
-  leading?: React.ReactNode;
   style?: ViewStyle;
   /** 图片背景页（如直播间）传 true：返回键用玻璃胶囊，标题加轻阴影保证可读 */
   overlay?: boolean;
@@ -20,8 +17,13 @@ interface Props {
   hideBack?: boolean;
 }
 
-
-export default function ScreenHeader({ title, onBack, right, leading, style, overlay, hideBack }: Props) {
+/**
+ * 新式大标题页头（iOS 26 风格，主题化）
+ *  - 左对齐大标题 + 玻璃圆形返回键，去霓虹发光
+ *  - 三栏布局保留：左(返回) | 中(标题占满) | 右(操作位)
+ *  - 兼容旧 props（title/onBack/right/style），全站调用点无需改动
+ */
+export default function ScreenHeader({ title, onBack, right, style, overlay, hideBack }: Props) {
   const navigation = useNavigation();
   const { t } = useI18n();
   const palette = usePalette();
@@ -36,14 +38,18 @@ export default function ScreenHeader({ title, onBack, right, leading, style, ove
           accessibilityRole="button"
           accessibilityLabel={t('返回')}
           pressedScale={0.9}
+          style={[
+            styles.backBtn,
+            {
+              backgroundColor: overlay ? palette.surfaceGlassStrong : palette.fill2,
+              borderColor: overlay ? palette.innerStroke : 'transparent',
+            },
+          ]}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <GlassSurface role="chip" radius={999} style={styles.backBtn}>
-            <MaterialCommunityIcons name="chevron-left" color={palette.label} size={26} />
-          </GlassSurface>
+          <MaterialCommunityIcons name="chevron-left" color={palette.label} size={26} />
         </ScalePressable>
       ) : null}
-      {leading ? <View style={styles.leading}>{leading}</View> : null}
       <Text
         numberOfLines={1}
         style={[
@@ -72,15 +78,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sideRight: { minWidth: 56, alignItems: 'flex-end', justifyContent: 'center' },
-  leading: { alignItems: 'center', justifyContent: 'center' },
   backBtn: {
     width: 36,
     height: 36,
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    // 不要 borderWidth：RN 里 borderWidth 不给 borderColor 会画默认黑边，
-    // 而描边本来就由 GlassSurface 的材质描边负责（白 0.66），叠黑边会显脏。
+    borderWidth: StyleSheet.hairlineWidth,
   },
   title: {
     flex: 1,

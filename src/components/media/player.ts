@@ -1,4 +1,4 @@
-export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime?: number, showControls = true, extraHeaders: Record<string, string> = {}, volumeBoost = 1, coverPortrait = false): string {
+export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime?: number, showControls = true, extraHeaders: Record<string, string> = {}, volumeBoost = 1): string {
   const poster = posterUrl || '';
   const startTime = Number.isFinite(initialTime) && (initialTime as number) > 0 ? (initialTime as number) : 0;
   // 直播流不挂原生 controls：HTML5 播放条上的进度条/预览对直播无意义且遮挡画面
@@ -33,26 +33,13 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
 <script>
 (function() {
   var video = document.getElementById('video');
-  function updateVideoFit() {
-    var cover = ${JSON.stringify(coverPortrait)} && video.videoWidth > 0 && video.videoWidth < video.videoHeight && window.innerWidth < window.innerHeight;
-    video.style.height = cover ? '100%' : 'auto';
-    video.style.objectFit = cover ? 'cover' : 'contain';
-  }
-  video.addEventListener('loadedmetadata', updateVideoFit);
-  video.addEventListener('resize', updateVideoFit);
-  window.addEventListener('resize', updateVideoFit);
   var loading = document.getElementById('loading');
   var errorDiv = document.getElementById('error');
-  var errorSent = false;
 
   function showError(msg) {
     loading.style.display = 'none';
     errorDiv.style.display = 'block';
     errorDiv.textContent = msg;
-    if (!errorSent && window.ReactNativeWebView) {
-      errorSent = true;
-      try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'error', error: String(msg || '网页播放器错误').slice(0, 160) })); } catch (e) {}
-    }
   }
 
   function hideLoading() {
@@ -120,23 +107,12 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
   video.addEventListener('canplay', markStarted);
   video.addEventListener('error', function() { showError('视频源错误'); });
 
-  // 时长回传：RN 侧进度条与「可拖动」判定依赖它
-  // （此前从不上报 → store.duration 恒 0 → 进度条 0:00 且拖不动）
-  function reportDuration() {
-    if (!window.ReactNativeWebView) return;
-    var d = video.duration;
-    if (isFinite(d) && d > 0) {
-      try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'duration', duration: d })); } catch (e) {}
-    }
-  }
   video.addEventListener('loadedmetadata', function() {
     if (startTime && startTime > 0) {
       try { video.currentTime = startTime; } catch (e) {}
     }
     reportVideoSize();
-    reportDuration();
   });
-  video.addEventListener('durationchange', reportDuration);
   // 分辨率确认/切换（flv.js 起播瞬间 videoWidth 常为 0，playing/resize 后才可信）
   video.addEventListener('resize', reportVideoSize);
   video.addEventListener('playing', reportVideoSize);
@@ -162,7 +138,7 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
         else if (msg.type === 'play') video.play();
         else if (msg.type === 'pause') video.pause();
       } catch (e) {}
-    }, true);
+    });
   }
 
   var url = ${JSON.stringify(streamUrl)};

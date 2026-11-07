@@ -20,7 +20,6 @@ import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
-import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
@@ -37,8 +36,6 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
  *    与音乐会话彻底解耦。按钮图标随播放态在 PiP 中即时刷新。
  */
 public class PipModule extends ReactContextBaseJavaModule {
-  /** 排障日志 TAG：`adb logcat -s YayaPip` 可看小窗状态变化 */
-  private static final String TAG = "YayaPip";
   /** RN 侧标记当前是否有视频在播：true 时切后台自动进 PiP */
   public static volatile boolean videoPlaying = false;
   /**
@@ -54,8 +51,6 @@ public class PipModule extends ReactContextBaseJavaModule {
   public static final String ACTION_PIP_TOGGLE = "yaya.pip.toggle";
   /** RN 事件名：PiP ⏯ 被点（JS 侧 DeviceEventEmitter 订阅） */
   public static final String EVENT_PIP_TOGGLE = "PipToggleCmd";
-  /** RN 事件名：系统拒绝进入 PiP（画中画权限被 ROM 关闭 / 调用失败）→ JS 侧提示用户去系统设置 */
-  public static final String EVENT_PIP_DENIED = "PipDenied";
 
   private static volatile ReactApplicationContext savedReactContext;
   private static volatile Context savedAppContext;
@@ -83,11 +78,7 @@ public class PipModule extends ReactContextBaseJavaModule {
     super.initialize();
     try {
       IntentFilter f = new IntentFilter(ACTION_PIP_TOGGLE);
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        savedAppContext.registerReceiver(toggleReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-      } else {
-        savedAppContext.registerReceiver(toggleReceiver, f);
-      }
+      savedAppContext.registerReceiver(toggleReceiver, f);
     } catch (Throwable ignored) {
       // 已注册过/环境限制：静默
     }
@@ -96,8 +87,6 @@ public class PipModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void setVideoPlaying(boolean playing) {
     videoPlaying = playing;
-    android.util.Log.i(TAG, "setVideoPlaying=" + playing + " pipEnabled=" + pipEnabled);
-    diag("INFO", "setVideoPlaying=" + playing + " pipEnabled=" + pipEnabled);
     refreshPipActions();
   }
 
@@ -106,67 +95,6 @@ public class PipModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void setPipEnabled(boolean enabled) {
     pipEnabled = enabled;
-    android.util.Log.i(TAG, "setPipEnabled=" + enabled + " videoPlaying=" + videoPlaying);
-    diag("INFO", "setPipEnabled=" + enabled + " videoPlaying=" + videoPlaying);
-    refreshPipActions();
-  }
-
-  @ReactMethod
-  public void getNavigationInset(Promise promise) {
-    main.post(() -> {
-      Activity activity = getCurrentActivity();
-      if (activity == null) { promise.resolve(null); return; }
-      android.view.WindowInsets insets = activity.getWindow().getDecorView().getRootWindowInsets();
-      if (insets == null) { promise.resolve(null); return; }
-      int pixels = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-          ? insets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.navigationBars()).bottom
-          : insets.getSystemWindowInsetBottom();
-      promise.resolve(pixels / activity.getResources().getDisplayMetrics().density);
-    });
-  }
-
-  /**
-   * 系统是否允许本应用使用画中画。
-   * ColorOS / MIUI 等 ROM 把「画中画」作为独立的 AppOps 权限，用户关掉后
-   * enterPictureInPictureMode 会静默失败（不抛异常也不进 PiP）→ 表现为「怎么都换不出系统小窗」。
-   */
-  public static boolean canUsePip(Context ctx) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false;
-    try {
-      android.app.AppOpsManager ops =
-          (android.app.AppOpsManager) ctx.getSystemService(Context.APP_OPS_SERVICE);
-      if (ops == null) return true;
-      int mode = ops.checkOpNoThrow(
-          android.app.AppOpsManager.OPSTR_PICTURE_IN_PICTURE,
-          android.os.Process.myUid(),
-          ctx.getPackageName());
-      return mode != android.app.AppOpsManager.MODE_IGNORED && mode != android.app.AppOpsManager.MODE_ERRORED;
-    } catch (Throwable t) {
-      // 查不到就不阻断，交给系统实际调用判定
-      return true;
-    }
-  }
-
-  /** 诊断写盘：让原生侧关键节点能通过 App 的「运行日志 → 日志导出」发出来（release 无 logcat） */
-  public static void diag(String level, String msg) {
-    Context ctx = savedReactContext != null ? savedReactContext.getApplicationContext() : null;
-    if (ctx != null) NativeDiag.log(ctx, level, "pip", msg);
-  }
-
-  /** 通知 JS：进 PiP 被系统拒绝（reason: appops / enter-failed / timeout） */
-  public static void emitPipDenied(String reason) {
-    android.util.Log.w(TAG, "emitPipDenied reason=" + reason);
-    diag("WARN", "emitPipDenied reason=" + reason);
-    if (savedReactContext == null) return;
-    main.post(() -> {
-      try {
-        WritableMap m = Arguments.createMap();
-        m.putString("reason", reason);
-        savedReactContext
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-            .emit(EVENT_PIP_DENIED, m);
-      } catch (Throwable ignored) {}
-    });
   }
 
   @Override
@@ -183,7 +111,6 @@ public class PipModule extends ReactContextBaseJavaModule {
     if (w > 0 && h > 0) {
       pipAspectW = (float) w;
       pipAspectH = (float) h;
-      refreshPipActions();
     }
   }
 
@@ -191,81 +118,35 @@ public class PipModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void enterPip() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-    main.post(() -> {
-      Activity activity = getCurrentActivity();
-      if (activity == null || activity.isDestroyed() || activity.isFinishing() || activity.isInPictureInPictureMode()) return;
-      if (!canUsePip(activity)) { emitPipDenied("appops"); return; }
-      PipOverlayController.setHidden(activity, true);
-      emitPipChanged(true);
-      try {
-        if (activity.enterPictureInPictureMode(buildPipParams())) return;
-      } catch (Exception ignored) {}
-      PipOverlayController.setHidden(activity, false);
-      emitPipChanged(false);
-      emitPipDenied("enter-failed");
-    });
+    Activity activity = getCurrentActivity();
+    if (activity == null || activity.isDestroyed() || activity.isInPictureInPictureMode()) return;
+    try {
+      activity.enterPictureInPictureMode(buildPipParams());
+    } catch (Exception ignored) {
+      // 部分 ROM 在转场等特定时刻调用会抛异常，静默忽略
+    }
   }
 
   /** 播放/暂停态变化时刷新 PiP 内按钮：仅当已处于 PiP 中才有意义（无参重建 params 更新图标） */
   public static void refreshPipActions() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-    if (savedReactContext == null) {
-      android.util.Log.w(TAG, "refreshPip: savedReactContext=null");
-      return;
-    }
-    final boolean vp = videoPlaying, pe = pipEnabled;
+    if (savedReactContext == null) return;
     main.post(() -> {
       try {
         Activity activity = savedReactContext.getCurrentActivity();
-        if (activity == null || activity.isDestroyed()) {
-          android.util.Log.w(TAG, "refreshPip: activity=" + activity);
-          return;
-        }
-        PictureInPictureParams p = buildPipParams();
-        activity.setPictureInPictureParams(p);
-        android.util.Log.i(TAG, "refreshPip ok autoEnter=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && p.isAutoEnterEnabled())
-            + " vp=" + vp + " pe=" + pe + " ratio=" + p.getAspectRatio());
-        diag("INFO", "refreshPip ok autoEnter=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && p.isAutoEnterEnabled())
-            + " vp=" + vp + " pe=" + pe + " ratio=" + p.getAspectRatio());
-      } catch (Throwable e) {
-        android.util.Log.w(TAG, "refreshPip failed: " + e);
+        if (activity == null || activity.isDestroyed() || !activity.isInPictureInPictureMode()) return;
+        activity.setPictureInPictureParams(buildPipParams());
+      } catch (Throwable ignored) {
+        // 刷新失败不影响播放
       }
     });
   }
 
   /** 构造 PiP 参数：宽高比 + （有视频在播时）播放/暂停 RemoteAction */
   public static PictureInPictureParams buildPipParams() {
-    return buildPipParams(videoPlaying && pipEnabled);
-  }
-
-  /**
-   * 构造 PiP 参数。
-   *
-   * ⚠️【关键】AOSP ActivityTaskManagerService.enterPictureInPictureMode 里有这么一条：
-   * ```
-   * // If the app is using auto-enter, and it explicitly requests entering PiP while pausing,
-   * // return false immediately since auto-enter should take in place instead.
-   * if (fromClient && r.isState(PAUSING) && params.isAutoEnterEnabled()) {
-   *     Slog.w(TAG, "Skip client enterPictureInPictureMode request while pausing, ...");
-   *     return false;
-   * }
-   * ```
-   * 也就是说：**应用自己手动调 enterPictureInPictureMode 时，参数里必须关掉 autoEnter**，
-   * 否则系统在 activity 处于 PAUSING（按 Home 切后台的那一刻正是这个状态）时直接
-   * return false —— 表现为「enterPictureInPictureMode 返回 false 且系统侧无其他日志」。
-   * （真机 PJZ110 / Android 15 实测命中此分支。）
-   *
-   * 所以：常驻参数（setPictureInPictureParams）保留 autoEnter（供「启动别的 Activity 时
-   * 自动缩进小窗」用），而**手动进入的那一次必须传 autoEnter=false**。
-   */
-  public static PictureInPictureParams buildPipParams(boolean autoEnter) {
     try {
-      float ratio = Math.max(0.4185f, Math.min(2.39f, pipAspectW / pipAspectH));
       PictureInPictureParams.Builder b = new PictureInPictureParams.Builder()
-          .setAspectRatio(new Rational(Math.round(ratio * 10000), 10000));
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        b.setAutoEnterEnabled(autoEnter);
-      }
+          .setAspectRatio(new Rational(Math.round(pipAspectW), Math.round(pipAspectH)));
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         RemoteAction action = buildToggleAction();
         if (action != null) b.setActions(java.util.Collections.singletonList(action));

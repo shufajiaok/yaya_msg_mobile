@@ -11,14 +11,10 @@ import { usePalette, radii, spacing } from '../theme';
 import { typography } from '../theme/typography';
 import { Pill } from './Pill';
 import { Button } from './Button';
-import { GlassSurface } from '../components/GlassSurface';
-import { GlassSegmented } from '../components/GlassSegmented';
-import { usePlayerStore } from '../player/store/playerStore';
 
 interface Props {
   visible: boolean;
   onClose: () => void;
-  staticFeed?: boolean;
 }
 
 const AREAS: { key: DanmakuArea; label: string }[] = [
@@ -43,32 +39,27 @@ const OPACITIES: { v: number; label: string }[] = [
   { v: 1, label: '高' },
 ];
 
-export default function DanmakuSettingsSheet({ visible, onClose, staticFeed = false }: Props) {
+export default function DanmakuSettingsSheet({ visible, onClose }: Props) {
   const palette = usePalette();
   const { t } = useI18n();
   const { enabled, area, speed, fontSize, opacity, set, reset } = useDanmakuSettings();
 
-  /** 选项行 = 玻璃滑动选中块（与底栏同一套） */
-  const chipRow = (items: { key?: string; label: string; active: boolean; onPress: () => void }[]) => {
-    const activeIdx = Math.max(0, items.findIndex((i) => i.active));
-    return (
-      <GlassSegmented
-        options={items.map((item, i) => ({ key: String(i), label: item.label }))}
-        value={String(activeIdx)}
-        onChange={(k: string) => items[Number(k)]?.onPress()}
-        height={34}
-      />
-    );
-  };
+  const chipRow = (items: { key?: string; label: string; active: boolean; onPress: () => void }[]) => (
+    <View style={styles.chipRow}>
+      {items.map((item) => (
+        <Pill key={item.key || item.label} label={item.label} selected={item.active} onPress={item.onPress} />
+      ))}
+    </View>
+  );
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <TouchableOpacity style={styles.mask} activeOpacity={1} onPress={onClose}>
-        <GlassSurface radius={20} role="card"
+        <View
           style={[
             styles.sheet,
             {
-              backgroundColor: 'transparent',
+              backgroundColor: palette.surface,
               borderTopLeftRadius: radii.sheet,
               borderTopRightRadius: radii.sheet,
             },
@@ -89,19 +80,19 @@ export default function DanmakuSettingsSheet({ visible, onClose, staticFeed = fa
               <Text style={[typography.subhead, { color: palette.label, fontWeight: '600' }]}>{t('显示弹幕')}</Text>
               <Switch
                 value={enabled}
-                onValueChange={(v) => { set({ enabled: v }); if (staticFeed && v && !usePlayerStore.getState().danmakuOn) usePlayerStore.getState().toggleDanmaku(); }}
+                onValueChange={(v) => set({ enabled: v })}
                 thumbColor={enabled ? palette.tint : palette.onTint}
                 trackColor={{ false: palette.fill2, true: palette.tint }}
               />
             </View>
 
             {/* 显示区域 */}
-            {!staticFeed && <><Text style={[styles.section, { color: palette.labelTertiary }]}>{t('显示区域')}</Text>
+            <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('显示区域')}</Text>
             {chipRow(AREAS.map((a) => ({ key: a.key, label: t(a.label), active: area === a.key, onPress: () => set({ area: a.key }) })))}
 
             {/* 速度 */}
             <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('滚动速度')}</Text>
-            {chipRow(SPEEDS.map((s) => ({ key: s.label, label: t(s.label), active: speed === s.v, onPress: () => set({ speed: s.v }) })))}</>}
+            {chipRow(SPEEDS.map((s) => ({ key: s.label, label: t(s.label), active: speed === s.v, onPress: () => set({ speed: s.v }) })))}
 
             {/* 字号 */}
             <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('字号')}</Text>
@@ -112,10 +103,10 @@ export default function DanmakuSettingsSheet({ visible, onClose, staticFeed = fa
             {chipRow(OPACITIES.map((o) => ({ key: o.label, label: t(o.label), active: opacity === o.v, onPress: () => set({ opacity: o.v }) })))}
 
             <View style={styles.resetWrap}>
-              <Button title={t('恢复默认')} onPress={() => { reset(); if (staticFeed && !usePlayerStore.getState().danmakuOn) usePlayerStore.getState().toggleDanmaku(); }} variant="plain" size="sm" />
+              <Button title={t('恢复默认')} onPress={() => reset()} variant="plain" size="sm" />
             </View>
           </ScrollView>
-        </GlassSurface>
+        </View>
       </TouchableOpacity>
     </Modal>
   );

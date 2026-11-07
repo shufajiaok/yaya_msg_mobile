@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
@@ -10,7 +9,6 @@ import {
   BackHandler,
   DeviceEventEmitter,
   Image,
-  Keyboard,
   Modal,
   RefreshControl,
   ScrollView,
@@ -26,26 +24,22 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { RouteProp, useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { TabParamList } from '../navigation/types';
 import { useSettingsStore, useUiStore, useMemberStore } from '../store';
-import { setPipPlaying, setPipAspect, setPipAspectLive } from '../utils/pip';
+import { setPipPlaying, setPipAspect } from '../utils/pip';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
+import { FadeInView } from '../components/Motion';
 import ScreenHeader from '../components/ScreenHeader';
 import { VODItem, Member } from '../types';
 import { formatTimestamp, formatDuration } from '../utils/format';
 import { errorMessage, normalizeUrl, pickText, unwrapList } from '../utils/data';
-import { normalizeGiftList } from '../utils/giftList';
-import { thumbUrl } from '../utils/imageThumb';
-import { getResumePosition, saveResumePosition } from '../utils/resumePosition';
+import { getResumePosition } from '../utils/resumePosition';
 import { logWarn } from '../utils/runtimeLog';
 import pocketApi from '../api/pocket48';
 import { setLiveImmersiveMode } from '../native/LivePlayer';
 import PlayerScreen from '../player';
 import { usePlayerStore } from '../player/store/playerStore';
-import { clearGiftEffectQueue, isGiftEffectSupported, playGiftEffect } from '../services/giftEffect';
-import { LiveBarrageBoard } from '../components/LiveBarrageBoard';
-import { useLiveBarrage } from '../hooks/useLiveBarrage';
+import { DanmakuOverlay } from '../components/DanmakuOverlay';
 import DanmakuSettingsSheet from '../components/DanmakuSettingsSheet';
-import DanmakuListSheet, { type DanmakuListEntry } from '../components/DanmakuListSheet';
-import { enrichReplayDanmaku, parseDanmaku, replayBarrageToDanmaku, DanmakuItem } from '../utils/danmaku';
+import { parseDanmaku, DanmakuItem } from '../utils/danmaku';
 import { memberSearchText } from '../utils/members';
 import { EmptyState } from '../components/StateViews';
 import { LoginPrompt } from '../components/LoginPrompt';
@@ -53,22 +47,9 @@ import { Button } from '../components/Button';
 import { Skeleton } from '../components/Skeleton';
 import { usePalette, radii, radiiAlias } from '../theme';
 import { translate, useI18n } from '../i18n';
-import { GlassSurface } from '../components/GlassSurface';
-import { GlassSegmented, GlassSegmentedScroll } from '../components/GlassSegmented';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { UserProfileSheet, type UserProfileTarget } from '../components/UserProfileSheet';
 
 /** 回放列表加载占位：居中低调研度指示，无微光闪烁，避免「转圈 + 文字」混排打架 */
 type MediaRouteProp = RouteProp<TabParamList, 'Media'>;
-
-/**
- * 网格封面缩略图请求边长（px）。
- *
- * 双列网格每卡宽度 ≈ (360dp - 16) / 2 - 8 ≈ 164dp；480dpi 机型上约 492 物理像素，
- * 取 700 留出余量（服务端按原图比例 contain，`resizeMode="cover"` 再裁切，
- * 不会变形也不会糊）。对比原图（828×1104 / 783KB）体积降到约 1/17。
- */
-const GRID_COVER_THUMB = 700;
 
 const PLAY_URL_FIELDS = [
   'playStreamPath',
@@ -215,7 +196,7 @@ function CalendarSheet({
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <TouchableOpacity style={styles.calMask} activeOpacity={1} onPress={onClose}>
-        <GlassSurface radius={20} role="card" style={[styles.calSheet, { backgroundColor: 'transparent', borderColor: palette.innerStroke }]} onStartShouldSetResponder={() => true}>
+        <View style={[styles.calSheet, { backgroundColor: palette.surface, borderColor: palette.innerStroke }]} onStartShouldSetResponder={() => true}>
           <View style={styles.calHeader}>
             <TouchableOpacity onPress={() => setView(new Date(year, month - 1, 1))} hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }} activeOpacity={0.7}>
               <MaterialCommunityIcons name="chevron-left" size={24} color={palette.label} />
@@ -253,7 +234,7 @@ function CalendarSheet({
               <Text style={[styles.calTodayText, { color: palette.onTint }]}>{t('今天')}</Text>
             </TouchableOpacity>
           </View>
-        </GlassSurface>
+        </View>
       </TouchableOpacity>
     </Modal>
   );
@@ -377,6 +358,23 @@ function playerSource(url: string) {
       Referer: 'https://h5.48.cn/',
     },
   };
+}
+
+function normalizeGiftList(res: any): any[] {
+  const categories = unwrapList(res, ['content', 'content.list', 'data.content', 'data.list', 'list']);
+  const gifts: any[] = [];
+  for (const item of categories) {
+    const nested = unwrapList(item, ['giftList', 'gifts', 'list']);
+    if (nested.length) gifts.push(...nested);
+    else if (item?.giftId || item?.id) gifts.push(item);
+  }
+  const seen = new Set<string>();
+  return gifts.filter((gift) => {
+    const id = String(gift.giftId || gift.id || '');
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 function normalizeLiveRank(res: any): any[] {
@@ -537,16 +535,12 @@ function MediaGridSkeleton() {
   );
 }
 
-/** 播放器公告是否收起（'1'=收起）：跨直播间/跨启动记忆（用户要求） */
-const PLAYER_ANNOUNCE_COLLAPSED_KEY = 'yaya_player_announce_collapsed_v1';
-
 export default function MediaScreen() {
   const route = useRoute<MediaRouteProp>();
   const navigation = useNavigation<any>();
   const palette = usePalette();
   const { t } = useI18n();
-  const setDockHidden = useUiStore((state) => state.setTabBarHidden);
-  const setTabBarHidden = useCallback((hidden: boolean) => setDockHidden(hidden, 'Media'), [setDockHidden]);
+  const setTabBarHidden = useUiStore((state) => state.setTabBarHidden);
   const showToast = useUiStore((state) => state.showToast);
   const members = useMemberStore((state) => state.members);
   const [tab, setTab] = useState<'live' | 'vod'>(route.params?.mode ?? 'live');
@@ -570,61 +564,17 @@ export default function MediaScreen() {
   // 用户是否手动切过方向：手动后 onLoad 不再自动覆盖（尊重用户选择）
   const manualOrientRef = useRef(false);
   const [playing, setPlaying] = useState<{ url: string; urls: string[]; title: string; cover?: string; item: any; isLive: boolean; needsVlc: boolean; resolving?: boolean; position?: number } | null>(null);
-  const playRequestRef = useRef(0);
-  const hidePlayerEffects = usePlayerStore((s) => s.hideEffects || s.cleanScreen);
-  const cleanScreen = usePlayerStore((s) => s.cleanScreen);
-  /**
-   * 直播弹幕（云信聊天室）—— 全页唯一一条连接：
-   *   - 接收：推给 DanmakuOverlay 的 liveItems，直接飘在画面上
-   *   - 发送：播放器底部的弹幕输入条（同一 source，不重复建连）
-   * 录播不受影响（走 danmaku + currentTime 时间轴）。
-   */
-  const liveBarrageId = playing?.isLive ? String(playing.item?.liveId || playing.item?.id || '') : '';
-  const liveBarrage = useLiveBarrage({ liveId: liveBarrageId, enabled: !!liveBarrageId, module: 'live' });
-  const liveBarrageReadyRef = useRef(false);
-  liveBarrageReadyRef.current = liveBarrage.ready;
-  const danmakuLiveIdRef = useRef('');
-  /**
-   * 全屏礼物特效（仅直播页）：PRESENT_FULLSCREEN(_TWO) 消息带 zipPath 时播 PAG 动画。
-   * 别人送的与自己送的都走这条（服务端广播会回投给发送者）；按 item.id 去重防重播。
-   */
-  const playedEffectsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!isGiftEffectSupported()) return;
-    const items = liveBarrage.items;
-    if (!items.length) return;
-    for (const item of items) {
-      const zip = item.gift?.zipPath;
-      if (!zip || playedEffectsRef.current.has(item.id)) continue;
-      playedEffectsRef.current.add(item.id);
-      if (!hidePlayerEffects) playGiftEffect({ zipPath: zip, zipMd5: item.gift?.zipMd5, giftName: item.gift?.giftName });
-    }
-    if (playedEffectsRef.current.size > 200) playedEffectsRef.current.clear();
-  }, [liveBarrage.items, hidePlayerEffects]);
-  // 离开直播间清队列，避免下一场开播播上一场的特效
-  useEffect(() => () => { clearGiftEffectQueue(); }, []);
-
-  // 修复「直播弹幕不飘屏」：showDanmaku 此前只由 HTTP 轮询打开，
-  // 原生云信通道有弹幕也不会飘 —— 云信一到货就自动打开飘屏。
-  useEffect(() => {
-    if (liveBarrage.items.length) setShowDanmaku(true);
-  }, [liveBarrage.items.length]);
-  // 直播输入条已并入播放器底坞（随控制条自动隐藏），不再需要单独的收起状态
   // 续播位置：打开回放时读取上次进度，播放中由 WebView 回传进度落盘
   const [webResumeTime, setWebResumeTime] = useState(0);
   const [giftVisible, setGiftVisible] = useState(false);
   const [gifts, setGifts] = useState<any[]>([]);
   const [selectedGift, setSelectedGift] = useState<any | null>(null);
   const [giftNum, setGiftNum] = useState('1');
-  /** 送礼在途：无此锁时连点「送出」会并发发多次请求 —— 真实重复扣鸡腿 */
-  const [giftSending, setGiftSending] = useState(false);
   const [giftStatus, setGiftStatus] = useState('');
   const [balance, setBalance] = useState('');
   const [hasMore, setHasMore] = useState(true);
   const [rankVisible, setRankVisible] = useState(false);
   const [rankRows, setRankRows] = useState<any[]>([]);
-  /** 贡献榜点某一行 → 用户资料卡（与弹幕发送者同一套） */
-  const [rankProfile, setRankProfile] = useState<UserProfileTarget | null>(null);
 
   // 续播 key 用稳定 id（liveId）而非播放 URL：URL 换线路/带签名/拼接参数会变，
   // 用 URL 做 key 会导致同一视频换线路后续播进度丢失
@@ -646,16 +596,6 @@ export default function MediaScreen() {
     return () => { alive = false; };
   }, [resumeKey]);
 
-  useEffect(() => {
-    if (!playing || playing.isLive) return;
-    const save = (force = false) => saveResumePosition(resumeKey, usePlayerStore.getState().position, force);
-    const timer = setInterval(() => { void save(); }, 10000);
-    return () => {
-      clearInterval(timer);
-      void save(true);
-    };
-  }, [playing, resumeKey]);
-
   // 拉取/轮询弹幕并解析；失败静默，不拖垮播放
   useEffect(() => {
     if (!playing) {
@@ -665,20 +605,14 @@ export default function MediaScreen() {
     }
     const lid = String(playing.item?.liveId || playing.item?.id || '');
     if (!lid) { setDanmaku([]); setShowDanmaku(false); return; }
-    if (danmakuLiveIdRef.current !== lid) {
-      danmakuLiveIdRef.current = lid;
-      setDanmaku([]);
-      setShowDanmaku(false);
-    }
     let alive = true;
     const seenMsg = new Set<string>();
     const collect = (infos: any[]): DanmakuItem[] => {
       const flat: DanmakuItem[] = [];
       for (const b of infos) {
         const parsed = parseDanmaku(b.content);
-        const sender = { ...(b.userId ? { userId: b.userId } : {}), ...(b.avatar ? { avatar: b.avatar } : {}), ...(b.level ? { level: b.level } : {}) };
-        if (parsed.length) flat.push(...parsed.map((item) => ({ ...item, ...sender })));
-        else flat.push({ time: Number(b.time) || 0, text: String(b.content || ''), ...(b.user ? { nick: b.user } : {}), ...sender });
+        if (parsed.length) flat.push(...parsed);
+        else flat.push({ time: Number(b.time) || 0, text: String(b.content || ''), ...(b.user ? { nick: b.user } : {}) });
       }
       let items = flat.filter((d) => d && d.text) as DanmakuItem[];
       if (!items.length) return items;
@@ -708,97 +642,63 @@ export default function MediaScreen() {
     };
     if (playing.isLive) {
       // 直播：轮询 barrage/list 累积实时弹幕
-      // 功耗：后台/页面失焦时暂停（画面不可见时拉了也白拉），回前台立即补一次
-      let pollId: ReturnType<typeof setInterval> | null = null;
-      let polling = false;
-      const startPoll = () => { if (!pollId) pollId = setInterval(poll, 5000); };
-      const stopPoll = () => { if (pollId) { clearInterval(pollId); pollId = null; } };
       const poll = async () => {
-        if (polling || !alive || AppState.currentState !== 'active' || !navigation.isFocused() || liveBarrageReadyRef.current) return;
-        polling = true;
         try {
           const infos = await pocketApi.getLiveBarrage(lid);
-          if (!alive || AppState.currentState !== 'active' || !navigation.isFocused() || liveBarrageReadyRef.current) return;
-          const fresh = infos.filter((it, index) => {
-            const key = it.messageId || `${it.time}:${it.user}:${it.content}:${it.time ? '' : index}`;
-            if (seenMsg.has(key)) return false;
-            seenMsg.add(key);
-            if (seenMsg.size > 3000) { seenMsg.clear(); seenMsg.add(key); }
-            return true;
-          });
-          const items = collect(fresh);
+          if (!alive) return;
+          const items = collect(infos);
           if (!items.length) return;
           setDanmaku((prev) => {
-            const merged = [...prev, ...items];
+            const merged = [...prev];
+            for (const it of items) {
+              const key = it.nick ? `${it.nick}:${it.text}` : it.text;
+              if (!seenMsg.has(key)) {
+                seenMsg.add(key);
+                // 长播防泄漏：去重集超出窗口后重建（最多短暂放行少量重复，避免无限增长直至 OOM）
+                if (seenMsg.size > 3000) {
+                  seenMsg.clear();
+                  seenMsg.add(key);
+                }
+                merged.push(it);
+              }
+            }
             merged.sort((a, b) => a.time - b.time);
             return merged.slice(-800);
           });
           setShowDanmaku(true);
-        } catch {} finally { polling = false; }
+        } catch {}
       };
-      // 初始与前后台切换：前台+页面聚焦才轮询
-      if (AppState.currentState === 'active' && navigation.isFocused()) { poll(); startPoll(); }
-      const sub = AppState.addEventListener('change', (next) => {
-        if (next === 'active' && alive && navigation.isFocused()) { poll(); startPoll(); }
-        else stopPoll();
-      });
-      const unsubFocus = navigation.addListener('focus', () => {
-        if (alive && AppState.currentState === 'active') { poll(); startPoll(); }
-      });
-      const unsubBlur = navigation.addListener('blur', stopPoll);
-      return () => { alive = false; sub.remove(); unsubFocus(); unsubBlur(); stopPoll(); };
+      poll();
+      const id = setInterval(poll, 5000);
+      return () => { alive = false; clearInterval(id); };
     }
+    // 回放：从 LRC 文件拉取（参考 pocket48_lite：录播弹幕在 getLiveOne 的
     // content.msgFilePath 指向的 LRC 文件，而非 barrage/list；格式 [hh:mm:ss.fff]昵称\t内容，
     // 已由 parseDanmaku 解析为「秒」对上 playbackTime）
-    const replayDetails = pocketApi.getLiveBarrage(lid);
     pocketApi.getLiveLrc(lid)
       .then((text) => {
         if (!alive) return;
         if (!text) {
-          void replayDetails.then((rows) => {
-            if (!alive) return;
-            const items = replayBarrageToDanmaku(rows);
-            setDanmaku(items);
-            setShowDanmaku(items.length > 0);
-            showToast(items.length ? t('弹幕 {count} 条', { count: items.length }) : t('该视频暂无弹幕'));
-          });
+          setDanmaku([]);
+          setShowDanmaku(false);
+          showToast(t('该视频暂无弹幕'));
           return;
         }
         const items = parseDanmaku(text);
         setDanmaku(items);
         setShowDanmaku(items.length > 0);
         showToast(items.length > 0 ? t('弹幕 {count} 条', { count: items.length }) : t('该视频暂无弹幕'));
-        void replayDetails.then((rows) => { if (alive && rows.length) setDanmaku(enrichReplayDanmaku(items, rows)); });
       })
       .catch(() => { if (alive) setDanmaku([]); });
     return () => { alive = false; };
-  }, [playing?.url, playing?.isLive, liveBarrageId]);
+  }, [playing?.url, playing?.isLive]);
 
   // R1: 弹幕时间轴统一由 playerStore.position 驱动（统一播放器接管后原生 onProgress 实时上报，
   //     无需本地插值；旧 useWebPlayer 插值路径已随内核切换删除）
   const [rankStatus, setRankStatus] = useState('');
   const [announcement, setAnnouncement] = useState('');
   const [announceVisible, setAnnounceVisible] = useState(false);
-  /** 进入直播间默认展开公告（用户要求）。关闭后停留本次会话，不再自动弹回 */
-  /**
-   * 公告展开态：**记住收起状态**（用户要求）。挂载时从 AsyncStorage 读一次；
-   * 收起/展开即时写回；新开播不再强制展开（否则记住的收起被打回）。
-   */
-  const [announceExpanded, setAnnounceExpanded] = useState(true);
-  const announcePrefLoadedRef = useRef(false);
-  useEffect(() => {
-    if (announcePrefLoadedRef.current) return;
-    announcePrefLoadedRef.current = true;
-    AsyncStorage.getItem(PLAYER_ANNOUNCE_COLLAPSED_KEY)
-      .then((v: string | null) => setAnnounceExpanded(v !== '1'))
-      .catch(() => {});
-  }, []);
-  const setAnnounceExpandedPersisted = (v: boolean) => {
-    setAnnounceExpanded(v);
-    AsyncStorage.setItem(PLAYER_ANNOUNCE_COLLAPSED_KEY, v ? '0' : '1').catch(() => {});
-  };
-  /** 本次进入是否已自动展开过（避免用户手动收起后被自动展开逻辑again弹开） */
-  const announceAutoShownRef = useRef(false);
+  const [announceExpanded, setAnnounceExpanded] = useState(false);
   const loadingRef = useRef(false);
   const playingRef = useRef<typeof playing>(null);
   // v2.6: group filter + search
@@ -810,55 +710,32 @@ export default function MediaScreen() {
   // 关注成员 id 集合：「关注」tag 实时筛选（60s 同步一次）
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
   const [playbackTime, setPlaybackTime] = useState(0);
+  // R1: 弹幕时钟 = 统一播放器上报的真实进度（live 也在播中持续推进，对齐 poll 弹幕时间轴）
   const danmakuClock = usePlayerStore((s) => s.position);
+  const playerDanmakuOn = usePlayerStore((s) => s.danmakuOn);
   // 播放器控制（哔哩哔哩风格自定义控制条）
   const videoRef = useRef<any>(null);
   const [duration, setDuration] = useState(0);
   const [paused, setPaused] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
 
-  // ⚠️ 此处**不再写 PiP 标志**（2026-10-03 修复）：统一播放器重写后媒体状态以 playerStore.state 为准，
-  // 本页的 paused 是死状态（全页只有一处 setPaused(false)），用它判定会出现「已暂停、按 Home 仍进悬浮窗」，
-  // 且该写入会覆盖 FullscreenManager 的正确结果（PiP 标志原本有 3 个写入点互相打架）。
-  // PiP 唯一权威源 = FullscreenManager（依据 playerStore.state==='playing' && !fullscreen）。
+  // 画中画（悬浮窗）状态同步：正在播放且未暂停时置位，切后台自动进悬浮窗
+  useEffect(() => {
+    // 应用内小窗已接管 PiP 标志时不覆盖（防小窗切后台不进悬浮窗）
+    if (useMiniPlayerStore.getState().visible) return;
+    setPipPlaying(!!playing && !paused && !useWebPlayer);
+  }, [playing, paused, useWebPlayer]);
   // 搜索：选中成员后，搜索框转为「该成员的标题/日期」过滤
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
   const [dateFilter, setDateFilter] = useState<Date | null>(null);
   const [showCalendar, setShowCalendar] = useState(false);
   const [showDanmakuSettings, setShowDanmakuSettings] = useState(false);
-  
-  const [showDanmakuList, setShowDanmakuList] = useState(false);
-  /** 弹幕列表点发送者 → 用户资料卡（成员/粉丝同一个界面） */
-  const [danmakuProfile, setDanmakuProfile] = useState<UserProfileTarget | null>(null);
-  const danmakuListEntries = useMemo<DanmakuListEntry[]>(() => {
-    if (playing?.isLive) {
-      return liveBarrage.items.map((item) => ({
-        id: item.id,
-        time: 0,
-        nick: item.nick || '',
-        text: item.text || '',
-        kind: item.kind,
-        // 直播弹幕带发送者口袋 userId → 弹幕列表点昵称可直接查资料
-        userId: item.userId || undefined,
-        avatar: item.avatar || undefined,
-      }));
-    }
-    // 录播：danmaku 由 parseDanmaku 保证按时间升序
-    return danmaku.map((item, index) => ({
-      id: `dm-${index}-${item.time}`,
-      time: item.time,
-      nick: item.nick || '',
-      text: item.text,
-      userId: item.userId,
-      avatar: item.avatar,
-    }));
-  }, [playing?.isLive, liveBarrage.items, danmaku]);
   const [moreVisible, setMoreVisible] = useState(false);
   // 播放器控制条（B站式沉浸：点击视频区显隐，播放中自动隐藏）
   const [controlsVisible, setControlsVisible] = useState(true);
   const controlsOpacity = useRef(new Animated.Value(1)).current;
-  // 公告始终位于播放器顶栏下方；播放器控制层自行显隐，不再用页面的旧动画状态推算位置。
-  const insets = useSafeAreaInsets();
+  // 公告面板 top 偏移：顶栏可见时位于顶栏之下（不重叠），顶/底栏自动隐藏后平滑上滑贴近顶部
+  const announceTopAnim = useRef(new Animated.Value(96)).current;
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pausedRef = useRef(paused);
   const seekLockRef = useRef(0);
@@ -866,11 +743,15 @@ export default function MediaScreen() {
   const showControls = useCallback((autoHide = true) => {
     setControlsVisible(true);
     Animated.timing(controlsOpacity, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+    // 顶栏可见 → 公告面板停在顶栏之下（top≈96）
+    Animated.timing(announceTopAnim, { toValue: 96, duration: 180, useNativeDriver: true }).start();
     if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
     if (autoHide && !pausedRef.current) {
       hideControlsTimer.current = setTimeout(() => {
         setControlsVisible(false);
         Animated.timing(controlsOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start();
+        // 顶/底栏自动隐藏 → 公告面板上滑贴近顶部（top≈12）
+        Animated.timing(announceTopAnim, { toValue: 12, duration: 180, useNativeDriver: true }).start();
       }, 3000);
     }
   }, [controlsOpacity]);
@@ -878,6 +759,7 @@ export default function MediaScreen() {
     if (controlsVisible) {
       setControlsVisible(false);
       Animated.timing(controlsOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start();
+      Animated.timing(announceTopAnim, { toValue: 12, duration: 180, useNativeDriver: true }).start();
     } else {
       showControls();
     }
@@ -981,7 +863,6 @@ export default function MediaScreen() {
     const lid = route.params?.playLiveId;
     const directUrl = route.params?.playUrl;
     if (!lid && !directUrl) return;
-    const request = ++playRequestRef.current;
     const isLive = route.params?.mode !== 'vod';
     (async () => {
       try {
@@ -1020,37 +901,11 @@ export default function MediaScreen() {
         });
         // 解析：详情接口 → 公开详情 → 直播/录播列表按 liveId 查找（多层兜底）
         let detail: any = await pocketApi.getLiveOne(lid).catch(() => null);
-        if (request !== playRequestRef.current) return;
         if (!detail) detail = await pocketApi.getOpenLiveOne(lid).catch(() => null);
-        if (request !== playRequestRef.current) return;
         const item = (detail?.content || detail?.data || detail || {}) as any;
-        // ⚠️【公告修复】这条链路（首页/房间卡片直进播放器）以前只解析播放地址，
-        // 从不读 announcement → 只有「在列表里点」才看得到公告。
-        // 这里补一次设置（与 startPlay 同判定，含 getOpenLiveOne 兜底）。
-        const annText = String(item?.announcement || '').trim();
-        if (annText) {
-          setAnnouncement(annText);
-          setAnnounceVisible(true);
-          setAnnounceExpandedPersisted(true);
-          announceAutoShownRef.current = true;
-        } else {
-          // getLiveOne 没拿到 → 用公开详情兜底再试一次（上面 detail 可能是 getLiveOne 的结果）
-          void pocketApi.getOpenLiveOne(lid).then((detail2: any) => {
-            if (request !== playRequestRef.current) return;
-            const d2 = (detail2?.content || detail2?.data || detail2 || {}) as any;
-            const annText2 = String(d2?.announcement || '').trim();
-            if (annText2) {
-              setAnnouncement(annText2);
-              setAnnounceVisible(true);
-              setAnnounceExpandedPersisted(true);
-              announceAutoShownRef.current = true;
-            }
-          }).catch(() => {});
-        }
         let urls = pickPlayableUrls(item, isLive);
         if (!urls.length) {
           const found = await findLiveItemInLists(lid, isLive).catch(() => null);
-          if (request !== playRequestRef.current) return;
           if (found) urls = pickPlayableUrls(found, isLive);
         }
         const url = urls[0] || '';
@@ -1074,29 +929,26 @@ export default function MediaScreen() {
         // Switch tab to match mode
         if (!isLive && tab !== 'vod') switchTab('vod');
       } catch (e) {
-        if (request !== playRequestRef.current) return;
         setPlayerError(errorMessage(e));
         setPlaying((p) => (p ? { ...p, resolving: false } : p));
       }
     })();
   }, [route.params?.playLiveId, route.params?.playUrl, route.params?.playNonce]);
 
-  useFocusEffect(useCallback(() => {
+  useEffect(() => {
     setTabBarHidden(!!playing);
+    return () => setTabBarHidden(false);
+  }, [playing, setTabBarHidden]);
+
+  // 从房间导航进来时，房间页失焦会把 tabBarHidden 重置为 false；
+  // 这里在获得焦点时兜底一次，确保播放状态下底部导航始终隐藏。
+  useFocusEffect(useCallback(() => {
+    if (playing) setTabBarHidden(true);
   }, [playing, setTabBarHidden]));
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      // ⚠️ 失焦的 tab 页仍持有 BackHandler 订阅（bottom-tabs 不卸载页面），
-      // 不自行判断焦点会抢走当前页的返回键、关掉后台页面状态（2026-10-03 修复）
-      if (!navigation.isFocused()) return false;
       if (!playing) return false;
-      // 返回键的第一预期行为是收键盘（弹幕输入中）
-      if (Keyboard.isVisible()) { Keyboard.dismiss(); return true; }
-      playRequestRef.current += 1;
-      // 中断解析中的请求后必须显式复位 loading：startPlay 的 finally 只在请求号未变时
-      // setLoading(false)，取消后请求号已递增 → 永不复位 → 列表一直卡在骨架屏、上拉也失效。
-      setLoading(false);
       setIsFullscreen(false);
       setIsLandscape(false);
       setLiveImmersiveMode(false);
@@ -1114,6 +966,7 @@ export default function MediaScreen() {
     setError('');
     try {
       let finalCursor = cursor;
+      // 官方坑（桌面基线 fetchLiveList / 48tools 同款修复）：next=0 时带 userId 查询拿不到数据，
       // 需先发一次不带 userId 的请求取列表最新 liveId 作为 next，再按成员直查。
       if (userId !== undefined && userId !== null && userId !== '' && Number(cursor) === 0) {
         const probe = await pocketApi.getLiveList({ next: 0, record: mode === 'vod', debug: true }).catch(() => null);
@@ -1165,6 +1018,7 @@ export default function MediaScreen() {
   // 选中成员时切到「回放」并重置列表，立即触发首屏加载。
   // 用 setTimeout(0) 让上面的 setState 先提交，避免读到切换前的旧 tab；
   // 覆盖「已在 vod tab 时初始加载 effect 不触发」以及「切 tab 时 loadingRef 把自动翻页挡掉」两种情况。
+  // 成员检索改为服务端 userId 直查（对齐桌面基线/48tools）：getLiveList 带 userId 即返回该成员
   // 完整直播/录播，替代「全量加载全局列表再前端筛选」——旧实现只能筛到已加载页面内的数据，
   // 成员较早的录播永远搜不到。
   useEffect(() => {
@@ -1222,6 +1076,7 @@ export default function MediaScreen() {
   const scanDoneRef = useRef(false);
   // 关注成员录播：并发按 userId 服务端直查（用户指定实现）——
   // 不再"扫描全局流 48h 再前端筛选"（慢且命中率低），直接对每个关注成员的 userId 调
+  // getLiveList({ userId }) 拿 TA 专属录播，合并去重。桌面基线/48tools 同款能力。
   const loadFollowVodFast = useCallback(async () => {
     if (followLoadingRef.current || groupId !== -1 || tab !== 'vod') return;
     if (!useSettingsStore.getState().settings.p48Token) { scanDoneRef.current = true; return; }
@@ -1293,15 +1148,11 @@ export default function MediaScreen() {
   // 关注成员 id 同步（60s 一次；state 声明在组件上部供「关注」tag 筛选使用）
   useEffect(() => {
     let alive = true;
-    const load = () => {
-      // 退后台/失焦时不发请求（2026-10-03 修复：此前锁屏仍每 60s 拉一次）
-      if (AppState.currentState !== 'active' || !navigation.isFocused()) return;
-      pocketApi.getFollowedIds().then((res) => {
-        if (!alive) return;
-        const ids = unwrapList(res, ['content.data', 'content', 'data', 'list']).map(String);
-        setFollowedIds(new Set(ids));
-      }).catch(() => {});
-    };
+    const load = () => pocketApi.getFollowedIds().then((res) => {
+      if (!alive) return;
+      const ids = unwrapList(res, ['content.data', 'content', 'data', 'list']).map(String);
+      setFollowedIds(new Set(ids));
+    }).catch(() => {});
     load();
     const id = setInterval(load, 60000);
     return () => { alive = false; clearInterval(id); };
@@ -1310,11 +1161,7 @@ export default function MediaScreen() {
   // 直播列表实时自动刷新：浏览直播 tab 且未播放时每 60s 静默重拉（关注成员开播即时可见）
   useEffect(() => {
     if (tab !== 'live' || playing) return;
-    const id = setInterval(() => {
-      // 同上：后台/失焦不轮询
-      if (AppState.currentState !== 'active' || !navigation.isFocused()) return;
-      doFetch('live', 0, false, true);
-    }, 60000);
+    const id = setInterval(() => { doFetch('live', 0, false, true); }, 60000);
     return () => clearInterval(id);
   }, [tab, playing, doFetch]);
 
@@ -1323,6 +1170,7 @@ export default function MediaScreen() {
     ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
   }, []);
 
+  // 切到后台时复位横屏锁（防退到桌面/其它 App 仍锁横屏）；
   // 回到前台时按当前播放状态重新锁定（后台复位后上方 effect 不会再触发，需在此补锁）
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -1339,9 +1187,6 @@ export default function MediaScreen() {
   }, [playing, isFullscreen, isLandscape]);
 
   const closePlayer = () => {
-    playRequestRef.current += 1;
-    // 同返回键：取消在途解析后显式复位 loading，否则列表永远停在骨架屏
-    setLoading(false);
     setIsFullscreen(false);
     setIsLandscape(false);
     setLiveImmersiveMode(false);
@@ -1349,9 +1194,7 @@ export default function MediaScreen() {
     setPlaying(null);
     setAnnouncement('');
     setAnnounceVisible(false);
-    // 复位为「默认展开」：下次进入直播间仍是默认打开公告
-    setAnnounceExpandedPersisted(true);
-    announceAutoShownRef.current = false;
+    setAnnounceExpanded(false);
     // fromRoom 直达（房间点开）：关闭播放器 = 返回房间
     if (route.params?.fromRoom) navigation.goBack();
   };
@@ -1359,8 +1202,6 @@ export default function MediaScreen() {
   // 应用内小窗：当前播放交棒给悬浮小窗（小窗独立 Video/LiveExoView 实例续播），关掉大播放器。
   // RTMP/FLV 直播也放行：MiniPlayer 对 rtmp/.flv + isLive 渲染原生 LiveExoView（与大播放器同内核），
   // 录播/HLS 走 RNV Video —— 不再全屏拦截（此前拦截导致成员直播「小窗点了没用」）。
-  /** 大窗视频真实宽高（PlayerCore onVideoSize 上报）：交棒小窗时带上，小窗立即按比例适配 */
-  const videoSizeRef = useRef<{ w: number; h: number } | null>(null);
   const handleMiniPlayer = useCallback(() => {
     const cur = playing;
     if (!cur?.url) return;
@@ -1369,15 +1210,10 @@ export default function MediaScreen() {
       title: cur.title,
       cover: cur.cover,
       isLive: !!cur.isLive,
-      // ⚠️ 必须取统一播放器 store 的真实进度：本地 playbackTime 状态除初始 0 外全程未更新，
-      // 用它交棒会导致「大窗看一半 → 小窗从 0 开始」（2026-10-03 修复）
-      position: usePlayerStore.getState().position,
-      aspectW: videoSizeRef.current?.w,
-      aspectH: videoSizeRef.current?.h,
+      position: playbackTime,
       backTo: {
         mode: cur.isLive ? 'live' : 'vod',
         playUrl: cur.url,
-        playLiveId: String(cur.item?.liveId || cur.item?.id || '') || undefined,
         playTitle: cur.title,
         playCover: cur.cover,
       },
@@ -1402,11 +1238,11 @@ export default function MediaScreen() {
       const annText = d?.content?.announcement || d?.announcement || d?.data?.announcement || '';
       setAnnouncement(annText || t('暂无公告'));
       setAnnounceVisible(true);
-      setAnnounceExpandedPersisted(true);
+      setAnnounceExpanded(true);
     } catch {
       setAnnouncement(t('公告加载失败'));
       setAnnounceVisible(true);
-      setAnnounceExpandedPersisted(true);
+      setAnnounceExpanded(true);
     }
   };
 
@@ -1442,8 +1278,7 @@ export default function MediaScreen() {
     doFetch(tab, nextCursorRef.current, true, silent, mid || undefined);
   };
 
-  const startPlay = async (item: VODItem, forceLive = tab === 'live') => {
-    const request = ++playRequestRef.current;
+  const startPlay = async (item: VODItem) => {
     setError('');
     setPlayerError('');
     setUseWebPlayer(false);
@@ -1464,12 +1299,12 @@ export default function MediaScreen() {
       title: item.title || item.liveRoomTitle || t('直播 / 回放'),
       cover: item.liveCover || item.coverPath,
       item,
-      isLive: forceLive,
+      isLive: tab === 'live',
       needsVlc: false,
       resolving: true,
     });
     try {
-      let urls = pickPlayableUrls(item, forceLive);
+      let urls = pickPlayableUrls(item, tab === 'live');
       let detail: any = item;
       const initialUrl = urls[0] || '';
       if (initialUrl) {
@@ -1479,41 +1314,30 @@ export default function MediaScreen() {
           title: item.title || item.liveRoomTitle || t('直播 / 回放'),
           cover: item.liveCover || item.coverPath,
           item,
-          isLive: forceLive,
+          isLive: tab === 'live',
           needsVlc: streamNeedsProxy(initialUrl),
         });
       }
       if (item.liveId) {
         detail = await pocketApi.getLiveOne(item.liveId).catch(() => null);
-        if (request !== playRequestRef.current) return;
-        urls = [...pickPlayableUrls(detail, forceLive), ...urls];
+        urls = [...pickPlayableUrls(detail, tab === 'live'), ...urls];
         const d = (detail || {}) as any;
         const annText = d?.content?.announcement || d?.announcement || d?.data?.announcement || '';
         if (annText) {
           setAnnouncement(annText);
           setAnnounceVisible(true);
-          // 进入直播间默认展开公告（用户要求）；只有用户手动收起后才保持收起
-          setAnnounceExpandedPersisted(true);
-          announceAutoShownRef.current = true;
         }
         else {
           const detail2 = await pocketApi.getOpenLiveOne(item.liveId).catch(() => null);
-          if (request !== playRequestRef.current) return;
           if (detail2) {
             const d2 = detail2 as any;
             const annText2 = d2?.content?.announcement || d2?.announcement || d2?.data?.announcement || '';
-            if (annText2) {
-              setAnnouncement(annText2);
-              setAnnounceVisible(true);
-              setAnnounceExpandedPersisted(true);
-              announceAutoShownRef.current = true;
-            }
+            if (annText2) { setAnnouncement(annText2); setAnnounceVisible(true); setAnnounceExpanded(false); }
           }
         }
         if (!urls.filter(Boolean).length) {
           detail = await pocketApi.getOpenLiveOne(item.liveId).catch(() => null);
-          if (request !== playRequestRef.current) return;
-          urls = [...pickPlayableUrls(detail, forceLive), ...urls];
+          urls = [...pickPlayableUrls(detail, tab === 'live'), ...urls];
         }
       }
       urls = Array.from(new Set(urls.filter(Boolean)));
@@ -1530,39 +1354,16 @@ export default function MediaScreen() {
         title: item.title || item.liveRoomTitle || t('直播 / 回放'),
         cover: item.liveCover || item.coverPath,
         item: { ...item, ...(detail?.content || detail?.data || detail) },
-        isLive: forceLive,
+        isLive: tab === 'live',
         needsVlc: streamNeedsProxy(baseUrl),
         resolving: false,
       });
     } catch (err) {
-      if (request !== playRequestRef.current) return;
       setError(errorMessage(err));
       setPlayerError(errorMessage(err));
       setPlaying((p) => (p ? { ...p, resolving: false } : p));
     } finally {
-      if (request === playRequestRef.current) setLoading(false);
-    }
-  };
-
-  const refreshLiveStream = async () => {
-    const current = playingRef.current;
-    if (!current?.isLive) return;
-    const id = String(current.item?.liveId || current.item?.id || '');
-    if (!id) { usePlayerStore.getState().requestKernelRebuild(); return; }
-    const request = ++playRequestRef.current;
-    let detail = await pocketApi.getLiveOne(id).catch(() => null);
-    if (request !== playRequestRef.current) return;
-    let urls = pickPlayableUrls(detail, true);
-    if (!urls.length) {
-      detail = await pocketApi.getOpenLiveOne(id).catch(() => null);
-      if (request !== playRequestRef.current) return;
-      urls = pickPlayableUrls(detail, true);
-    }
-    if (playingRef.current !== current) return;
-    if (urls[0] && urls[0] !== current.url) {
-      setPlaying({ ...current, url: urls[0], urls, needsVlc: streamNeedsProxy(urls[0]), item: { ...current.item, ...(detail?.content || detail?.data || detail) } });
-    } else {
-      usePlayerStore.getState().requestKernelRebuild();
+      setLoading(false);
     }
   };
 
@@ -1576,23 +1377,11 @@ export default function MediaScreen() {
     setGiftStatus('');
     setSelectedGift(null);
     try {
-      // 礼物列表：直播送礼走直播协议（businessId=liveId, giftType=1）；
-      // 只有它返回空时才用成员维度兜底（否则面板空着没法送），并打日志便于定位。
-      const anchorUserId = acceptUserId(source.item);
-      const [moneyRes] = await Promise.all([
+      const [giftRes, moneyRes] = await Promise.all([
+        pocketApi.getGiftList(String(source.item.liveId)),
         pocketApi.getUserMoney().catch(() => null),
       ]);
-      let next: any[] = [];
-      const liveGiftRes = await pocketApi.getGiftList(String(source.item.liveId)).catch(() => null);
-      next = normalizeGiftList(liveGiftRes);
-      if (!next.length) {
-        console.warn('[live-gift] 直播礼物列表为空 liveId=', String(source.item.liveId),
-          'raw=', JSON.stringify(liveGiftRes)?.slice(0, 300));
-        if (anchorUserId) {
-          const byMember = await pocketApi.getGiftListByMember(String(anchorUserId)).catch(() => null);
-          next = normalizeGiftList(byMember);
-        }
-      }
+      const next = normalizeGiftList(giftRes);
       setGifts(next);
       setBalance(moneyRes?.content?.moneyTotal !== undefined ? String(moneyRes.content.moneyTotal) : '');
       setGiftStatus(next.length ? t('已加载 {count} 个礼物', { count: next.length }) : t('礼物列表为空'));
@@ -1603,8 +1392,6 @@ export default function MediaScreen() {
   };
 
   const sendGift = async () => {
-    // 在途锁：连点「送出」会并发发多次请求（每次真实扣鸡腿），必须先拦住
-    if (giftSending) return;
     if (!playing || !selectedGift) {
       setGiftStatus(t('请先选择礼物'));
       return;
@@ -1615,29 +1402,19 @@ export default function MediaScreen() {
       setGiftStatus(t('无法获取主播 ID，不能送礼'));
       return;
     }
-    setGiftSending(true);
     setGiftStatus(t('正在发送...'));
     try {
-      // 直播详情里的 crm（DES 加密的聊天室 id）——服务端靠它把礼物广播进直播间，缺失则成员端无感知
-      let crm = '';
-      try {
-        const one = await pocketApi.getLiveOne(String(playing.item.liveId));
-        crm = String((one as any)?.content?.crm || '');
-      } catch { /* 拿不到 crm 时按官方空 crm 路径发送 */ }
       await pocketApi.sendGift({
         giftId: String(selectedGift.giftId || selectedGift.id),
         liveId: String(playing.item.liveId),
         acceptUserId: targetUserId,
         giftNum: num,
-        crm,
       });
       setGiftStatus(t('已送出 {num} 个 {giftName}', { num, giftName: giftName(selectedGift) }));
       const money = await pocketApi.getUserMoney().catch(() => null);
       if (money?.content?.moneyTotal !== undefined) setBalance(String(money.content.moneyTotal));
     } catch (err) {
       setGiftStatus(t('送礼失败：{error}', { error: errorMessage(err) }));
-    } finally {
-      setGiftSending(false);
     }
   };
 
@@ -1691,11 +1468,6 @@ export default function MediaScreen() {
 
   // 画面旋转（翻转）：旋转 90° 时交换容器宽高，使视频填满屏幕且不裁剪
   const screen = useWindowDimensions();
-  // 小窗比例跟随窗口方向：竖屏页面固定 9:16、横屏全屏固定 16:9（不用屏幕原始比例，超长屏会出竖条）。
-  // ⚠️ 不使用视频 naturalSize：口袋竖屏内容常是横屏编码，会把小窗带横（用户反馈 2026-11-06）。
-  useEffect(() => {
-    if (screen.width > 0 && screen.height > 0) setPipAspectLive(screen.width > screen.height);
-  }, [screen.width, screen.height]);
   const videoRotated = videoRotate === 90 || videoRotate === 270;
   const videoBoxW = videoRotated ? screen.height : screen.width;
   const videoBoxH = videoRotated ? screen.width : screen.height;
@@ -1705,17 +1477,8 @@ export default function MediaScreen() {
   // 万一 key 随 winW 没翻也没法触发 FlatList 重挂载 → 直接 bump 这个 nonce 强制 remount。
   // 注意：这只是已知 MediaScreen 直播网格的局部兜底；其他类似 FlatList 屏按需补。
   const [pipRemount, setPipRemount] = useState(0);
-  /**
-   * 是否处于系统小窗（PiP）。
-   * ⚠️ 系统 PiP 的画面 = **整个 Activity 窗口的快照**，不是单独抓媒体层。
-   * 所以播放器页上任何浮层（公告面板、弹幕列表抽屉…）都会一起被拍进小窗里
-   * —— 用户反馈「小窗会带着直播公告」就是这个原因。
-   * 进 PiP 时把播放器浮层全部隐藏，保证小窗里只有画面。
-   */
-  const [inSystemPip, setInSystemPip] = useState(false);
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('PipEnteredChanged', (entered: boolean) => {
-      setInSystemPip(!!entered);
       if (!entered) setPipRemount((n) => n + 1);
     });
     return () => sub.remove();
@@ -1728,9 +1491,8 @@ export default function MediaScreen() {
     if (!ns) return;
     const w = Number(ns.width) || 0;
     const h = Number(ns.height) || 0;
-    // 小窗比例统一由「窗口方向」维护（见下方 pipAspect effect），这里只决定页面是否横屏。
-    // 口袋直播一律按竖屏处理：部分流上报横屏编码尺寸，跟着它会横过来。
-    if (playingRef.current?.isLive) return;
+    // 同步 PiP 窗口比例（切后台悬浮窗跟随内容方向）
+    if (w > 0 && h > 0) setPipAspect(w, h);
     if (manualOrientRef.current) return;
     if (w > 0 && h > 0 && w !== h) {
       setIsLandscape(w > h);
@@ -1740,13 +1502,10 @@ export default function MediaScreen() {
   if (playing) {
     return (
       <View style={[styles.playerPage, isFullscreen && styles.playerPageFullscreen]}>
-        {announceExpanded && announceVisible && announcement && !inSystemPip && !cleanScreen ? (
-          <View nativeID="yaya.pip.overlay" collapsable={false} style={[styles.announcePanel, { top: insets.top + 64 }]}>
+        {announceExpanded && announceVisible && announcement ? (
+          <Animated.View style={[styles.announcePanel, { transform: [{ translateY: announceTopAnim }] }]}>
             <View style={styles.announcePanelTop}>
-              {/* ⚠️ 标题组必须 flex:1 + minWidth:0，否则内层 title 的 flex:1 失效
-                  （它撑的是这个 wrapper，而 wrapper 默认按内容宽）→ wrapper 撑满整行，
-                  把右侧「刷新/收起」两个按钮顶出屏幕（用户截图：收起按钮跑到屏幕外）。 */}
-              <View style={styles.announcePanelTitleRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <MaterialCommunityIcons name="bullhorn" size={15} color="#FFFFFF" style={{ marginRight: 5 }} />
                 <Text style={styles.announcePanelTitle} numberOfLines={1}>{t('公告')}</Text>
               </View>
@@ -1762,7 +1521,7 @@ export default function MediaScreen() {
             <ScrollView style={styles.announcePanelBody}>
               <Text style={styles.announcePanelText}>{announcement}</Text>
             </ScrollView>
-          </View>
+          </Animated.View>
         ) : null}
 
         {/* 解析中/解析失败：url 未就绪时渲染播放器 shell 内提示（点击即进播放器的等待态） */}
@@ -1798,90 +1557,43 @@ export default function MediaScreen() {
               urls: playing.urls,
               liveId: String(playing.item?.liveId || playing.item?.id || ''),
               needsNativeExo: playing.needsVlc,
-              coverPortrait: true,
               headers: { 'User-Agent': 'PocketFans201807/7.0.41 (iPhone; iOS 16.3.1; Scale/2.00)', Referer: 'https://h5.48.cn/', Origin: 'https://h5.48.cn' },
             }}
             meta={{ title: playing.title, cover: playing.cover }}
-            pocket={{
-              name: liveBarrage.liveInfo.hostName || String(playing.item?.user?.userName || playing.item?.nickname || playing.item?.ownerName || playing.title),
-              avatar: normalizeUrl(liveBarrage.liveInfo.hostAvatar || pickText(playing.item, ['user.userAvatar', 'avatar', 'userInfo.avatar', 'user.avatar', 'headImg'])),
-              liveId: String(playing.item?.liveId || playing.item?.id || ''),
-              audience: playing.isLive ? liveBarrage.liveInfo.audience : undefined,
-              rankAvatars: liveBarrage.liveInfo.rankAvatars,
-              comments: playing.isLive ? (liveBarrage.items.length ? liveBarrage.items.slice().reverse().map((item) => ({ id: item.id, text: item.text, nick: item.nick, level: item.level, kind: item.kind, userId: item.userId, avatar: item.avatar })) : showDanmaku ? danmaku.map((item, index) => ({ id: `${item.time}-${index}`, text: item.text, nick: item.nick, userId: item.userId, avatar: item.avatar, level: item.level })) : []) : undefined,
-              replayComments: playing.isLive ? undefined : danmaku,
-              onRankPress: () => openRankPanel(),
-              onCommentPress: (item) => setDanmakuProfile({ nick: item.nick, avatar: item.avatar, userId: item.userId ? String(item.userId) : undefined, missingIdMessage: playing.isLive ? undefined : t('录播弹幕未提供用户 ID，无法加载完整资料') }),
-            }}
-            onVideoSize={(w, h) => { if (w > 0 && h > 0) videoSizeRef.current = { w, h }; }}
             danmaku={playing.isLive ? { type: 'poll', liveId: String(playing.item?.liveId || playing.item?.id || '') } : { type: 'lrc', lrcUrl: '' }}
             features={{ rate: !playing.isLive, danmaku: true, kernelSwitch: true, resume: !playing.isLive }}
-            chromeHidden={inSystemPip}
             resumeAt={webResumeTime || (playing?.position || 0)}
             extraActions={[
               ...(playing.isLive ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openGiftPanel() }] : []),
               { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: () => openRankPanel() },
               ...((announceVisible && announcement) ? [{ key: 'announce', icon: 'bullhorn', label: t('公告'), active: announceExpanded, onPress: () => setAnnounceExpanded((v) => !v) }] : []),
               { key: 'danmaku', icon: 'cog', label: t('弹幕设置'), onPress: () => setShowDanmakuSettings(true) },
-              { key: 'danmakuList', icon: 'format-list-bulleted', label: t('弹幕列表'), active: showDanmakuList, onPress: () => setShowDanmakuList((v) => !v) },
               { key: 'pip', icon: 'picture-in-picture-bottom-right-outline', label: t('小窗'), onPress: handleMiniPlayer },
             ]}
-            // 直播弹幕输入条：进播放器底坞（随控制条自动隐藏/呼出），不再单独叠一层 + 收起按钮
-            barrageInput={playing.isLive ? (
-              <LiveBarrageBoard
-                source={liveBarrage}
-                liveId={String(playing.item?.liveId || playing.item?.id || '')}
-                module="live"
-                variant="pocket"
-                inputOnly
-              />
-            ) : undefined}
-            onClose={() => { setPipPlaying(false, 'mediascreen'); closePlayer(); }}
+            onClose={() => { setPipPlaying(false); closePlayer(); }}
             // 直播流地址有时效（wsSecret）：失败重试 = 重新解析（startPlay），而非重播同 URL
-            onRetry={() => playing.isLive ? void refreshLiveStream() : void startPlay(playing.item, false)}
-            liveTransitionKey={liveBarrage.streamRevision}
+            onRetry={() => startPlay(playing.item)}
             persistent
           >
-            {/* 弹幕列表抽屉（直播/录播通用）：列表 + 搜索 + 按发送者筛选 + 点击跳转 + 跟随播放 */}
-            <DanmakuListSheet
-              visible={showDanmakuList && !inSystemPip}
-              onClose={() => setShowDanmakuList(false)}
-              entries={danmakuListEntries}
+            <DanmakuOverlay
+              danmaku={danmaku}
               currentTime={danmakuClock}
-              onSeek={playing?.isLive ? undefined : (sec) => usePlayerStore.getState().setSeekTarget(sec)}
+              visible={playerDanmakuOn && showDanmaku && !!playing}
               live={!!playing?.isLive}
-              loading={
-                playing?.isLive
-                  ? liveBarrage.status === 'connecting' || liveBarrage.status === 'resolving'
-                  : false
-              }
-              // 点发送者昵称 → 用户资料卡（成员/粉丝同一界面）
-              onOpenProfile={(entry) => setDanmakuProfile({ nick: entry.nick, avatar: entry.avatar, userId: entry.userId != null ? String(entry.userId) : undefined })}
             />
-            {/* 直播弹幕输入条已并入播放器底坞（barrageInput），不再单独叠一层，也没有单独的收起按钮 */}
           </PlayerScreen>
         )}
 
-        {/* 弹幕列表点发送者 → 用户资料卡（含关注/取消关注 + 私信） */}
-        <UserProfileSheet
-          visible={!!danmakuProfile}
-          target={danmakuProfile}
-          onClose={() => setDanmakuProfile(null)}
-          onOpenChat={({ id, name }) => {
-            setDanmakuProfile(null);
-            navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
-          }}
-        />
-
         <Modal visible={giftVisible} transparent animationType="slide" onRequestClose={() => setGiftVisible(false)}>
           <View style={styles.modalShade}>
-            <GlassSurface radius={20} role="card" style={[styles.giftPanel, { backgroundColor: 'transparent' }]}>
+            <View style={[styles.giftPanel, { backgroundColor: palette.surface }]}>
               <View style={styles.giftHeader}>
                 <Text style={[styles.giftTitle, { color: palette.label }]}>{t('直播送礼')}</Text>
                 <TouchableOpacity onPress={() => setGiftVisible(false)} activeOpacity={0.8}>
                   <Text style={[styles.backBtnText, { color: palette.tint }]}>{t('关闭')}</Text>
                 </TouchableOpacity>
               </View>
+              <Text style={[styles.giftTip, { color: palette.danger }]}>{t('直播送礼主播看不到赠送，仅能统计贡献值')}</Text>
               <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>
                 {balance ? `${t('余额：{balance} 鸡腿', { balance })} · ` : ''}{giftStatus}
               </Text>
@@ -1913,20 +1625,11 @@ export default function MediaScreen() {
                   style={[styles.giftNum, { color: palette.label, borderColor: palette.hairline, backgroundColor: palette.fill2 }]}
                   keyboardType="numeric"
                   value={giftNum}
-                  maxLength={3}
-                  // 只留数字：非数字输入会让 Number() 落回 1，用户看不出自己输错了
-                  onChangeText={(s) => setGiftNum(String(s).replace(/\D/g, '').slice(0, 3))}
+                  onChangeText={setGiftNum}
                 />
-                <TouchableOpacity
-                  style={[styles.sendGiftBtn, { backgroundColor: selectedGift && !giftSending ? palette.tint : palette.fill3 }]}
-                  onPress={sendGift}
-                  disabled={!selectedGift || giftSending}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.sendGiftText, { color: selectedGift && !giftSending ? palette.onTint : palette.labelTertiary }]}>
-                    {giftSending
-                      ? t('发送中...')
-                      : selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
+                <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: palette.tint }]} onPress={sendGift} activeOpacity={0.85}>
+                  <Text style={[styles.sendGiftText, { color: palette.onTint }]}>
+                    {selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -1940,12 +1643,12 @@ export default function MediaScreen() {
               >
                 <Text style={[styles.rechargeText, { color: palette.tint }]}>{t('余额不足？去充值鸡腿')}</Text>
               </TouchableOpacity>
-            </GlassSurface>
+            </View>
           </View>
         </Modal>
-        <Modal visible={rankVisible} transparent animationType="slide" presentationStyle="overFullScreen" statusBarTranslucent onRequestClose={() => setRankVisible(false)}>
+        <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
           <View style={styles.modalShade}>
-            <GlassSurface radius={20} role="card" style={[styles.giftPanel, { backgroundColor: 'transparent' }]}>
+            <View style={[styles.giftPanel, { backgroundColor: palette.surface }]}>
               <View style={styles.giftHeader}>
                 <Text style={[styles.giftTitle, { color: palette.label }]}>{t('贡献榜')}</Text>
                 <TouchableOpacity onPress={() => setRankVisible(false)} activeOpacity={0.8}>
@@ -1953,46 +1656,22 @@ export default function MediaScreen() {
                 </TouchableOpacity>
               </View>
               <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>{rankStatus}</Text>
-              <ScrollView style={styles.rankList} nestedScrollEnabled overScrollMode="never" showsVerticalScrollIndicator>
+              <ScrollView style={styles.rankList}>
                 {rankRows.map((row, index) => (
-                  <TouchableOpacity
-                    key={String(row.userId || row.id || index)}
-                    // 点名字/头像 → 资料卡（用户要求）。整行可点，命中区更大；
-                    // 没有 userId 的行给一句说明而不是点了没反应。
-                    activeOpacity={0.7}
-                    onPress={() => setRankProfile({
-                      userId: row.userId ? String(row.userId) : undefined,
-                      nick: row.name,
-                      avatar: row.avatar,
-                      missingIdMessage: t('该用户没有可加载的口袋资料'),
-                    })}
-                    style={[styles.rankRow, { borderBottomColor: palette.hairline }]}
-                  >
+                  <View key={String(row.userId || row.id || index)} style={[styles.rankRow, { borderBottomColor: palette.hairline }]}>
                     <Text style={[styles.rankNo, { color: palette.tint }]}>{row.rank || index + 1}</Text>
                     {row.avatar ? <Image source={{ uri: row.avatar }} style={[styles.rankAvatar, { backgroundColor: palette.fill3 }]} /> : <View style={[styles.rankAvatar, { backgroundColor: palette.fill3 }]} />}
                     <View style={styles.rankInfo}>
                       <Text style={[styles.rankName, { color: palette.label }]} numberOfLines={1}>{row.name}</Text>
                       <Text style={[styles.rankValue, { color: palette.labelSecondary }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
                     </View>
-                    <MaterialCommunityIcons name="chevron-right" size={16} color={palette.labelTertiary} />
-                  </TouchableOpacity>
+                  </View>
                 ))}
               </ScrollView>
-            </GlassSurface>
+            </View>
           </View>
         </Modal>
-        {/* 贡献榜用户资料卡：挂在排行榜 Modal 之后 → 层级在其上，关掉回到榜单 */}
-        <UserProfileSheet
-          visible={!!rankProfile}
-          target={rankProfile}
-          onClose={() => setRankProfile(null)}
-          onOpenChat={({ id, name }) => {
-            setRankProfile(null);
-            setRankVisible(false);
-            navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
-          }}
-        />
-        <DanmakuSettingsSheet staticFeed visible={showDanmakuSettings} onClose={() => setShowDanmakuSettings(false)} />
+        <DanmakuSettingsSheet visible={showDanmakuSettings} onClose={() => setShowDanmakuSettings(false)} />
       </View>
     );
   }
@@ -2008,26 +1687,41 @@ export default function MediaScreen() {
           </TouchableOpacity>
         }
       />
-      {/* 直播/录播分段控件：玻璃轨道 + 滑动玻璃选中胶囊（与底栏同一套） */}
-      <GlassSegmented
-        options={[
-          { key: 'live', label: t('直播') },
-          { key: 'vod', label: t('录播') },
-        ]}
-        value={tab}
-        onChange={(k) => switchTab(k as 'live' | 'vod')}
-        style={[styles.segmentWrap, { borderColor: palette.innerStroke, borderWidth: StyleSheet.hairlineWidth }]}
-      />
-      {/* 单行筛选：分组 = 玻璃滑动选中块（与底栏同一套） + 搜索图标 */}
+      {/* 直播/录播分段控件 */}
+      <View style={[styles.segmentWrap, { backgroundColor: palette.fill2, borderColor: palette.innerStroke, borderWidth: StyleSheet.hairlineWidth }]}>
+        {(['live', 'vod'] as const).map((key) => {
+          const active = tab === key;
+          return (
+            <TouchableOpacity
+              key={key}
+              style={[styles.segmentCell, active && { backgroundColor: palette.tint }]}
+              onPress={() => switchTab(key)}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.segmentText, { color: active ? palette.onTint : palette.labelSecondary, fontWeight: active ? '800' : '600' }]}>
+                {key === 'live' ? t('直播') : t('录播')}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      {/* 单行筛选：分组 chips + 搜索图标 */}
       <View style={styles.filterRow}>
-        <View style={{ flex: 1 }}>
-          <GlassSegmentedScroll
-            options={groupChips.map((item) => ({ key: String(item.id), label: t(item.label) }))}
-            value={String(groupId)}
-            onChange={(k) => setGroupId(Number(k))}
-            height={34}
-          />
-        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.groupRowContent}>
+          {groupChips.map((item) => (
+            <TouchableOpacity
+              key={String(item.id)}
+              style={[
+                styles.groupChip,
+                { backgroundColor: groupId === item.id ? palette.tint : palette.fill2 },
+              ]}
+              onPress={() => setGroupId(item.id)}
+              activeOpacity={0.85}
+            >
+              <Text style={[styles.groupChipText, { color: groupId === item.id ? palette.onTint : palette.labelSecondary }]}>{t(item.label)}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
         <TouchableOpacity
           onPress={() => setShowSearch((v) => !v)}
           style={[styles.searchToggle, { backgroundColor: showSearch ? palette.tint : palette.fill2 }]}
@@ -2114,9 +1808,6 @@ export default function MediaScreen() {
       <View style={{ flex: 1 }}>
         <PerfFlatList
           key={tab === 'vod' ? 'vod-1col' : 'live-2col'}
-          // 滑动即收键盘：顶部有搜索框，滑列表时键盘不该一直压着半屏
-          keyboardDismissMode="on-drag"
-          keyboardShouldPersistTaps="handled"
           // 直播页去宣传栏（banner）：统一双列网格，即使只有 1 条直播也保持双列
           data={tab === 'vod' ? (vodRows ?? []) as any : list}
           keyExtractor={(item: any, index) => {
@@ -2132,9 +1823,7 @@ export default function MediaScreen() {
           // 关 removeClippedSubviews(grid 仅几行无虚拟化必要,且 Android PiP 后裁剪会留顶部残影)。
           extraData={screen.width}
           removeClippedSubviews={false}
-          // 性能（用户反馈「全部」网格滑动严重掉帧）：限制同屏挂载的玻璃卡数量、加快批渲染。
-          updateCellsBatchingPeriod={40}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             // 录播：组头 / 双卡行
             if (tab === 'vod') {
               if (item.type === 'header') {
@@ -2147,18 +1836,17 @@ export default function MediaScreen() {
                 const coverUrl = it.liveCover || it.coverPath;
                 const meta = [it.nickname, formatTimestamp(it.startTime).slice(0, 16)].filter(Boolean).join(' · ');
                 return (
-                  <View style={styles.vodGridItem}>
+                  <FadeInView duration={300} style={styles.vodGridItem}>
                     <TouchableOpacity
-                      style={[styles.vodGridCard, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
+                      style={[styles.vodGridCard, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
                       onPress={() => startPlay(it)}
                       activeOpacity={0.88}
                     >
-                      <View style={{ borderRadius: 20, overflow: 'hidden', backgroundColor: palette.fill3 }}>
-                        <View style={[styles.vodGridCover, { backgroundColor: palette.fill3 }]}>
-                          {coverUrl ? (
-                            <Image source={{ uri: thumbUrl(coverUrl, GRID_COVER_THUMB) }} style={styles.vodGridCoverImg} resizeMode="cover" />
-                          ) : (
-                            <View style={styles.vodGridFallback}>
+                      <View style={[styles.vodGridCover, { backgroundColor: palette.fill3 }]}>
+                        {coverUrl ? (
+                          <Image source={{ uri: coverUrl }} style={styles.vodGridCoverImg} resizeMode="cover" />
+                        ) : (
+                          <View style={styles.vodGridFallback}>
                             <MaterialCommunityIcons name="video" size={30} color={palette.labelTertiary} />
                           </View>
                         )}
@@ -2196,9 +1884,8 @@ export default function MediaScreen() {
                           ) : null}
                         </View>
                       </View>
-                    </View>
                     </TouchableOpacity>
-                  </View>
+                  </FadeInView>
                 );
               };
               return (
@@ -2212,18 +1899,15 @@ export default function MediaScreen() {
             const coverUrl = item.liveCover || item.coverPath;
             const meta = [item.nickname, formatTimestamp(item.startTime).slice(0, 16)].filter(Boolean).join(' · ');
             return (
-              <View style={styles.vodGridItem}>
+              <FadeInView delay={index < 16 ? 80 + index * 30 : 0} duration={300} style={styles.vodGridItem}>
                 <TouchableOpacity
-                  style={[styles.vodGridCard, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
+                  style={[styles.vodGridCard, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
                   onPress={() => startPlay(item)}
                   activeOpacity={0.88}
                 >
-                  {/* 卡片不套玻璃：网格里每卡一个 BlurView 会逐帧重算模糊（用户反馈滑动掉帧），
-                      且封面铺满、玻璃观感等于没有 —— 按设计系统「列表卡不用玻璃」用实底圆角 */}
-                  <View style={{ borderRadius: 20, overflow: 'hidden', backgroundColor: palette.fill3 }}>
                   <View style={[styles.vodGridCover, { backgroundColor: palette.fill3 }]}>
                     {coverUrl ? (
-                      <Image source={{ uri: thumbUrl(coverUrl, GRID_COVER_THUMB) }} style={styles.vodGridCoverImg} resizeMode="cover" />
+                      <Image source={{ uri: coverUrl }} style={styles.vodGridCoverImg} resizeMode="cover" />
                     ) : (
                       <View style={styles.vodGridFallback}>
                         <MaterialCommunityIcons name="video" size={30} color={palette.labelTertiary} />
@@ -2269,9 +1953,8 @@ export default function MediaScreen() {
                       ) : null}
                     </View>
                   </View>
-                </View>
                 </TouchableOpacity>
-              </View>
+              </FadeInView>
             );
           }}
           ListEmptyComponent={
@@ -2305,8 +1988,8 @@ export default function MediaScreen() {
           }
           ListFooterComponent={null}
           contentContainerStyle={list.length === 0 ? { flex: 1 } : styles.listContent}
-          initialNumToRender={tab === 'vod' ? 6 : 8}
-          maxToRenderPerBatch={8}
+          initialNumToRender={12}
+          maxToRenderPerBatch={12}
           windowSize={7}
         />
       </View>
@@ -2315,30 +1998,17 @@ export default function MediaScreen() {
 }
 
 const styles = StyleSheet.create({
-  // 直播弹幕输入条：叠在播放器底部（避开底部控制坞）
-  liveBarrageInputWrap: { position: 'absolute', left: 10, right: 10, bottom: 62, zIndex: 20 },
-  liveInputFab: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(0,0,0,0.42)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  liveBarrageInput: {},
   container: { flex: 1, backgroundColor: 'transparent' },
   tabRow: { flexDirection: 'row', gap: 8 },
   toolbarRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 14, paddingBottom: 8, alignItems: 'center' },
   headerSwitch: { fontSize: 13, fontWeight: '800', minWidth: 34, textAlign: 'right' },
   // 直播/录播分段控件
   segmentWrap: {
-    // 不要 padding：GlassSegmented 内部已有 3px 内边距，外层再加会让滑动胶囊错位
+    flexDirection: 'row',
     marginHorizontal: 12,
     marginBottom: 6,
+    padding: 3,
     borderRadius: radii.pill,
-    // 宽度固定满宽：不受「直播/录播」文字长短影响，切换时胶囊一次滑动到位
-    width: 'auto',
-    alignSelf: 'stretch',
   },
   segmentCell: {
     flex: 1,
@@ -2352,7 +2022,7 @@ const styles = StyleSheet.create({
   searchToggle: {
     width: 32,
     height: 32,
-    borderRadius: 20,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 6,
@@ -2377,15 +2047,12 @@ const styles = StyleSheet.create({
   announceHeaderText: { color: '#fb7299' },
   exitFullscreenBtn: { position: 'absolute', top: 28, right: 16, zIndex: 1001, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
   exitFullscreenText: { color: '#fff', fontSize: 12, fontWeight: '800' },
-  announcePill: { alignSelf: 'center', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 14, backgroundColor: 'rgba(251,114,153,0.20)', borderWidth: 1, borderColor: 'rgba(251,114,153,0.3)', marginVertical: 4 },
+  announcePill: { alignSelf: 'center', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, backgroundColor: 'rgba(251,114,153,0.20)', borderWidth: 1, borderColor: 'rgba(251,114,153,0.3)', marginVertical: 4 },
   announcePillText: { color: '#fb7299', fontSize: 11, fontWeight: '700' },
   announcePanel: { position: 'absolute', top: 0, left: 10, right: 10, zIndex: 29, borderRadius: radiiAlias.card, backgroundColor: 'rgba(18,18,20,0.92)', borderWidth: 1, borderColor: 'rgba(251,114,153,0.32)', marginHorizontal: 0, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 6 },
   announcePanelTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(251,114,153,0.18)' },
-  /** 标题组：占据剩余宽度并允许收缩（配合 title 的 numberOfLines=1 出省略号），按钮永远留在屏内 */
-  announcePanelTitleRow: { flexDirection: 'row', alignItems: 'center', flex: 1, minWidth: 0, marginRight: 8 },
-  announcePanelTitle: { color: '#fff', fontSize: 13, fontWeight: '800', flexShrink: 1 },
-  /** 按钮组：不参与收缩，保证「刷新/收起」始终完整可见 */
-  announcePanelBtns: { flexDirection: 'row', gap: 8, flexShrink: 0 },
+  announcePanelTitle: { color: '#fff', fontSize: 13, fontWeight: '800', flex: 1 },
+  announcePanelBtns: { flexDirection: 'row', gap: 8 },
   announceSmallBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14, backgroundColor: 'rgba(251,114,153,0.16)' },
   announceSmallBtnText: { color: '#fb7299', fontSize: 11, fontWeight: '700' },
   announcePanelBody: { paddingHorizontal: 14, paddingVertical: 10, maxHeight: 150 },
@@ -2397,10 +2064,10 @@ const styles = StyleSheet.create({
   vlcGateText: { color: '#d8d8d8', fontSize: 14, lineHeight: 22, marginBottom: 14 },
   vlcGateUrl: { color: '#d8d8d8', fontSize: 11, lineHeight: 16, marginBottom: 18 },
   vlcPrimaryText: { color: '#fff', fontSize: 15, fontWeight: '900' },
-  vlcSecondaryBtn: { backgroundColor: '#222', borderRadius: 20, paddingVertical: 13, alignItems: 'center' },
+  vlcSecondaryBtn: { backgroundColor: '#222', borderRadius: 16, paddingVertical: 13, alignItems: 'center' },
   vlcSecondaryText: { color: '#fff', fontSize: 14, fontWeight: '800' },
   vlcGateError: { color: '#ffb3c2', fontSize: 12, marginTop: 12 },
-  playerError: { position: 'absolute', left: 16, right: 16, bottom: 24, padding: 12, borderRadius: 20, backgroundColor: '#1C1C1F' },
+  playerError: { position: 'absolute', left: 16, right: 16, bottom: 24, padding: 12, borderRadius: 16, backgroundColor: '#1C1C1F' },
   playerErrorText: { color: '#fff', fontSize: 12, lineHeight: 18 },
   // 播放器内解析中/失败视图
   resolvingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
@@ -2431,7 +2098,7 @@ const styles = StyleSheet.create({
   v2Card: {
     marginHorizontal: 12,
     marginVertical: 6,
-    borderRadius: 20,
+    borderRadius: 16,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
@@ -2548,10 +2215,10 @@ const styles = StyleSheet.create({
   sendGiftText: { fontSize: 14, fontWeight: '800' },
   rechargeBtn: { marginTop: 10, alignItems: 'center', paddingVertical: 10 },
   rechargeText: { fontSize: 13, fontWeight: '800' },
-  rankList: { flexGrow: 0, flexShrink: 1, maxHeight: 430, minHeight: 0 },
+  rankList: { maxHeight: 430 },
   rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth },
   rankNo: { width: 32, fontSize: 15, fontWeight: '900' },
-  rankAvatar: { width: 38, height: 38, borderRadius: 20, marginRight: 10 },
+  rankAvatar: { width: 38, height: 38, borderRadius: 19, marginRight: 10 },
   rankInfo: { flex: 1 },
   rankName: { fontSize: 14, fontWeight: '800' },
   rankValue: { fontSize: 11, marginTop: 2 },

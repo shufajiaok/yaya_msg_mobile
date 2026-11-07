@@ -18,7 +18,7 @@ import com.facebook.react.modules.network.OkHttpClientProvider
 import okhttp3.Interceptor
 
 import expo.modules.ApplicationLifecycleDispatcher
-import expo.modules.ExpoReactHostFactory
+import expo.modules.ReactNativeHostWrapper
 
 /** 与 src/api/bilibili.ts biliHeaders 一致的桌面 Chrome UA（B站风控按 UA 分端） */
 private const val BILI_DESKTOP_UA =
@@ -26,32 +26,15 @@ private const val BILI_DESKTOP_UA =
 
 class MainApplication : Application(), ReactApplication {
 
-  /** 手动注册的包（autolink 覆盖不到的）——reactNativeHost 与 reactHost 共用同一份 */
-  private fun buildPackages(): List<ReactPackage> =
-    PackageList(this).packages.apply {
-      // Packages that cannot be autolinked yet can be added manually here, for example:
-      add(LivePlayerPackage())
-      add(PipPackage())
-      // 口袋48 云信消息通道（房间消息 = 云信圈组 QChat，仅原生 SDK 支持）
-      add(PocketImPackage())
-      // 礼物全屏特效（libpag）
-      add(GiftEffectPackage())
-      // 应用内更新：下载 APK + 拉起系统安装器
-      add(ApkUpdaterPackage())
-      // 房间语音/视频时长探测（MediaMetadataRetriever）
-      add(MediaProbePackage())
-      // 导出下载到 Android 公共 Downloads，允许文件管理器直接访问
-      add(PublicDownloadsPackage())
-      // 云信 commonlink 协议（直播弹幕聊天室 + 成员房间 QChat）：登录包里包名由自己填
-      // （com.seine48.app，白名单内）→ 过服务端客户端标识校验
-      add(com.yk1z.yayamsg.nim.PocketNimChatroomPackage())
-      // 自动链接漏掉 react-native-safe-area-context，这里补上（聊天库依赖其原生 Provider）
-      add(com.th3rdwave.safeareacontext.SafeAreaContextPackage())
-    }
-
-  override val reactNativeHost: ReactNativeHost =
+  override val reactNativeHost: ReactNativeHost = ReactNativeHostWrapper(
+      this,
       object : DefaultReactNativeHost(this) {
-          override fun getPackages(): List<ReactPackage> = buildPackages()
+          override fun getPackages(): List<ReactPackage> =
+            PackageList(this).packages.apply {
+              // Packages that cannot be autolinked yet can be added manually here, for example:
+              add(LivePlayerPackage())
+              add(PipPackage())
+            }
 
           override fun getJSMainModuleName(): String = ".expo/.virtual-metro-entry"
 
@@ -59,14 +42,10 @@ class MainApplication : Application(), ReactApplication {
 
           override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
       }
+  )
 
-  /**
-   * Expo SDK 55 已移除 `ReactNativeHostWrapper`（RN 0.83 只支持新架构），改用 `ExpoReactHostFactory`。
-   * 它内部会挂上 ExpoModulesPackage 的 host handlers（网络/生命周期链路），
-   * Expo 各模块本身由 autolink 生成在 PackageList 里，这里整份传进去即可。
-   */
   override val reactHost: ReactHost
-    get() = ExpoReactHostFactory.getDefaultReactHost(applicationContext, buildPackages())
+    get() = ReactNativeHostWrapper.createReactHost(applicationContext, reactNativeHost)
 
   override fun onCreate() {
     // 最先安装：RN 网络模块的 OkHttp 客户端在 JS 首次发请求时才经 createClient(context) 构建，

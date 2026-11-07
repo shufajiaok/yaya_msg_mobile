@@ -13,7 +13,6 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, useWindowDimensions } from 'react-native';
 import { DanmakuItem } from '../utils/danmaku';
 import { useDanmakuSettings } from '../store/danmakuSettings';
-import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
 
 const BASE_DURATION = 7000; // 基础横穿时长（ms），speed 越大越快
 const SAFE_GAP = 600; // 同泳道两条之间的安全间隔（ms），杜绝重叠
@@ -64,31 +63,21 @@ export interface DanmakuOverlayProps {
   /** 直播模式：实时弹幕立即上屏，不做子秒级错峰（录播才按发送时刻错峰） */
   live?: boolean;
   opacity?: number;
-  /**
-   * 实时弹幕（直播专用）：外部推来的弹幕，出现即上屏，不走 currentTime 时间窗。
-   * 与 danmaku（录播按时间轴）互不影响；直播时传这个、danmaku 传空数组即可。
-   * key 必须稳定（同一条消息重复推不会重复上屏）。
-   */
-  liveItems?: Array<{ key: string; text: string }>;
 }
 
-export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, opacity: opacityProp, liveItems }: DanmakuOverlayProps) {
+export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, opacity: opacityProp }: DanmakuOverlayProps) {
   const { enabled, opacity: sOpacity, speed, area, fontSize } = useDanmakuSettings();
   const [active, setActive] = useState<ActiveDanmaku[]>([]);
   const lastTime = useRef(0);
   const laneFreeAt = useRef<number[]>([]);
   const counter = useRef(0);
   const { width, height: screenH } = useWindowDimensions();
-  // 顶部安全区：edge-to-edge 下 overlay 顶到屏幕最上沿，弹幕会压进系统通知栏。
-  // 第一条泳道从「状态栏下方 + 8」开始，泳道数也按可用高度重算。
-  const insets = useSafeAreaInsets();
-  const topOffset = (insets?.top || 0) + 8;
 
   // 显示区域 → 泳道数（顶部少、全屏多）
   const rowH = fontSize + 10;
-  let laneCount = Math.max(8, Math.floor(((screenH - topOffset) * 0.92) / rowH));
-  if (area === 'top') laneCount = Math.max(4, Math.min(6, Math.floor(((screenH - topOffset) * 0.4) / rowH)));
-  else if (area === 'half') laneCount = Math.max(6, Math.floor(((screenH - topOffset) * 0.55) / rowH));
+  let laneCount = Math.max(8, Math.floor((screenH * 0.92) / rowH));
+  if (area === 'top') laneCount = Math.max(4, Math.min(6, Math.floor((screenH * 0.4) / rowH)));
+  else if (area === 'half') laneCount = Math.max(6, Math.floor((screenH * 0.55) / rowH));
   // 区域 / 字号变化时同步泳道数组长度
   useEffect(() => {
     if (laneFreeAt.current.length !== laneCount) laneFreeAt.current = new Array(laneCount).fill(0);
@@ -154,43 +143,6 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
     setActive((prev) => [...prev, ...newOnes].slice(-MAX_ACTIVE));
   }, [currentTime, visible, enabled, danmaku, laneCount, speed, live]);
 
-  /**
-   * 直播实时弹幕：新到的消息立即上屏（不走时间窗）。
-   * 泳道复用逻辑与录播一致，保证同屏不重叠。
-   */
-  const seenLive = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!visible || !enabled || !liveItems || !liveItems.length) return;
-    const fresh = liveItems.filter((i) => i.key && !seenLive.current.has(i.key));
-    if (!fresh.length) return;
-    fresh.forEach((i) => seenLive.current.add(i.key));
-    // 防止集合无限增长（直播挂很久时）
-    if (seenLive.current.size > 600) {
-      seenLive.current = new Set(liveItems.map((i) => i.key));
-    }
-
-    const duration = BASE_DURATION / (speed > 0 ? speed : 1);
-    const now = Date.now() / 1000;
-    const newOnes: ActiveDanmaku[] = fresh.map((d) => {
-      let lane = 0;
-      for (let i = 1; i < laneCount; i++) {
-        if (laneFreeAt.current[i] < laneFreeAt.current[lane]) lane = i;
-      }
-      const laneDelay = Math.max(0, (laneFreeAt.current[lane] - now) * 1000);
-      laneFreeAt.current[lane] = now + (laneDelay + duration + SAFE_GAP) / 1000;
-
-      const anim = new Animated.Value(0);
-      Animated.sequence([
-        Animated.delay(laneDelay),
-        Animated.timing(anim, { toValue: 1, duration, easing: (t) => t, useNativeDriver: true }),
-      ]).start(() => {
-        setActive((prev) => prev.filter((a) => a.anim !== anim));
-      });
-      return { key: `L${counter.current++}`, text: d.text, lane, anim };
-    });
-    setActive((prev) => [...prev, ...newOnes].slice(-MAX_ACTIVE));
-  }, [liveItems, visible, enabled, laneCount, speed]);
-
   if (!visible || !enabled) return null;
   const opacity = opacityProp ?? sOpacity;
 
@@ -200,7 +152,7 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
         <Bullet
           key={a.key}
           text={a.text}
-          top={topOffset + a.lane * (fontSize + 10)}
+          top={8 + a.lane * (fontSize + 10)}
           fontSize={fontSize}
           anim={a.anim}
           width={width}

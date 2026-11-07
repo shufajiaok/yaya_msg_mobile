@@ -7,9 +7,9 @@ export type RootStackParamList = {
   RechargeScreen: undefined;
   FetchScreen: undefined;
   FlipScreen: { mode?: 'view' | 'send' } | undefined;
-  // 成员档案：支持从房间/消息点头像直接带成员进来（自动加载档案，无需再搜索）
-  ProfileScreen: { memberId?: string; member?: any; nonce?: number } | undefined;
+  ProfileScreen: undefined;
   PhotosScreen: undefined;
+  RoomAlbumScreen: undefined;
   RoomRadioScreen: { member?: any; initialMode?: 'big' | 'small'; streamUrl?: string } | undefined;
   OpenLiveScreen: undefined;
   OnMicScreen: undefined;
@@ -18,12 +18,16 @@ export type RootStackParamList = {
   VideoLibraryScreen: undefined;
   MusicLibraryScreen: undefined;
   AudioProgramsScreen: undefined;
+  AnalysisScreen: undefined;
   DownloadScreen: undefined;
   DatabaseScreen: undefined;
+  TripScreen: undefined;
   MeleeRankScreen: undefined;
-  RoomAlbumScreen: undefined;
   MemberDynamicScreen: undefined;
+  MemberWeiboScreen: undefined;
   InvoiceScreen: undefined;
+  CommunityScreen: undefined;
+  CommunityPostDetailScreen: { postId: string; title?: string };
 };
 
 export type TabParamList = {

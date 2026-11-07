@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -12,14 +12,12 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { usePalette } from '../theme';
 import { useI18n } from '../i18n';
 import { useMemberStore } from '../store';
+import { FadeInView } from '../components/Motion';
 import { EmptyState } from '../components/StateViews';
-import { CenterSpinner } from '../components/Loaders';
 import ScreenHeader from '../components/ScreenHeader';
-import { HeaderAction } from '../components/HeaderAction';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useOnMicStore, OnMicEntry } from '../store/onMicStore';
 import { Member } from '../types';
-import { GlassSurface } from '../components/GlassSurface';
 
 export default function OnMicScreen() {
   const palette = usePalette();
@@ -29,30 +27,22 @@ export default function OnMicScreen() {
   const onMic = useOnMicStore((state: any) => state.onMic);
   const scanning = useOnMicStore((state: any) => state.scanning);
   const scanTotal = useOnMicStore((state: any) => state.total);
-  const scanMemberTotal = useOnMicStore((state: any) => state.memberTotal);
   const scanDone = useOnMicStore((state: any) => state.done);
   const [error, setError] = useState('');
 
-  //  - 过滤条件含 yklzId：只有小房间的成员此前被 (channelId || serverId) 漏掉
+  // v2.7.4：全部成员上麦扫描（有 serverId 或 channelId 的成员都纳入；channelId 缺失由 scan 内按需补齐；
+  // 退团/暂休成员由 store 按官方分类过滤，不进扫描）
   const buildInputs = useCallback(() => {
     return members
-      .map((item: any) => {
-        const st = String(item.state || '');
-        // 「在团」判定（用户要求：上麦只扫在团成员）：
-        // 库里 isInGroup 未标 false，且状态不是 退团(left)/毕业(graduated)/暂休(paused)。
-        // state 由 memberData 用官方+库重算（官方优先），未知(unknown)仍保留，避免漏扫。
-        const inGroup = item.isInGroup !== false && st !== 'left' && st !== 'graduated' && st !== 'paused';
-        return {
-          memberId: String(item.id || item.userId || ''),
-          name: String(item.ownerName || item.realName || item.id || ''),
-          channelId: String(item.channelId || ''),
-          serverId: String(item.serverId || ''),
-          smallChannelId: String(item.yklzId || ''),
-          state: st,
-          isInGroup: inGroup,
-        };
-      })
-      .filter((m: any) => m.memberId && m.isInGroup && (m.channelId || m.serverId || m.smallChannelId));
+      .map((item: any) => ({
+        memberId: String(item.id || item.userId || ''),
+        name: String(item.ownerName || item.realName || item.id || ''),
+        channelId: String(item.channelId || ''),
+        serverId: String(item.serverId || ''),
+        smallChannelId: String(item.yklzId || ''),
+        state: String(item.state || ''),
+      }))
+      .filter((m: any) => m.memberId && (m.channelId || m.serverId));
   }, [members]);
 
   const scan = useCallback((opts?: { force?: boolean }) => {
@@ -65,14 +55,6 @@ export default function OnMicScreen() {
     scan({ force: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // 成员库是异步加载的：挂载时若还没就绪，buildInputs 为空 → 扫不出任何东西且页面一片空。
-  // 首次拿到成员后补扫一次（仅当此前从未扫描过），避免「进页面就是暂无成员上麦」的假空态。
-  const scannedWithMembersRef = useRef(false);
-  useEffect(() => {
-    if (scannedWithMembersRef.current || !members.length) return;
-    scannedWithMembersRef.current = true;
-    if (!useOnMicStore.getState().lastScan) scan({ force: true });
-  }, [members.length, scan]);
   // Y17: members 异步加载完成后重算错误态（此前仅挂载算一次 → 长期误显示「暂无成员数据」）
   useEffect(() => {
     setError('');
@@ -94,8 +76,9 @@ export default function OnMicScreen() {
   const renderItem = ({ item, index }: { item: OnMicEntry; index: number }) => {
     const member = members.find((m: any) => String(m.id || m.userId) === item.memberId);
     return (
-      <View style={{ marginHorizontal: 16, marginTop: index === 0 ? 12 : 8 }}>
+      <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={300} style={{ marginHorizontal: 16, marginTop: index === 0 ? 12 : 8 }}>
         <TouchableOpacity
+          style={[styles.row, { backgroundColor: palette.surface, borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}
           onPress={() => member && navigation.navigate('RoomRadioScreen', {
             member,
             initialMode: item.smallVoice ? 'small' : 'big',
@@ -103,18 +86,6 @@ export default function OnMicScreen() {
           })}
           activeOpacity={0.9}
         >
-          {/* 列表逐卡不用玻璃：滚动时每帧都要重算模糊 → 掉帧（全站铁律）。
-              与直播/录播网格、房间列表同款做法：实底圆角 + hairline 描边 */}
-          <View
-            style={[
-              styles.row,
-              {
-                backgroundColor: palette.surfaceGlassStrong,
-                borderColor: palette.hairline,
-                borderWidth: StyleSheet.hairlineWidth,
-              },
-            ]}
-          >
           {member?.avatar ? (
             <Image source={{ uri: member.avatar }} style={styles.avatar} />
           ) : (
@@ -139,40 +110,26 @@ export default function OnMicScreen() {
             </View>
           </View>
           <MaterialCommunityIcons name="chevron-right" size={20} color={palette.labelTertiary} />
-          </View>
         </TouchableOpacity>
-      </View>
+      </FadeInView>
     );
   };
 
   return (
-    // 背景：与全站其它页面一致走「透明容器 + 根层 PageBackdrop 渐变」——
-    // 此前这里画了不透明 palette.background，成为全项目唯一一个盖住全局底衬的页面，
-    // 导致上麦页背景与其它页不一致、且页内玻璃卡失去透光来源（用户反馈的「上麦页背景」问题）
-    <View style={[styles.container, { backgroundColor: 'transparent' }]}>
-      <ScreenHeader
-        title={t('上麦')}
-        // 手动强制重扫（绕过 store 的 60s 节流 + 预算制增量）：解决「有概率扫不出来」
-        right={<HeaderAction label={t('刷新')} onPress={() => scan({ force: true })} loading={scanning} disabled={scanning} />}
-      />
+    <View style={[styles.container, { backgroundColor: palette.background }]}>
+      <ScreenHeader title={t('上麦')} />
       {scanning ? (
-        <GlassSurface radius={20} role="card" style={[styles.scanBar, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <View style={[styles.scanBar, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
           <ActivityIndicator size="small" color={palette.tint} style={{ marginRight: 8 }} />
           <Text style={[styles.scanBarText, { color: palette.labelSecondary }]}>
-            {/* ⚠️ 分子分母必须同一口径：done 是「探测任务数」（大/小房间各一个任务），
-                以前分母用成员数（memberTotal）→ 数字会涨到 2 倍成员数，看起来像出错 */}
-            {t('正在扫描全部成员上麦状态 {done}/{total}...', { done: Math.min(scanDone, scanTotal), total: scanTotal || scanMemberTotal })}
+            {t('正在扫描全部成员上麦状态 {done}/{total}...', { done: Math.min(scanDone, scanTotal), total: scanTotal })}
           </Text>
-        </GlassSurface>
+        </View>
       ) : null}
       {error && entries.length === 0 ? (
         <EmptyState icon="alert-circle-outline" title={t('加载失败')} hint={error} onAction={() => scan({ force: true })} />
-      ) : entries.length === 0 && scanning ? (
-        /* 扫描中且尚无结果：显示加载态 —— 以前这里直接落进「暂无成员上麦」空态，
-           看起来像扫完了没结果（用户反馈的「加载显示有问题」） */
-        <CenterSpinner text={t('正在扫描上麦状态…')} />
       ) : entries.length === 0 ? (
-        <EmptyState icon="microphone-off" title={t('暂无成员上麦')} hint={t('当前没有成员在语音麦上，可点下方重新扫描')} onAction={() => scan({ force: true })} actionLabel={t('重新扫描')} />
+        <EmptyState icon="microphone-off" title={t('暂无成员上麦')} hint={t('当前没有成员在语音麦上')} />
       ) : (
         <FlatList
           data={entries}
@@ -202,7 +159,7 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 20,
+    borderRadius: 14,
     padding: 12,
   },
   avatar: {

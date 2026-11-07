@@ -19,7 +19,7 @@ import { useSettingsStore } from '../store';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import PlayerScreen from '../player';
 import { usePlayerStore } from '../player/store/playerStore';
-import { ScalePressable } from '../components/Motion';
+import { FadeInView, ScalePressable } from '../components/Motion';
 import ScreenHeader from '../components/ScreenHeader';
 import { HeaderAction } from '../components/HeaderAction';
 import { EmptyState, ErrorState } from '../components/StateViews';
@@ -38,7 +38,6 @@ import { usePalette } from '../theme';
 import type { Palette } from '../theme/colors';
 import { useI18n } from '../i18n';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 /** 直播状态点：直播中 success 呼吸动画（原生驱动）+ 文字；未开播 labelTertiary */
 function StatusDot({ live, palette, label }: { live: boolean; palette: Palette; label: string }) {
@@ -200,6 +199,7 @@ export default function BilibiliLiveScreen() {
     ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
   }, []);
 
+  // 切到后台时复位横屏锁（防退到桌面/其它 App 仍锁横屏）；回到前台由上方 effect 按状态重新锁定
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
@@ -301,16 +301,8 @@ export default function BilibiliLiveScreen() {
 
   useEffect(() => {
     if (streamUrl || !rooms.length) return;
-    // 功耗：后台暂停开播状态轮询；切回前台由上面的 effect 立即补拉一次
-    let id: ReturnType<typeof setInterval> | null = null;
-    const start = () => { if (!id) id = setInterval(() => { checkStatuses(true); }, 30000); };
-    const stop = () => { if (id) { clearInterval(id); id = null; } };
-    if (AppState.currentState === 'active') start();
-    const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') start();
-      else stop();
-    });
-    return () => { sub.remove(); stop(); };
+    const id = setInterval(() => { checkStatuses(true); }, 30000);
+    return () => clearInterval(id);
   }, [rooms, streamUrl, checkStatuses]);
 
   // 切回前台时立即刷新开播状态（原 effect 只处理横屏锁复位）
@@ -482,7 +474,7 @@ export default function BilibiliLiveScreen() {
 
         {/* 登录画质提示：未登录时一次性告知（区别于换流提示，仅画质相关） */}
         {qualityHint ? (
-          <Animated.View nativeID="yaya.pip.overlay" collapsable={false} style={styles.qualityHintWrap} pointerEvents="none">
+          <Animated.View style={styles.qualityHintWrap} pointerEvents="none">
             <View style={styles.qualityHintPill}>
               <MaterialCommunityIcons name="account-key-outline" size={13} color="#ffd9e2" />
               <Text style={styles.qualityHintText} numberOfLines={2}>{qualityHint}</Text>
@@ -497,7 +489,7 @@ export default function BilibiliLiveScreen() {
 
   // 首屏（列表为空且加载中）显示居中转圈；刷新时列表保持不变，仅头部显示加载指示，避免闪屏
   return (
-    <GlassSurface radius={20} role="card" style={styles.container}>
+    <View style={styles.container}>
       <ScreenHeader title={t('B站直播')} right={
         loading ? (
           <ActivityIndicator color={palette.tint} />
@@ -505,8 +497,7 @@ export default function BilibiliLiveScreen() {
           <HeaderAction label={t('刷新状态')} onPress={() => checkStatuses(false)} />
         )
       } />
-      {status ? <Text style={[styles.status, { color: palette.labelSecondary, backgroundColor: 'transparent', borderColor: palette.hairline }]}>
-        {status}</Text> : null}
+      {status ? <Text style={[styles.status, { color: palette.labelSecondary, backgroundColor: palette.surface, borderColor: palette.hairline }]}>{status}</Text> : null}
       {fetchError ? (
         <TouchableOpacity
           activeOpacity={0.7}
@@ -529,14 +520,15 @@ export default function BilibiliLiveScreen() {
             progressBackgroundColor={palette.surface}
           />
         }
-        renderItem={({ item }) => {
+        renderItem={({ item, index }) => {
           const live = !!liveStatuses[item.roomId];
           const info = roomInfo[item.roomId];
           return (
-            <ScalePressable
+            <FadeInView delay={index < 12 ? 60 + index * 25 : 0} duration={360}>
+              <ScalePressable
                 activeOpacity={0.85}
                 pressedScale={0.97}
-                style={[styles.roomItem, { backgroundColor: 'transparent', borderColor: palette.hairline }]}
+                style={[styles.roomItem, { backgroundColor: palette.surface, borderColor: palette.hairline }]}
                 onPress={() => startWatch(item)}
               >
                 <View style={[styles.roomIcon, { backgroundColor: live ? palette.tintSoft : palette.fill2 }]}>
@@ -555,7 +547,8 @@ export default function BilibiliLiveScreen() {
                   </Text>
                 </View>
                 <StatusDot live={live} palette={palette} label={live ? t('直播中') : t('未开播')} />
-            </ScalePressable>
+              </ScalePressable>
+            </FadeInView>
           );
         }}
         ListEmptyComponent={
@@ -570,7 +563,7 @@ export default function BilibiliLiveScreen() {
         windowSize={7}
         removeClippedSubviews
       />
-    </GlassSurface>
+    </View>
   );
 }
 
@@ -583,7 +576,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     paddingHorizontal: 20,
     paddingVertical: 8,
-    borderRadius: 20,
+    borderRadius: 16,
   },
   retryBtnText: { fontSize: 13, fontWeight: '800' },
   playerPage: { flex: 1, backgroundColor: '#000' },
@@ -607,13 +600,13 @@ const styles = StyleSheet.create({
     maxWidth: '86%',
   },
   qualityHintText: { color: '#ffd9e2', fontSize: 12, fontWeight: '600', flexShrink: 1 },
-  playerError: { position: 'absolute', left: 16, right: 16, bottom: 110, padding: 12, borderRadius: 20, backgroundColor: '#1C1C1F' },
+  playerError: { position: 'absolute', left: 16, right: 16, bottom: 110, padding: 12, borderRadius: 16, backgroundColor: '#1C1C1F' },
   playerErrorText: { color: '#fff', fontSize: 12, lineHeight: 18 },
   playerActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
   webFallbackBtn: { borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' },
   webFallbackText: { fontSize: 12, fontWeight: '800' },
-  roomItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginHorizontal: 4, marginVertical: 4, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
-  roomIcon: { width: 56, height: 56, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 12, overflow: 'hidden' },
+  roomItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginHorizontal: 4, marginVertical: 4, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
+  roomIcon: { width: 56, height: 56, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 12, overflow: 'hidden' },
   roomInfo: { flex: 1, minWidth: 0 },
   roomName: { fontSize: 14, fontWeight: '700', lineHeight: 20 },
   roomId: { fontSize: 11, marginTop: 4 },

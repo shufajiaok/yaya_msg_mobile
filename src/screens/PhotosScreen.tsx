@@ -18,7 +18,6 @@ import { enqueueDownload } from '../services/downloads';
 import { usePalette, spacing, radii } from '../theme';
 import { useI18n } from '../i18n';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 function normalizeImageUrl(value: any): string {
   const direct = normalizeUrl(value);
@@ -172,8 +171,9 @@ export default function PhotosScreen() {
 
   const renderPhotoItem = useCallback(({ item, index }: { item: any; index: number }) => {
     const url = photoUrls[index] || deepFindImageUrl(item);
+    const delay = index < 12 ? 60 + index * 25 : 0;
     return (
-      <View style={{ flex: 1 }}>
+      <FadeInView delay={delay} distance={8} style={{ flex: 1 }}>
         <ScalePressable
           style={styles.photoCell}
           activeOpacity={0.9}
@@ -182,14 +182,14 @@ export default function PhotosScreen() {
           onLongPress={() => downloadPhoto(url)}
         >
           {url ? (
-            <NetworkImage source={{ uri: url }} style={[styles.photo, { backgroundColor: palette.fill3 }]} resizeMode="cover" thumbnail={600} />
+            <NetworkImage source={{ uri: url }} style={[styles.photo, { backgroundColor: palette.fill3 }]} resizeMode="cover" />
           ) : (
             <View style={[styles.photo, styles.photoFallback, { backgroundColor: palette.fill3 }]}>
               <MaterialCommunityIcons name="image-off-outline" size={20} color={palette.labelTertiary} />
             </View>
           )}
         </ScalePressable>
-      </View>
+      </FadeInView>
     );
   }, [downloadPhoto, palette, photoUrls]);
 
@@ -219,7 +219,7 @@ export default function PhotosScreen() {
       />
       <FadeInView delay={60} duration={300} style={{ flex: 1 }}>
         <View style={styles.pickerCard}>
-          <GlassSurface radius={20} role="card" style={[styles.pickerRow, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+          <View style={[styles.pickerRow, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
             <View style={[styles.avatar, { backgroundColor: palette.tintSoft }]}>
               {selectedMember ? (
                 <NetworkImage source={{ uri: selectedMember.avatar }} style={styles.avatarImg} resizeMode="cover" />
@@ -236,7 +236,7 @@ export default function PhotosScreen() {
               </Text>
             </View>
             <MaterialCommunityIcons name="chevron-down" size={20} color={palette.labelTertiary} />
-          </GlassSurface>
+          </View>
           <View style={styles.pickerBody}>
             <MemberPicker selectedMember={selectedMember} onSelect={loadPhotos} />
           </View>

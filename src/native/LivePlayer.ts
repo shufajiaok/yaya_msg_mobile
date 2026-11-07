@@ -48,7 +48,6 @@ export const LiveExoView = Platform.OS === 'android'
       url: string;
       /** 纯音频模式：不渲染视频画面，仅解码音频（上麦/电台流） */
       audioOnly?: boolean;
-      coverPortrait?: boolean;
       /** 暂停/恢复（原生 Exo 播放控制，统一播放器控制条使用） */
       paused?: boolean;
       onSize?: (e: { nativeEvent: LiveSizeEventData }) => void;
@@ -56,39 +55,6 @@ export const LiveExoView = Platform.OS === 'android'
       onError?: (e: { nativeEvent: { message: string } }) => void;
     }>('LiveExoView')
   : null;
-
-/**
- * 直播首帧尺寸（NativeModule 事件通道）。
- *
- * 为什么与 onSize 双通道：only-new-architecture（bridgeless）下 LiveExoView 的
- * View 事件经 UIManagerModule 派发，而该模块在新架构不存在 → 事件被静默丢弃，
- * 「画面已经在播但一直显示加载中」就是这么来的。原生侧现在同时走
- * NativeModule 的 RCTDeviceEventEmitter（bridgeless 可用）且首帧后补发两次。
- */
-export function onLiveFirstFrame(
-  cb: (payload: { url: string; width: number; height: number }) => void
-): () => void {
-  if (Platform.OS !== 'android') return () => {};
-  const sub = DeviceEventEmitter.addListener('LivePlayer:size', (e: any) => {
-    cb({
-      url: String(e?.url || ''),
-      width: Number(e?.width) || 0,
-      height: Number(e?.height) || 0,
-    });
-  });
-  return () => sub.remove();
-}
-
-/** 直播内核重试耗尽（NativeModule 事件通道，与 onError 互为兜底） */
-export function onLiveNativeError(
-  cb: (payload: { url: string; message: string }) => void
-): () => void {
-  if (Platform.OS !== 'android') return () => {};
-  const sub = DeviceEventEmitter.addListener('LivePlayer:error', (e: any) => {
-    cb({ url: String(e?.url || ''), message: String(e?.message || '') });
-  });
-  return () => sub.remove();
-}
 
 /** 媒体通知数据（MediaStyle：标题/封面/歌手/专辑/歌词/播放态/进度） */
 export interface RadioMediaInfo {
@@ -162,17 +128,11 @@ export function onRadioStopRequested(cb: () => void): () => void {
 }
 
 /** 媒体通知控制回调（播放/暂停、上一首、下一首、停止）：返回解绑函数 */
-export function onRadioControlRequested(cb: (action: 'play' | 'pause' | 'play_pause' | 'prev' | 'next' | 'stop' | 'seek' | 'favorite' | 'playlist', value?: number) => void): () => void {
+export function onRadioControlRequested(cb: (action: 'play' | 'pause' | 'play_pause' | 'prev' | 'next' | 'stop' | 'seek', value?: number) => void): () => void {
   if (Platform.OS !== 'android') return () => {};
   const sub = DeviceEventEmitter.addListener('RadioControlRequested', (e: any) => {
     const a = String(e?.action || '');
-    // 白名单必须与原生 emit 的动作一致：早期只放了传输控制，
-    // favorite/playlist 被过滤掉 → 系统卡上点了没反应（2026-10-18 修复）
-    if (
-      a === 'play' || a === 'pause' || a === 'play_pause' || a === 'prev'
-      || a === 'next' || a === 'stop' || a === 'seek'
-      || a === 'favorite' || a === 'playlist'
-    ) {
+    if (a === 'play' || a === 'pause' || a === 'play_pause' || a === 'prev' || a === 'next' || a === 'stop' || a === 'seek') {
       cb(a as any, Number(e?.value) || 0);
     }
   });

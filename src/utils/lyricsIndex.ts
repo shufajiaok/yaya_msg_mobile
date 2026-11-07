@@ -1,5 +1,4 @@
 import { LyricsMatcher, LyricEntry } from './lyricsMatcher';
-import { parseMaybeJson } from './data';
 import { normalizeSong, normalizeArtist, normalizeGroup } from './normalize';
 import { fetchWithTimeout } from './network';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -20,10 +19,7 @@ export function buildLyricEntries(raw: RawIndexEntry[]): LyricEntry[] {
   const dedup = new Map<string, LyricEntry>();
   for (const item of raw) {
     if (!item.songTitle || !item.path) continue;
-    // ⚠️ 去重键必须含路径：同名歌曲常有「公演版/专辑版」两套 LRC，
-    // 早期用 group-songTitle 去重会把其中一版直接丢掉 → 播放另一版时时间轴整体错位
-    // （用户反馈「特定几首歌歌词对不上」的根因）。
-    const id = String(item.path);
+    const id = `${item.group}-${item.songTitle}`;
     if (dedup.has(id)) continue;
     const ns = normalizeSong(item.songTitle);
     const na = normalizeArtist(item.group);
@@ -68,7 +64,7 @@ export async function getLyricsMatcher() {
 
   // 2) 网络拉取 + 写缓存
   const resp = await fetchWithTimeout('https://yaya-data.pages.dev/lyrics-index.json', {}, 10000);
-  const raw: RawIndexEntry[] = parseMaybeJson(await resp.text()) || [];
+  const raw: RawIndexEntry[] = await resp.json();
   const entries = buildLyricEntries(raw);
   const matcher = new LyricsMatcher(entries);
   cachedMatcher = { entries, matcher };

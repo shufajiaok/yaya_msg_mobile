@@ -24,7 +24,6 @@ import ScreenHeader from '../components/ScreenHeader';
 import { HeaderAction } from '../components/HeaderAction';
 import { usePalette } from '../theme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from '../components/GlassSurface';
 
 function normalizeTalks(res: any): any[] {
   return unwrapList(res, ['content.data', 'content.list', 'data.data', 'data.list', 'list']);
@@ -174,7 +173,7 @@ export default function AudioProgramsScreen() {
       } />
 
       {playUrls[urlIndex] ? (
-        <GlassSurface radius={20} role="card" style={[styles.playerBar, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <View style={[styles.playerBar, { backgroundColor: palette.surface, borderColor: palette.hairline }]}>
           <Text style={[styles.playerTitle, { color: palette.label }]} numberOfLines={1}>
             {playing?.title || t('正在播放')}
           </Text>
@@ -201,7 +200,7 @@ export default function AudioProgramsScreen() {
               ) : null}
             </PlayerScreen>
           </View>
-        </GlassSurface>
+        </View>
       ) : null}
 
       {status && !loading ? <Text style={[styles.status, { color: palette.labelSecondary }]}>{status}</Text> : null}
@@ -246,10 +245,11 @@ export default function AudioProgramsScreen() {
             ) : null
           }
           ListFooterComponent={null}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             const isActive = String(active || '') === String(item.talkId || item.id);
             return (
-              <ScalePressable
+              <FadeInView delay={index < 12 ? 60 + index * 25 : 0} distance={8}>
+                <ScalePressable
                   style={[styles.progItem, isActive && { backgroundColor: palette.tintSoft }]}
                   onPress={() => onItemPress(item)}
                   pressedScale={0.97}
@@ -277,7 +277,8 @@ export default function AudioProgramsScreen() {
                       <Text style={[styles.rowDuration, { color: palette.labelTertiary }]}>{programDuration(item)}</Text>
                     ) : null}
                   </View>
-              </ScalePressable>
+                </ScalePressable>
+              </FadeInView>
             );
           }}
         />
@@ -360,12 +361,12 @@ function AudioSkeletonList() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  playerBar: { marginHorizontal: 16, marginTop: 8, padding: 12, borderRadius: 20, borderWidth: StyleSheet.hairlineWidth },
+  playerBar: { marginHorizontal: 16, marginTop: 8, padding: 12, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth },
   playerTitle: { fontSize: 14, fontWeight: '800', marginBottom: 8 },
   audioPlayer: { height: 48, width: '100%' },
   switchLineBtn: {
     position: 'absolute', right: 8, bottom: 10, zIndex: 20,
-    backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 4,
+    backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4,
   },
   switchLineText: { color: '#fff', fontSize: 10 },
   status: { marginHorizontal: 16, marginTop: 8, fontSize: 12, textAlign: 'center' },
@@ -377,13 +378,13 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
     marginBottom: 12,
     padding: 12,
-    borderRadius: 20,
+    borderRadius: 16,
     backgroundColor: 'transparent',
   },
   heroCover: {
     width: 96,
     height: 96,
-    borderRadius: 20,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
@@ -396,7 +397,7 @@ const styles = StyleSheet.create({
   heroPlayBtn: {
     width: 48,
     height: 48,
-    borderRadius: 22,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -407,7 +408,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
     marginVertical: 4,
     padding: 12,
-    borderRadius: 20,
+    borderRadius: 16,
   },
   iconWrap: {
     width: 48,
