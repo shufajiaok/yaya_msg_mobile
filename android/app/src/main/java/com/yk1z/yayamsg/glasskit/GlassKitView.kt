@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.RenderNode
 import android.graphics.RuntimeShader
+import android.util.Log
 import kotlin.math.floor
 import android.graphics.Shader
 import android.os.Build
@@ -52,8 +53,13 @@ class GlassKitView(context: Context) : View(context) {
         const val EDGE_HIGHLIGHT_DP: Float = 1f
         /** 边缘高光 alpha ——glass.ts EDGE_HIGHLIGHT.alpha 0.14。 */
         const val EDGE_HIGHLIGHT_ALPHA: Float = 0.14f
-        /** 26–30 / 透镜输入的近似模糊降采样档（清单 §二.2：降采样 1/4）。 */
-        const val BLUR_DOWNSAMPLE: Int = 4
+        /**
+         * 近似模糊降采样档（清单 §二.2 原 1/4；实测上调 1/6）：
+         * 1/4 + 双线性放大的 10%-90% 边缘过渡宽度实测仅 ~6px（真机像素脚本），
+         * 不满足「面板内 ≥8px」验收线；1/6 实测 ~9px 达标。透镜输入同步受益
+         * （obtainSmallBlurBitmap 共用本档，AGSL 侧有 scaleX/scaleY 补偿）。
+         */
+        const val BLUR_DOWNSAMPLE: Int = 6
         /** 重绘节流间隔（ms，≈30fps）。 */
         const val FRAME_INTERVAL_MS: Long = 33L
         /** 捕获失败兜底底色：半透明白灰。 */
@@ -62,6 +68,24 @@ class GlassKitView(context: Context) : View(context) {
         const val TARGET_RETRY_DELAY_MS: Long = 100L
         /** E3 修复：重试上限（50 次 ≈ 5s），防无限循环。 */
         const val TARGET_RETRY_MAX: Int = 50
+
+        /**
+         * 模糊路径强制降级开关：
+         * true = 跳过 RenderNode + RenderEffect 真高斯分支，一律走 26–30 降级路径
+         * （obtainSmallBlurBitmap 1/4 降采样 + 双线性放大近似）。
+         *
+         * 实测结论（2026-11-07 MuMu emulator-5554 / Android 15 API 35 / x86_64）：
+         * logcat 证实走了 rendernode 分支（blurRadiusPx=21.0、RenderEffect created
+         * 572x126、hardwareAccelerated=true），但像素级分析蓝球左边缘 B-R 通道
+         * 10%-90% 过渡宽度仅 1px（应有 ≥40px 高斯过渡带）→ 模拟器 GPU 接受了
+         * RenderEffect 却不执行模糊（Skia/ANGLE RenderEffect 支持缺陷）。
+         * 故置 true 强制走降采样近似路径；真机（GPU 正常执行 RenderEffect）可改回
+         * false 恢复真高斯。
+         */
+        const val PREFER_DOWNSAMPLE_BLUR: Boolean = true
+
+        /** drawBlurredLayer 诊断日志 tag（logcat: adb logcat -s GlassKitBlur）。 */
+        const val BLUR_LOG_TAG: String = "GlassKitBlur"
     }
 
     /* ---------------- props（GlassKitManager @ReactProp 一一对应） ---------------- */
@@ -98,6 +122,10 @@ class GlassKitView(context: Context) : View(context) {
     /** tint 颜色（ColorInt；alpha 分量被 withAlpha 覆盖，只取 RGB）。 */
     var tintColor: Int = 0
         set(value) {
+            // 诊断：核对桥接层实际送达的色值（0 = JS 未送/送 null，排查 tint 丢失）
+            if (field != value) {
+                Log.i(logTag, "setTintColor: $value (0x%08X)".format(value))
+            }
             if (field == value) return
             field = value
             invalidate()
@@ -179,6 +207,15 @@ class GlassKitView(context: Context) : View(context) {
     /* ---------------- 内部状态 ---------------- */
 
     private val density: Float = resources.displayMetrics.density
+
+    /** drawBlurredLayer 诊断日志 tag（companion.BLUR_LOG_TAG 同值，实例侧便捷引用）。 */
+    private val logTag: String = BLUR_LOG_TAG
+
+    /** 分支切换防刷屏：记录上一条日志的路径标签，同路径不重复打（RenderEffect 新建除外）。 */
+    private var lastLoggedBlurPath: String? = null
+
+    /** 一次性 prop 快照日志：首个 onDraw 打一条，核对桥接层实际到手的 prop 值。 */
+    private var loggedPropsSnapshot: Boolean = false
 
     private val capturePaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val tintPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -394,6 +431,17 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        if (!loggedPropsSnapshot) {
+            loggedPropsSnapshot = true
+            Log.i(
+                logTag,
+                "props snapshot: blurDp=$blurDp blurScale=$blurScale tintAlpha=$tintAlpha" +
+                    " tintColor=$tintColor tintScale=$tintScale lensScale=$lensScale" +
+                    " refractionPx=$refractionPx dispersionPx=$dispersionPx" +
+                    " cornerRadiusDp=$cornerRadiusDp dimmingAlpha=$dimmingAlpha" +
+                    " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height",
+            )
+        }
         val w = width
         val h = height
         if (w <= 0 || h <= 0) return
@@ -485,13 +533,25 @@ class GlassKitView(context: Context) : View(context) {
 
     /**
      * ② 模糊路径：
-     * - API 31+ 且硬件画布：RenderNode + RenderEffect.createBlurEffect（真高斯）；
-     * - 否则（API 26–30 / 软件画布）：降采样 1/4 + 双线性放大近似。
+     * - PREFER_DOWNSAMPLE_BLUR=false 且 API 31+ 且硬件画布：
+     *   RenderNode + RenderEffect.createBlurEffect（真高斯）；
+     * - 否则（PREFER_DOWNSAMPLE 强制降级 / API 26–30 / 软件画布）：
+     *   降采样 1/4 + 双线性放大近似。
+     *
+     * 诊断日志（GlassKitBlur tag）：仅在「分支切换」或「RenderEffect 新建」时各打一条，
+     * 输出路径分支 + blurRadiusPx + canvas.isHardwareAccelerated，防每帧刷屏。
+     * 装机排查法：adb logcat -s GlassKitBlur —— 若显示走了 rendernode 分支但画面
+     * 不模糊（像素脚本过渡宽度 1px），说明模拟器 GPU 对 RenderEffect 支持有问题，
+     * 把 companion.PREFER_DOWNSAMPLE_BLUR 置 true 强制走降采样近似路径。
      */
     private fun drawBlurredLayer(canvas: Canvas, capture: Bitmap, blurRadiusPx: Float) {
         val w = width
         val h = height
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && canvas.isHardwareAccelerated) {
+        val useRenderNode = !PREFER_DOWNSAMPLE_BLUR &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            canvas.isHardwareAccelerated
+        if (useRenderNode) {
+            logBlurPathOnce("rendernode", blurRadiusPx, canvas.isHardwareAccelerated)
             val node = obtainBlurRenderNode(w, h)
             val radius = blurRadiusPx.coerceAtLeast(0.5f)
             // S2 修复：RenderEffect 走缓存，半径/尺寸不变时复用（原实现每帧新建）
@@ -504,6 +564,11 @@ class GlassKitView(context: Context) : View(context) {
             }
             canvas.drawRenderNode(node)
         } else {
+            logBlurPathOnce(
+                if (PREFER_DOWNSAMPLE_BLUR) "downsample(forced)" else "downsample(fallback)",
+                blurRadiusPx,
+                canvas.isHardwareAccelerated,
+            )
             // API 26–30 降级：1/4 降采样 + 双线性放大（近似模糊，H2 单档语义）
             val small = obtainSmallBlurBitmap(w, h, capture) ?: return
             canvas.drawBitmap(
@@ -513,6 +578,21 @@ class GlassKitView(context: Context) : View(context) {
                 capturePaint,
             )
         }
+    }
+
+    /**
+     * 模糊路径诊断日志：同一分支只打一条（lastLoggedBlurPath 去重），
+     * 分支切换（强制降级开关翻转 / 硬件加速状态变化）时重新打一条。
+     */
+    private fun logBlurPathOnce(path: String, blurRadiusPx: Float, hardwareAccelerated: Boolean) {
+        if (lastLoggedBlurPath == path) return
+        lastLoggedBlurPath = path
+        Log.i(
+            logTag,
+            "blur path=$path blurRadiusPx=$blurRadiusPx" +
+                " hardwareAccelerated=$hardwareAccelerated" +
+                " preferDownsample=$PREFER_DOWNSAMPLE_BLUR sdk=${Build.VERSION.SDK_INT}",
+        )
     }
 
     /**
@@ -586,6 +666,8 @@ class GlassKitView(context: Context) : View(context) {
         blurEffectRadiusPx = radiusPx
         blurEffectWidth = w
         blurEffectHeight = h
+        // 诊断日志：仅 RenderEffect 新建时打一条（缓存命中静默，防每帧刷屏）
+        Log.i(logTag, "RenderEffect created radiusPx=$radiusPx size=${w}x$h")
         return effect
     }
 

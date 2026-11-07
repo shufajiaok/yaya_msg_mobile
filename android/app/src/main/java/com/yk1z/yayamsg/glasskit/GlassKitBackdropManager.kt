@@ -1,18 +1,68 @@
 package com.yk1z.yayamsg.glasskit
 
-import android.widget.FrameLayout
-import com.facebook.react.uimanager.SimpleViewManager
+import android.content.Context
+import android.view.ViewGroup
 import com.facebook.react.uimanager.ThemedReactContext
+import com.facebook.react.uimanager.ViewGroupManager
+
+/**
+ * 背景容器原生视图：最小 ViewGroup 子类。
+ *
+ * ⚠️ 不能用 FrameLayout（裸 widget 容器）：RN 把 blob 等内容子视图 addView 进来时
+ * LayoutParams 是 FrameLayout 默认 WRAP_CONTENT，窗口内任何一次 Android 原生
+ * measure pass 都会触发 FrameLayout.onMeasure 用 LayoutParams 重新量子视图——
+ * 裸 View.getDefaultSize() 在 AT_MOST spec 下直接返回父容器尺寸（Android 经典坑：
+ * 裸 View 的 WRAP_CONTENT 等效 MATCH_PARENT），子视图被拉伸成全屏。
+ * 实测复现：120dp 黄色圆渲染成 1080×1920 巨椭圆（MuMu emulator-5554）。
+ *
+ * 这里 onLayout no-op + 不重写 onMeasure（View 默认只量自身、不碰子视图），
+ * 子视图 frame 完全由 Yoga 经 NativeViewHierarchyManager.updateLayout 的
+ * measure(EXACTLY) + layout() 驱动——与 RN 自家 ReactViewGroup 同一策略。
+ *
+ * 挂载即注册（capture 竞态修复）：
+ * onAttachedToWindow 主动调 GlassCaptureEngine.register(getId(), this)——旧实现唯一
+ * 注册点是 Manager.onAfterUpdateTransaction，若注册那一刻 getId() 还是 NO_ID（id 未
+ * 定稿）且之后无 props 更新，onAfterUpdateTransaction 永不再触发 → 注册表永远没有
+ * 该 backdrop → GlassKitView E3 重试（100ms×50 次≈5s）耗尽 → 永久 FALLBACK_COLOR
+ * 乳白兜底（时序竞态，重启后随机复现）。attach 生命周期必然发生且此时点 RN 已把
+ * tag 写入 id（createViewInstance → setId(tag) 均在 attach 前完成），「挂载即注册」
+ * 彻底消除该竞态。NO_ID 仍由 GlassCaptureEngine.register 拒绝，行为不变。
+ * onDetachedFromWindow 对称注销，防卸载后的跨窗口弱引用滞留；Manager.onAfterUpdateTransaction
+ * 的注册保留作双保险（SparseArray put 幂等覆盖，晚到也无害）。
+ */
+class GlassKitBackdropView(context: Context) : ViewGroup(context) {
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        // no-op：布局全权交给 Yoga（见类注释），禁止任何 Android 侧重排
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // 挂载即注册：此时 id 已由 RN 定稿（NO_ID 由 register 按原语义拒绝）
+        GlassCaptureEngine.register(getId(), this)
+    }
+
+    override fun onDetachedFromWindow() {
+        // 对称注销（unregister 按 tag remove，未注册时为空操作，幂等安全）
+        GlassCaptureEngine.unregister(getId())
+        super.onDetachedFromWindow()
+    }
+}
 
 /**
  * GlassKitBackdrop 的 ViewManager（引擎重写清单 §一 / §三 #5）。
  *
- * 背景容器本身无任何渲染行为：空 FrameLayout，只作为采集注册表的 key——
- * onAfterUpdateTransaction 时把自身（getId() 为 tag）注册进 GlassCaptureEngine，
- * onDropViewInstance 时注销，防泄漏。
+ * 背景容器本身无任何渲染行为：空容器，只作为采集注册表的 key——
+ * 注册主路径是视图自身生命周期（onAttachedToWindow 挂载即注册，见
+ * GlassKitBackdropView 类注释），本 Manager 的 onAfterUpdateTransaction 注册
+ * 保留作双保险（幂等：GlassCaptureEngine.register 内部 SparseArray put 覆盖，
+ * 同 tag 以后者为准）。onDropViewInstance 注销，防泄漏。
  * JS 侧用 findNodeHandle(backdropRef) 拿 tag 传给 GlassKitView 的 backdropTag。
+ *
+ * ⚠️ 必须继承 ViewGroupManager（而非 SimpleViewManager）：本容器带子节点
+ * （渐变/色块等内容层），RN manageChildren 对有子视图的组件强转 ViewGroupManager，
+ * 用 SimpleViewManager 会在首次渲染时 ClassCastException 崩溃（真机已复现）。
  */
-class GlassKitBackdropManager : SimpleViewManager<FrameLayout>() {
+class GlassKitBackdropManager : ViewGroupManager<GlassKitBackdropView>() {
 
     companion object {
         const val NAME: String = "GlassKitBackdrop"
@@ -20,16 +70,16 @@ class GlassKitBackdropManager : SimpleViewManager<FrameLayout>() {
 
     override fun getName(): String = NAME
 
-    override fun createViewInstance(reactContext: ThemedReactContext): FrameLayout =
-        FrameLayout(reactContext)
+    override fun createViewInstance(reactContext: ThemedReactContext): GlassKitBackdropView =
+        GlassKitBackdropView(reactContext)
 
-    override fun onAfterUpdateTransaction(view: FrameLayout) {
+    override fun onAfterUpdateTransaction(view: GlassKitBackdropView) {
         super.onAfterUpdateTransaction(view)
         // props/布局事务完成后 id 已定稿，此时注册（id 未定时 register 会按 NO_ID 拒绝）
         GlassCaptureEngine.register(view.id, view)
     }
 
-    override fun onDropViewInstance(view: FrameLayout) {
+    override fun onDropViewInstance(view: GlassKitBackdropView) {
         GlassCaptureEngine.unregister(view.id)
         super.onDropViewInstance(view)
     }

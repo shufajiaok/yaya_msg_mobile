@@ -56,11 +56,11 @@ object GlassCaptureEngine {
      * 采集 targetView 子树中 glassView 覆盖的区域到 outBitmap。
      *
      * 坐标对齐：用双方 getLocationOnScreen 差值算出玻璃在背景坐标系内的偏移
-     * (offsetX, offsetY)，canvas.translate(-offsetX, -offsetY) 后绘制整棵背景子树，
-     * outBitmap 的 (0,0) 即玻璃左上角对应的背景内容。
+     * (offsetX, offsetY)，canvas 预平移对齐后绘制整棵背景子树，outBitmap 的
+     * (0,0) 即玻璃左上角对应的背景内容。裁剪在变换之后进行（见方法内修复注释）。
      *
      * 降采样：outBitmap 尺寸由调用方按 MAX_CAPTURE_WIDTH_PX 预算好；本方法按
-     * 「目标坐标 = 位图坐标 / captureScale」的关系先 clip 再 translate/scale。
+     * 「位图坐标 = scale × (背景坐标 − offset)」的关系先平移缩放再裁剪。
      *
      * @return false 表示无法采集（视图未布局 / 尺寸为 0 / 参数不一致），调用方应画兜底底色。
      */
@@ -92,12 +92,20 @@ object GlassCaptureEngine {
         val canvas = Canvas(outBitmap)
         canvas.save()
         try {
-            // 1) 先在目标坐标系内裁出玻璃覆盖区（此时矩阵为恒等，clip 用目标坐标）
-            canvas.clipRect(offsetX, offsetY, offsetX + glassWidth, offsetY + glassHeight)
-            // 2) 平移使玻璃左上角落到原点；3) 再缩放到降采样尺寸
-            //    预 concatenation 语义：先 translate 后 scale ⇒ 点 p 映射为 scale * (p - offset)
+            // ⚠️ 修复（capture 空内容根因，真机 logcat probe 实证 2026-11-07）：
+            // Canvas 的初始 clip 恒为位图边界 (0,0,bw,bh)（设备空间）。旧实现
+            // 「先在背景坐标系 clipRect(offset…) 再平移缩放」——该矩形与位图边界
+            // 几乎必然无交集（offset 是玻璃在背景中的屏幕位置，y 通常数百像素起，
+            // 而位图高度只有玻璃自身高度）→ clip 求交后画布为空 → targetView.draw
+            // 全部被裁掉 → capture 位图恒全透明（capture() 仍返回 true）→ 模糊 /
+            // 透镜全部输入空内容，面板呈「透明无效果」假象。
+            // 修正顺序：先平移缩放（把玻璃覆盖区左上角对齐到画布原点并缩放到位图
+            // 尺寸），再在带变换的坐标系里 clip 玻璃覆盖区矩形（此时该矩形经矩阵
+            // 变换后恰好就是位图边界，交集正确）。映射关系：
+            //   背景坐标 q → 位图坐标 scale × (q − offset)，与原设计一致。
             canvas.translate(-offsetX, -offsetY)
             canvas.scale(captureScaleX, captureScaleY)
+            canvas.clipRect(offsetX, offsetY, offsetX + glassWidth, offsetY + glassHeight)
             targetView.draw(canvas)
         } finally {
             canvas.restore()
