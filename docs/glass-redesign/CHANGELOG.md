@@ -305,3 +305,21 @@
 - H1（tint≤0.12 + floor）/ H2（canBlur≥31 / canLens≥33）完好；`tsc --noEmit` exit 0；guard 硬规则 0 命中、7 项基线计数无新增。
 
 **遗留登记：** a) blurDp/blurScale setter 无 isFinite 防护（风格不一致，非阻断）；b) GlassSlider 未处理 onPanResponderTerminate（外观/体验项）；c) fillWidth 与 thumb 末端 ~12px 视觉偏差；d) 真机 GPU 若正常执行 RenderEffect 应置 `PREFER_DOWNSAMPLE_BLUR=false` 恢复真高斯（待真机实测）；e) 诊断日志（GlassKitBlur tag）保留，如需静默后续移除。
+
+## 玻璃迭代 it.2（2026-11-07 晚，用户真机反馈 + 指令「开始迭代」「组件可拖动」「版本号打上」「圆角/大小可调」「滑块跳变」）
+
+> 版本 bump：app.json + build.gradle `2.7.5 → 2.7.6`（versionCode 2075008 → 2076001），测试页状态行显示 `v2.7.6`（expo-constants 读 expoConfig.version）。
+
+| # | 用户反馈 | 真根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 模糊/柔光未生效 + 锯齿 | ① `PREFER_DOWNSAMPLE_BLUR=true` 是 MuMu 专属结论，真机被连累强制走 1/6 降采样双线性放大 → 锯齿、模糊观感差；② **glowScale 从未进引擎**（高光恒 1dp/0.14，GlassKitView.tsx 注释明写「不进引擎」） | ① 降采样开关改为 JS prop `forceDownsample`（真机默认 RenderEffect 真高斯，模拟器由测试页开关强制）；② glowScale 接线进引擎：高光宽 = 1dp×glowScale（clamp 0.5–4dp）、alpha = 0.14×glowScale（clamp 0–1） |
+| 2 | 滑块拖动不断跳变 | thumb 参与了 hit-test：Android 触摸序列 locationX 固定相对**按下时命中视图**，thumb 自身在动 → 坐标参考系随拖动漂移 → 反复跳变 | track/fill/thumb 全部 `pointerEvents="none"`，触摸目标恒为容器；顺带修 fill 末端 ~12px 偏差（fill 宽对齐 thumb 中心） |
+| 3 | 观察不方便 | — | 四块面板全部可拖动（DraggableGlass：PanResponder onStart 接管 + transform translate，采集随 PreDraw 自动跟随）；测试页新增圆角倍率（0–3）/面板大小（0.5–2）滑块、采样路径开关 |
+
+**真机验证（realme RMX3888 / API 34，arm64 实装 + adb 实测）：**
+- RenderEffect 真高斯默认生效：粉球面板内弥散模糊、面板外锐利，**锯齿消失**（it2_initial.png 目视 + 对比明确）；
+- 面板拖动：swipe (+220,+180) → Hero bounds 位移 (+219,+179)，精确一致，其余面板不动；
+- 页面结构：v2.7.6 版本行 / 采样路径行 / 6 行滑块（四倍率+圆角+大小）/ 双开关全部到位；
+- 守卫：glass-api-access 基线 13→14（桥接层 glowScale 订阅，批准更新），其余计数不变，EXIT=0；typecheck exit 0。
+
+**文件（7）：** `GlassKitView.kt` / `GlassKitManager.kt` / `GlassKitView.tsx` / `GlassSlider.tsx` / `GlassTestScreen.tsx` / `glass-guard.baseline.json` / `app.json` + `android/app/build.gradle`（版本位）。

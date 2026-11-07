@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-07T09:36:55.247Z",
-  "note": "P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。glass-api-access 基线 13（2026-11-07 用户批准的首次接线）：引擎桥接层 src/native/GlassKitView.tsx 12 处 + 玻璃测试页 src/screens/GlassTestScreen.tsx 1 处（useGlassStore 订阅）；再有任何 .tsx 玻璃 API 接线都算新增。方案文档写 378 处硬编码圆角，工作副本实测见 hardcoded-border-radius。",
+  "generatedAt": "2026-11-07T14:50:34.881Z",
+  "note": "P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。方案文档写 378 处硬编码圆角，工作副本实测见 hardcoded-border-radius。glass-api-access（R5/S3）基线 0：P0 零接入，任何 .tsx 层玻璃 API 接线都算新增。",
   "counts": {
     "inline-rgba-glass-bg": 91,
     "blur-view": 5,
@@ -9,7 +9,7 @@
     "font-size-10": 29,
     "font-weight-invalid": 101,
     "surface-glass-naming": 15,
-    "glass-api-access": 13
+    "glass-api-access": 14
   },
   "contentLayerFiles": [
     "src/screens/FollowedRoomsScreen.tsx"
