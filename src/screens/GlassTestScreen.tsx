@@ -9,7 +9,8 @@
  * 结构：
  * - GlassKitBackdrop（absoluteFill）：彩色渐变 + 色块（被玻璃采集的内容层）；
  * - 前景层：标题、4 块不同参数玻璃面板（hero / chip / toolbar / clear+压暗）、
- *   四倍率步进控制（±0.1，按 SCALE_RANGES 夹取）、返回主界面按钮。
+ *   四倍率滑块控制（零依赖 GlassSlider，拖动实时写 useGlassStore，按 SCALE_RANGES
+ *   夹取）、返回主界面按钮。
  *
  * ⚠️ 本页为临时验证页：路由经 GLASS_TEST_FIRST 临时首屏开关进入（navigation/index.tsx），
  * 验证完成后改回 false 即恢复原首屏，本页路由保留可随时再进。
@@ -22,7 +23,6 @@ import {
   findNodeHandle,
   Platform,
   Pressable,
-  processColor,
   ScrollView,
   StyleSheet,
   Switch,
@@ -33,6 +33,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import GlassKitView from '../native/GlassKitView';
+import GlassSlider from '../components/GlassSlider';
 import { canBlur, canLens, SCALE_RANGES, useGlassStore } from '../theme/glass';
 import { radii } from '../theme/radii';
 import { typography } from '../theme/typography';
@@ -40,39 +41,37 @@ import { typography } from '../theme/typography';
 /** 临时首屏开关 companion：见 src/navigation/index.tsx 顶部同名常量（同一布尔口径）。 */
 export const GLASS_TEST_ROUTE = 'GlassTest';
 
-const STEP = 0.1;
-
-/** tint 色值：契约要求 processColor 后的 Int（GlassKitView.tsx :8/:42）。
- *  '#DCE6FF' 为普通 hex，processColor 返回 number，此处断言收窄。 */
-const PANEL_TINT = (processColor('#DCE6FF') as number) ?? 0;
+/** tint 色值（Bug 修复：旧架构 Paper 桥接对 customType="Color" 的 prop 会在 JS 渲染器
+ *  里自动执行一次 processColor（getNativeComponentAttributes 的 validAttributes，
+ *  case 'Color': return processColor）。若 JS 侧再传 processColor 后的数字会被
+ *  **二次 processColor**：normalizeColor(负数 ColorInt) 返回 null → prop 被整帧丢弃
+ *  → 原生 tintColor 恒为 0，tint 层永不渲染（真机 logcat + 像素取证实证）。
+ *  所以旧架构下必须传**原始字符串**，让桥接层做唯一一次 processColor。 */
+const PANEL_TINT = '#DCE6FF';
 
 function clampScale(key: keyof typeof SCALE_RANGES, next: number): number {
   const range = SCALE_RANGES[key];
   return Math.min(range.max, Math.max(range.min, Number(next.toFixed(2))));
 }
 
-/** 单行步进控制：label + 当前值 + [-]/[+]（±0.1，SCALE_RANGES 夹取）。 */
-function ScaleRow(props: {
+/** 单行滑块控制：label 左 / 滑块中(flex) / 数值右（toFixed(2)，SCALE_RANGES 夹取）。 */
+function ScaleSliderRow(props: {
   label: string;
   value: number;
+  scaleKey: keyof typeof SCALE_RANGES;
   onChange: (next: number) => void;
 }) {
+  const range = SCALE_RANGES[props.scaleKey];
   return (
     <View style={styles.row}>
       <Text style={styles.rowLabel}>{props.label}</Text>
+      <GlassSlider
+        value={props.value}
+        min={range.min}
+        max={range.max}
+        onChange={props.onChange}
+      />
       <Text style={styles.rowValue}>{props.value.toFixed(2)}</Text>
-      <Pressable
-        style={styles.stepButton}
-        onPress={() => props.onChange(props.value - STEP)}
-      >
-        <Text style={styles.stepButtonText}>−</Text>
-      </Pressable>
-      <Pressable
-        style={styles.stepButton}
-        onPress={() => props.onChange(props.value + STEP)}
-      >
-        <Text style={styles.stepButtonText}>＋</Text>
-      </Pressable>
     </View>
   );
 }
@@ -195,24 +194,28 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             <Text style={styles.rowLabel}>模糊总开关</Text>
             <Switch value={blurOn} onValueChange={setBlurOn} />
           </View>
-          <ScaleRow
+          <ScaleSliderRow
             label="blurScale（模糊倍率）"
             value={blurScale}
+            scaleKey="blurScale"
             onChange={(next) => useGlassStore.setState({ blurScale: clampScale('blurScale', next) })}
           />
-          <ScaleRow
+          <ScaleSliderRow
             label="tintScale（着色倍率）"
             value={tintScale}
+            scaleKey="tintScale"
             onChange={(next) => useGlassStore.setState({ tintScale: clampScale('tintScale', next) })}
           />
-          <ScaleRow
+          <ScaleSliderRow
             label="lensScale（透镜倍率）"
             value={lensScale}
+            scaleKey="lensScale"
             onChange={(next) => useGlassStore.setState({ lensScale: clampScale('lensScale', next) })}
           />
-          <ScaleRow
+          <ScaleSliderRow
             label="glowScale（柔光倍率）"
             value={glowScale}
+            scaleKey="glowScale"
             onChange={(next) => useGlassStore.setState({ glowScale: clampScale('glowScale', next) })}
           />
         </View>
@@ -246,13 +249,9 @@ const styles = StyleSheet.create({
   controlCard: { borderRadius: radii.lg, backgroundColor: '#1a2027', opacity: 0.94, padding: 14 },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   row: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
-  rowLabel: { flex: 1, fontSize: 13, color: '#e6ebf2' },
+  // 不设 flex:1（行内滑块组件自身 flex:1 占据中段）；switchRow 内由 space-between 撑开
+  rowLabel: { fontSize: 13, color: '#e6ebf2', marginRight: 8 },
   rowValue: { width: 52, fontSize: 13, color: '#8fd3ff', textAlign: 'right' },
-  stepButton: {
-    width: 40, height: 32, marginLeft: 8, borderRadius: radii.sm,
-    backgroundColor: '#2a323c', alignItems: 'center', justifyContent: 'center',
-  },
-  stepButtonText: { fontSize: 16, color: '#ffffff' },
   backButton: {
     marginTop: 18, marginBottom: 40, height: 48, borderRadius: radii.md,
     backgroundColor: '#2a323c', alignItems: 'center', justifyContent: 'center',
