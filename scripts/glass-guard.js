@@ -13,8 +13,11 @@
  *   - 硬规则（违反即失败，与基线无关）：内容层保护、失效旧参数、引擎硬编码色、theme 内 10sp / 非法字重。
  *   - 基线规则（只允许「不新增」，不要求 P0 批量改 30 个页面）：
  *     R1 内联 rgba(...) 玻璃底色 / R2 BlurView / R3 硬编码 borderRadius /
- *     R4 内容层内的玻璃组件 / R6 10sp / R7 非法字重 / R9 surfaceGlass* 命名。
+ *     R4 内容层内的玻璃组件 / R5 玻璃 API 在 .tsx 的接入（S3）/ R6 10sp /
+ *     R7 非法字重 / R9 surfaceGlass* 命名。
  *     374 处既有硬编码圆角（方案文档写 378，差异见 CHANGELOG）在基线中登记，P1–P3 分批收敛。
+ *     R5 基线为 0：P0 零接入；QA 实验 C 证伪「普通页面仅 import GlassSurface 会被放行」，
+ *     故按「总数基线、只拦新增」把四个玻璃 API 符号纳入统计，P1 起任何接线都必须显式走评审。
  *
  * 「禁止内联清单」的具体数值（03 §3.5 末段）P0 只登记、不改页面，见 LEGACY_INLINE_VALUES。
  */
@@ -44,6 +47,8 @@ const LEGACY_INLINE_VALUES = [
 const SCAN_EXTENSIONS = ['.ts', '.tsx'];
 const EXCLUDED_DIRS = ['__tests__', 'node_modules', 'src_backup_20260513211107'];
 const GLASS_USAGE_RE = /\b(?:BlurView|GlassSurface|resolveGlass|expo-blur)\b/;
+/** S3：玻璃 API 四符号，统计 src 目录下 .tsx 的「新增接入」（P0 基线 0） */
+const GLASS_API_RE = /\b(?:GlassSurface|resolveGlass|useGlassStore|useGlassBudget)\b/;
 const CONTENT_LAYER_HINTS = /Danmaku|Bubble|Message|Card|Rank|Row|Chat|List|Feed/i;
 
 /** 递归收集待扫描文件 */
@@ -113,6 +118,12 @@ function scanRule(ruleId) {
           break;
         case 'surface-glass-naming':
           hit = !isThemeFile(file) && /\bsurfaceGlass(?:Strong)?\b/.test(line);
+          break;
+        case 'glass-api-access':
+          // S3：只统计 src/**/*.tsx（页面 / 组件层）。theme/*.ts 的定义与 index.ts 转发
+          // 是「单一来源」自身，不计入；App.tsx 在仓库根，按任务口径不纳入该规则。
+          // 与其余基线规则一致按「命中行数」计数，仅拦新增（基线 0）。
+          hit = /\.tsx$/.test(file) && rel.indexOf('src/') === 0 && GLASS_API_RE.test(line);
           break;
         default:
           hit = false;
@@ -187,6 +198,7 @@ const BASELINE_RULES = [
   'font-size-10',
   'font-weight-invalid',
   'surface-glass-naming',
+  'glass-api-access',
 ];
 
 function readBaseline() {
@@ -218,7 +230,7 @@ function main() {
     const payload = {
       version: 1,
       generatedAt: new Date().toISOString(),
-      note: 'P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。方案文档写 378 处硬编码圆角，工作副本实测见 hardcoded-border-radius。',
+      note: 'P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。方案文档写 378 处硬编码圆角，工作副本实测见 hardcoded-border-radius。glass-api-access（R5/S3）基线 0：P0 零接入，任何 .tsx 层玻璃 API 接线都算新增。',
       counts: counts,
       contentLayerFiles: contentLayerFiles,
     };
@@ -238,8 +250,12 @@ function main() {
     for (const rule of BASELINE_RULES) {
       const previous = typeof baseline.counts[rule] === 'number' ? baseline.counts[rule] : 0;
       if (counts[rule] > previous) {
+        // S3 自证要求：违规样本必须报「新增接入」
+        const prefix = rule === 'glass-api-access'
+          ? '[glass-api-access] 新增接入 '
+          : '[' + rule + '] 新增 ';
         problems.push(
-          '[' + rule + '] 新增 ' + (counts[rule] - previous) + ' 处（基线 ' + previous + ' → 当前 ' + counts[rule] + '）' +
+          prefix + (counts[rule] - previous) + ' 处（基线 ' + previous + ' → 当前 ' + counts[rule] + '）' +
           (details[rule].length ? '，示例: ' + details[rule].slice(0, 5).join(', ') : ''),
         );
       }

@@ -312,14 +312,19 @@ export const resetGlassSettings = (): void => glassSettings.reset();
  * ------------------------------------------------------------------ */
 
 /**
- * H1：任何 tint 计算的最后一步必须 Math.min(tintAlpha, 0.12)。
+ * H1：任何 tint 计算的最后一步必须过上界 TINT_ALPHA_MAX = 0.12（等价于 Math.min(tintAlpha, 0.12)）。
  * 修 04 §2.7 X2（tintScale 上限 3 时 0.10×3=0.30 未夹上界）与 X1（选中 Chip 0.34）。
  * 本函数是全项目唯一的 tint alpha 出口，禁止在别处再算一遍 tint。
+ *
+ * S1：baseAlpha 先做 Number.isFinite 兜底，非有限值（NaN / Infinity / -Infinity）回退
+ *     TINT_ALPHA_BASE，负值夹到 0；否则 `Math.min(NaN, 上界)` 会把 NaN 透传给下游样式。
+ * S2：上界统一引用导出的 TINT_ALPHA_MAX，不再写死 0.12，避免改常量时漏改钳制。
  */
 export function resolveTintAlpha(baseAlpha: number = TINT_ALPHA_BASE, tintScale?: number): number {
   const scale = tintScale === undefined ? useGlassStore.getState().tintScale : tintScale;
-  const tintAlpha = Math.max(0, baseAlpha) * clampScale('tintScale', scale);
-  return Math.min(tintAlpha, 0.12);
+  const safeBase = Number.isFinite(baseAlpha) ? Math.max(0, baseAlpha) : TINT_ALPHA_BASE;
+  const tintAlpha = safeBase * clampScale('tintScale', scale);
+  return Math.min(tintAlpha, TINT_ALPHA_MAX);
 }
 
 /**
@@ -748,3 +753,23 @@ export function GlassSurface(props: GlassSurfaceProps): ReactElement {
   void spec;
   return createElement(View, { style: props.style, testID: props.testID }, props.children);
 }
+
+/* ------------------------------------------------------------------ *
+ * 七、模块加载即前置 API 双档降级（G1 · QA Round 1 收口）
+ * ------------------------------------------------------------------ */
+
+/**
+ * G1：`glassSettings.init()` / `ensurePlatformDegradation()` / `useA11ySync()` 在 P0 全 src
+ * 无调用方（App.tsx 冻结不改），导致 API 26–32 时 `isGlassDegraded()` 为 false、
+ * `getActiveDegradeReasons()` 为空，运行时状态与 H2 / H3 契约不一致。
+ *
+ * 这里在模块加载时调用一次，让 canBlur(≥31) / canLens(≥33) 的双档判定立即落到
+ * activeReasons；开发者无需显式 init 也能拿到正确的降级状态。
+ * - partialize 已排除 activeReasons → 不会把运行时状态落盘成脏数据；
+ * - clearDegrade 保证设备 / 系统能力变化时可回退；
+ * - 非 Android 视作全支持，模块加载只做两次空 clearDegrade，无副作用。
+ *
+ * ⚠️ 必须放在文件末尾：degrade() 读取的 `DEGRADE_POLICY` 是后方定义的 const，
+ *    提前调用会命中暂时性死区（TDZ）抛 ReferenceError。
+ */
+ensurePlatformDegradation();
