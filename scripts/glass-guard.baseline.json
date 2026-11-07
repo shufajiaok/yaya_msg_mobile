@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-07T06:34:47.077Z",
+  "note": "P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。方案文档写 378 处硬编码圆角，工作副本实测见 hardcoded-border-radius。",
+  "counts": {
+    "inline-rgba-glass-bg": 91,
+    "blur-view": 5,
+    "hardcoded-border-radius": 274,
+    "font-size-10": 29,
+    "font-weight-invalid": 101,
+    "surface-glass-naming": 15
+  },
+  "contentLayerFiles": [
+    "src/screens/FollowedRoomsScreen.tsx"
+  ]
+}
