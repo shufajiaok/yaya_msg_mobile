@@ -1,5 +1,9 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.2）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.3）。
+ *
+ * it.3 行为归一：四块玻璃面板统一传 refractionPx/dispersionPx（透镜全开），
+ * 配合引擎侧「模糊与透镜协同」，四面板对 blur/lens/tint/glow 四根滑块全部
+ * 有可见响应——消除 it.2「hero 与其他控件两种行为模式」的问题。
  *
  * 用途：
  * - 验证 GlassKitBackdrop（采集源）+ GlassKitView（玻璃面板）链路是否真实出效果；
@@ -235,7 +239,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`v${APP_VERSION} · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.3 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'RenderEffect 真高斯'} · 面板可拖动`}
@@ -259,11 +263,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           <DraggableGlass style={[styles.panelChip, { height: Math.round(72 * sizeScale) }]}>
             <GlassPanel
               title="Chip 胶囊"
-              subtitle="blurDp 8 · 圆角 pill"
+              subtitle="blurDp 8 · 折射+色散 · 可拖动"
               style={styles.panelFill}
               backdropTag={backdropTag}
               blurDp={8}
               cornerRadiusDp={Math.round(radii.pill * radiusScale)}
+              refractionPx={10}
+              dispersionPx={6}
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
@@ -271,11 +277,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           <DraggableGlass style={[styles.panelToolbar, { height: Math.round(72 * sizeScale) }]}>
             <GlassPanel
               title="工具条"
-              subtitle="blurDp 12 · 圆角 22"
+              subtitle="blurDp 12 · 折射+色散 · 可拖动"
               style={styles.panelFill}
               backdropTag={backdropTag}
               blurDp={12}
               cornerRadiusDp={Math.round(22 * radiusScale)}
+              refractionPx={10}
+              dispersionPx={6}
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
@@ -284,11 +292,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         <DraggableGlass style={[styles.panelClear, { height: Math.round(88 * sizeScale) }]}>
           <GlassPanel
             title="clear + 压暗"
-            subtitle="blurDp 10 · dimming 0.35 · 可拖动"
+            subtitle="blurDp 10 · dimming 0.35 · 折射+色散"
             style={styles.panelFill}
             backdropTag={backdropTag}
             blurDp={10}
             cornerRadiusDp={Math.round(radii.xl * radiusScale)}
+            refractionPx={10}
+            dispersionPx={6}
             dimmingAlpha={0.35}
             blurEnabled={blurOn}
             forceDownsample={forceDown}
