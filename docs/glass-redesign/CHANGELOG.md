@@ -271,3 +271,11 @@
 - 网络排障后 npm install 成功（1077 包，绕失效代理直连 + 守卫改名绕行）。
 - 首轮 tsc 报 3 错（QA 预判点全部命中）：GlassKitBackdrop/GlassKitView 的 ref 类型改 `Component<P> & NativeMethods`；GlassTestScreen processColor 返回 ProcessedColorValue 断言收窄。
 - 复跑 **typecheck 全绿**（tsc --noEmit + verify-version ✅）——P0 + E1 引擎 + 测试页首次全部过编译器。
+
+## 编译成品成功（2026-11-07，用户指令「先编译出成品」）
+- 工具链从零搭建于 D:/glass/tools（可清理区内）：JDK 17.0.21（清华镜像）+ Gradle 8.14.3（腾讯镜像）+ Android SDK 手动组装（platform-35 / build-tools 35.0.0 / platform-tools，Google 直连）+ 许可证文件 + local.properties。
+- Maven 仓库经 init script（/d/glass/tools/mirror-init.gradle）重写为阿里镜像，解决 react-android 127MB 大包直连超时。
+- debug.keystore 本地生成（RN 模板不入库，keytool PKCS12 标准参数）。
+- 引擎 Kotlin 首次真编译：3 错（Math.floor Double/Float ×2、const val 原始字符串）修复后 BUILD SUCCESSFUL。
+- 产物：android/app/build/outputs/apk/release/ 下 arm64 35.2MB / armeabi 31.5MB / x86_64 35.7MB / universal 69.8MB，JS bundle 已打入（assets/index.android.bundle）。
+- release 用 debug 签名兜底（build.gradle hasReleaseSigning 逻辑），可直接装机验证。

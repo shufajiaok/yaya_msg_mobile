@@ -72,3 +72,4 @@ opencode.json
 
 # WorkBuddy local memory (not part of source)
 .workbuddy/
+node_modules.broken.bak/

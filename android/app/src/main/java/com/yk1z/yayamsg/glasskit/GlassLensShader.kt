@@ -38,7 +38,7 @@ import androidx.annotation.RequiresApi
  */
 object GlassLensShader {
 
-    const val SHADER_SOURCE: String = """
+    val SHADER_SOURCE: String = """
 uniform shader uBlurred;
 uniform float2 uSize;
 uniform float uRefractionPx;

@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.RenderNode
 import android.graphics.RuntimeShader
+import kotlin.math.floor
 import android.graphics.Shader
 import android.os.Build
 import android.os.SystemClock
@@ -187,7 +188,7 @@ class GlassKitView(context: Context) : View(context) {
         color = Color.WHITE
         // S1 修复：floor 取整（round(0.14*255)=36 → 36/255≈0.1412 微超 0.14；
         // floor=35 → 35/255≈0.1373 ≤ 0.14，alpha 契约恒不超出）
-        alpha = Math.floor(EDGE_HIGHLIGHT_ALPHA * 255f).toInt()
+        alpha = floor(EDGE_HIGHLIGHT_ALPHA * 255f).toInt()
     }
     private val clipPath: Path = Path()
     private val clipRect: RectF = RectF()
@@ -441,7 +442,7 @@ class GlassKitView(context: Context) : View(context) {
             tintPaint.color = tintColor
             // S1 修复：floor 取整（round(0.12*255)=31 → 31/255≈0.1216 微超 0.12；
             // floor=30 → 30/255≈0.1176 ≤ 0.12，H1 契约恒不超出）
-            tintPaint.alpha = Math.floor(finalTintAlpha * 255f).toInt()
+            tintPaint.alpha = floor(finalTintAlpha * 255f).toInt()
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), tintPaint)
         }
 
