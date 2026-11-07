@@ -192,3 +192,37 @@
 - 采集/重绘链路按 UI 线程约束实现（registry synchronized 仅兜底）；多玻璃面板同指一个 backdrop 时各自独立捕获，未做共享缓存。
 - 新架构（bridgeless）下 SimpleViewManager 需迁 Fabric/Expo Modules——清单 §六 已登记，本批渲染核心（View 层）可原样迁移换壳。
 - requireNativeComponent 的 HostComponent ref 类型在 node_modules 未装环境下未经 typecheck 实证，装依赖后首次 typecheck 需关注 `ref as Ref<NativeViewInstance>` 两处断言。
+
+## 引擎 E1 · QA Round 1 修复（2026-11-07）
+
+> QA 对 E1 引擎产出静态证伪后路由 Engineer 做有限增量：只动 `glasskit/` 下 Kotlin + `GlassKitView.tsx` 注释 + 本文件，1 个代码 commit + 1 个 docs commit，**未 push**（断网）。改动：3 文件 / +127 −17。
+
+### QA 结论与修复落点（文件:行号为修复后 GlassKitView.kt 实际位置）
+
+| 编号 | 级别 | 问题 | 修复 | 落点 |
+| --- | --- | --- | --- | --- |
+| E1 | 一般 | 重挂载后实时更新永久失效：resolveTarget 在 `oldTarget===newTarget` 时早退，detach→re-attach 后 onDetachedFromWindow 已摘 PreDraw listener，re-attach 走早退分支 → 玻璃永不再跟随 | `onAttachedToWindow` 无条件调 `attachPreDraw()`；attachPreDraw 改幂等（挂前先安全移除再挂），重复调用不产生重复 listener | `GlassKitView.kt:225-233` / `:272-281` |
+| E2 | 一般 | dead ViewTreeObserver 监听器滞留（泄漏）：backdrop 先卸载时其 observer 已 merge 进根 observer 且 isAlive=false，仅查 `target.viewTreeObserver` 移除静默失败，listener 强引用 glass 泄漏到窗口销毁 | 新增 `attachedObserver` 成员缓存**实际挂 listener 的 observer 实例**；detach 优先用缓存移除，缓存 dead 则用合并后的存活 observer 再试；detach 后清空缓存并置空 `targetView`，无残留引用 | `GlassKitView.kt:209-212` / `:283-305` / `:241` |
+| E3 | 一般 | backdrop 晚挂载时玻璃永远卡兜底：targetView==null 时无 invalidate 来源 | resolveTarget 中 `newTarget==null && backdropTag!=NO_ID` 时 `postInvalidateDelayed(100)` **有限重试**（上限 `TARGET_RETRY_MAX=50` 次 ≈5s，找到目标或超上限即停，不无限循环） | `GlassKitView.kt:56-59` / `:254-264` |
+| S4 | 建议 | NaN 穿透：onDraw `>0f` 门挡不住 NaN（NaN>0f==false 但 NaN 可喂 uniform） | refractionPx/dispersionPx setter 对非 `isFinite` 值回退 0f，NaN/Infinity 进不了 RuntimeShader | `GlassKitView.kt:97-116` |
+| S1 | 建议 | alpha 舍入微超：`Math.round(0.12f*255)=31` → 31/255≈0.1216 超 0.12（0.14 高光同理 36/255≈0.1412） | tint 与高光两处 `Math.round` 改 `Math.floor`（30/255≈0.1176、35/255≈0.1373，恒不超出契约上界） | `GlassKitView.kt:178` / `:389-391` |
+| S2 | 建议 | RenderEffect 每帧新建（高频分配压力） | 缓存成员字段（半径/尺寸键控），变化才重建；detach 与 onSizeChanged（releaseBitmaps）路径释放 | `GlassKitView.kt:194-198` / `:319-337` / `:443-444` / `:516-536` |
+| S7 | 建议 | tintColor 契约歧义：「字符串或数字均可」 | TSX 两处注释改「必须传数字（processColor 后的 Int）」；GlassKitManager setTintColor 注释同步说明（类型层 `string | number` 本批不动，仅注释收口） | `GlassKitView.tsx:8,42-44` / `GlassKitManager.kt:41-47` |
+
+### 只登记不实现（本批不修）
+
+- **S3**（BitmapShader 原地改写采样一致性）：透镜路径位图复用与采样一致性属真机可观测项，离线无法实证，留真机验证批次。
+- **S5**（同 tag backdrop 冲突语义）：多 backdrop 挂同 tag 时注册表语义未定义，留后续批次收口。
+
+### 自检证据
+
+- `git diff --name-only ccfe379..000ef8a` = 3 文件（GlassKitView.kt / GlassKitManager.kt / GlassKitView.tsx），无越界文件；页面、gradle、依赖清单 0 diff。
+- grep 断言三处修复落点命中：`attachPreDraw()`（onAttachedToWindow 无条件调用，:232）、`attachedObserver`（成员字段缓存，:212）、`postInvalidateDelayed(TARGET_RETRY_DELAY_MS)`（有限重试，:260）。
+- **编译未执行**（无 JDK/Android SDK、断网），改动均为局部 Kotlin/注释，语义经逐行核对；真机/编译验证留 CI 或工具链就绪后补跑。
+
+### commit 序列
+
+| commit | 内容 |
+| --- | --- |
+| `000ef8a` | 本轮代码 commit：E1/E2/E3 + S1/S2/S4/S7（glasskit/ 2 Kotlin + TSX 注释，3 文件 / +127 −17） |
+| 本 commit | docs：本节留档 + `引擎重写清单.md` / `E2-v277迁移清单.md` 归档 |
