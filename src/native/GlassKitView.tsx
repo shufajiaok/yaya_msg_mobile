@@ -16,7 +16,10 @@
  * - cornerRadiusDp 圆角半径 dp
  * - dimmingAlpha  压暗层 alpha（#000，独立于 tint）
  * - backdropTag   背景容器 tag（findNodeHandle(GlassKitBackdrop ref)）
- * - blurScale / tintScale / lensScale  三倍率（glowScale 仅 JS 侧柔光，不进引擎）
+ * - blurScale / tintScale / lensScale / glowScale  四倍率（glowScale 作用于边缘
+ *   高光宽/alpha，本轮迭代起进引擎；forceDownsample 切模糊路径，见下）
+ * - forceDownsample 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时
+ *   开启；真机默认 false 走 RenderEffect 真高斯）
  * - blurEnabled   模糊总开关（原生采集+模糊链路闸门）
  *
  * H2 双档门控（glass.ts canBlur / canLens，非 Android 视作全支持）：
@@ -24,8 +27,8 @@
  * - canLens() false  → refractionPx / dispersionPx 传 0（跳过 AGSL 透镜）；
  * - AccessibilityInfo.isReduceTransparencyEnabled → blurEnabled = false（整链兜底）。
  *
- * 四倍率：从 src/theme/glass.ts 的 useGlassStore 订阅（blurScale/tintScale/lensScale）
- * 传下去；显式 props 值优先（便于调试覆盖），未传时用 store 值。glowScale 不进引擎。
+ * 四倍率：从 src/theme/glass.ts 的 useGlassStore 订阅（blurScale/tintScale/
+ * lensScale/glowScale）传下去；显式 props 值优先（便于调试覆盖），未传时用 store 值。
  *
  * ⚠️ 功能层叶子视图：无子节点（清单 §一 架构图）；页面零接线，P1 起使用。
  */
@@ -69,6 +72,10 @@ export interface GlassKitViewProps extends ViewProps {
   tintScale?: number;
   /** 透镜倍率覆盖（未传时取 store 的 lensScale；0 = 关透镜）。 */
   lensScale?: number;
+  /** 柔光倍率覆盖（未传时取 store 的 glowScale；作用于边缘高光宽/alpha）。 */
+  glowScale?: number;
+  /** 强制降采样模糊路径（模拟器调试开关；真机默认 false 走 RenderEffect 真高斯）。 */
+  forceDownsample?: boolean;
   /** 模糊总开关（reduceTransparency 时本组件强制传 false）。 */
   blurEnabled?: boolean;
 }
@@ -119,6 +126,7 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
     const blurScale = useGlassStore((state) => state.blurScale);
     const tintScale = useGlassStore((state) => state.tintScale);
     const lensScale = useGlassStore((state) => state.lensScale);
+    const glowScale = useGlassStore((state) => state.glowScale);
     const reduceTransparency = useReduceTransparency();
 
     const blurOn = canBlur() && props.blurEnabled !== false && !reduceTransparency;
@@ -139,6 +147,8 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         blurScale={props.blurScale ?? blurScale}
         tintScale={props.tintScale ?? tintScale}
         lensScale={props.lensScale ?? lensScale}
+        glowScale={props.glowScale ?? glowScale}
+        forceDownsample={props.forceDownsample ?? false}
         ref={ref as Ref<NativeViewInstance>}
       />
     );

@@ -80,12 +80,13 @@ export default function GlassSlider(props: GlassSliderProps) {
     setTrackWidth(width);
   };
 
-  // 值 → 几何：分母防 0；thumb 用「可用行程」定位，保证两端不出轨
+  // 值 → 几何：分母防 0；thumb 用「可用行程」定位，保证两端不出轨；
+  // 填充段对齐 thumb 中心（thumbLeft + THUMB_SIZE/2），消除末端 ~12px 视觉偏差
   const span = Math.max(1e-6, max - min);
   const fraction = Math.min(1, Math.max(0, (value - min) / span));
   const travel = Math.max(0, trackWidth - THUMB_SIZE);
-  const fillWidth = fraction * trackWidth;
   const thumbLeft = fraction * travel;
+  const fillWidth = Math.max(0, thumbLeft + THUMB_SIZE / 2);
 
   return (
     <View
@@ -93,10 +94,13 @@ export default function GlassSlider(props: GlassSliderProps) {
       onLayout={handleLayout}
       {...panResponder.panHandlers}
     >
-      <View style={styles.track}>
+      {/* 子视图全部 pointerEvents="none"：Android 触摸序列的 locationX 固定相对
+          「按下时 hit-test 命中的视图」，thumb 若参与 hit-test，参考系随 thumb
+          移动而漂移 → 拖动反复跳变（真机实证）。收口后命中目标恒为容器。 */}
+      <View style={styles.track} pointerEvents="none">
         <View style={[styles.fill, { width: fillWidth }]} />
       </View>
-      <View style={[styles.thumb, { left: thumbLeft }]} />
+      <View style={[styles.thumb, { left: thumbLeft }]} pointerEvents="none" />
     </View>
   );
 }
