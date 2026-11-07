@@ -279,3 +279,29 @@
 - 引擎 Kotlin 首次真编译：3 错（Math.floor Double/Float ×2、const val 原始字符串）修复后 BUILD SUCCESSFUL。
 - 产物：android/app/build/outputs/apk/release/ 下 arm64 35.2MB / armeabi 31.5MB / x86_64 35.7MB / universal 69.8MB，JS bundle 已打入（assets/index.android.bundle）。
 - release 用 debug 签名兜底（build.gradle hasReleaseSigning 逻辑），可直接装机验证。
+
+## 玻璃引擎运行完整性修复（2026-11-07，用户反馈「只有白框，所有视觉效果全部丢失」+「效果参数改成滑块」）
+
+> 团队流程 software-glassfix：主理人取证 → 工程师（寇豆码）实现+自测 → QA（严过关）fresh eyes 回归 **6/6 PASS 零返工**。
+
+**根因与修复（4 个真根因，全部实证）：**
+
+| # | 症状 | 真根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 巨椭圆色球 | 裸 `FrameLayout` 宿主的 Android measure pass 用子视图 WRAP_CONTENT LayoutParams 重排 Yoga 布局（裸 View `getDefaultSize` 在 AT_MOST 下返回父容器 spec 尺寸）→ blob 被拉伸全屏 | `GlassKitBackdropView : ViewGroup` onLayout no-op，布局全权归 Yoga（dumpsys 实证 blob bounds 210/245/315px 与声明一致） |
+| 2 | 面板乳白兜底（白框） | ① 注册时序竞态：`onAfterUpdateTransaction` 单点注册，id 未定稿时被拒且永不重试；② **capture 恒产空位图**：clipRect 在 translate/scale 前执行，背景坐标系矩形与设备空间位图边界必然无交集 → 画布裁空但返回 true | ① 挂载即注册（`onAttachedToWindow`/`onDetachedFromWindow`）+ Manager 双保险；② clipRect 移到变换之后（映射关系不变） |
+| 3 | 模糊不生效 | logcat 实证走 RenderNode 分支（radius 21px、hardwareAccelerated=true）但画面 1px 锐边 → 模拟器 GPU 接受 RenderEffect 却不执行 | `PREFER_DOWNSAMPLE_BLUR=true` 强制降采样近似路径；`BLUR_DOWNSAMPLE` 4→6（对清单 §二.2「1/4」的已登记偏离）；真机 GPU 正常时置 false 恢复真高斯 |
+| 4 | tint 丢失 | Paper 桥接对 customType="Color" prop 自动 processColor，调用方预 processColor 被**二次转换**丢弃（logcat：JS 发 -2300161，原生快照 tintColor=0） | GlassTestScreen 改传原始字符串 '#DCE6FF'；`src/native/GlassKitView.tsx` S7 契约注释订正（旧架构传字符串、禁预 processColor） |
+
+**交互改造：** 四倍率 ±0.1 步进 → 零依赖 `GlassSlider`（PanResponder，轨道 6dp + 24dp 阴影描边 thumb，grant/move/release 全程实时联动）。
+
+**文件（5+1）：** `GlassKitBackdropManager.kt` / `GlassCaptureEngine.kt` / `GlassKitView.kt` / `GlassTestScreen.tsx` / `GlassSlider.tsx`（新）/ `GlassKitView.tsx`（注释）。
+
+**QA 回归证据（D:/glass/logs/qa_*.png + qa_blur_measure.py）：**
+- 重启稳定性 ×3（pm clear + force-stop×2）：面板全部透出渐变，无乳白；
+- 模糊像素（B-R 10%-90% 过渡宽度）：面板间隙 1px vs 工具条面板内 **9px**（验收 ≥8px）；
+- 滑块联动：blurScale 拖至 0.01 → 过渡带实时回落 1px，拖回 1.25 → 恢复 9px；其余倍率无误触；
+- 兜底链：模糊开关 OFF → 乳白兜底（预期），ON → 恢复 9px；
+- H1（tint≤0.12 + floor）/ H2（canBlur≥31 / canLens≥33）完好；`tsc --noEmit` exit 0；guard 硬规则 0 命中、7 项基线计数无新增。
+
+**遗留登记：** a) blurDp/blurScale setter 无 isFinite 防护（风格不一致，非阻断）；b) GlassSlider 未处理 onPanResponderTerminate（外观/体验项）；c) fillWidth 与 thumb 末端 ~12px 视觉偏差；d) 真机 GPU 若正常执行 RenderEffect 应置 `PREFER_DOWNSAMPLE_BLUR=false` 恢复真高斯（待真机实测）；e) 诊断日志（GlassKitBlur tag）保留，如需静默后续移除。
