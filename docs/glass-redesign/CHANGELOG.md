@@ -344,3 +344,23 @@
 **留痕：** 本轮新增纪律——禁止拉真机截图做 AI 分析（含像素脚本），视觉验证一律转用户肉眼；日志/dumpsys/uiautomator 文本取证不受限。
 
 **收口备注：** 工程师交付的 GlassCaptureEngine.kt 出现整块缩进坍塌（Kotlin 不敏感缩进故构建仍过），主理人重排修复（纯格式零逻辑改动），重建 24s BUILD SUCCESSFUL。观察项：GlassTestScreen `fontSize: refractionPx ? 17 : 15` 的 15 分支成死分支（纯外观冗余）。
+
+---
+
+## it.4 —— 透镜真模糊化 + 闪烁/抖动根因修复（2026-11-08，versionCode 2076003）
+
+**用户反馈（真机）：** hero 静止严重闪烁（遮挡/不遮挡交替）；全面板拖动时玻璃内容相对面板框抖动；blurScale 只变锯齿数量不产生模糊（"之前的模糊效果是正确的"）；另确认 it.3 采样对齐修复有效。
+
+**根因与修法：**
+
+| # | 现象 | 根因（日志实证） | 修法 |
+| --- | --- | --- | --- |
+| 1 | hero 静止闪烁 | 自激励重绘环（面板互触发致静止仍 ~50fps 重绘）+ 透镜输入位图**单缓冲**跨线程竞态：UI 线程每帧 eraseColor/重写时 RenderThread 的 BitmapShader 正采样同一位图 → 间歇采到全透明帧。日志排除法：captureOk 恒 true、shader NEW 0 次、onSizeChanged 0 次 | 输入位图双缓冲 ping-pong（写槽≠采样槽）+ scheduleThrottledInvalidate 自激励环打断（selfInvalidationPending）；RuntimeShader 惰性创建一次、uBlurred 逐帧重绑 |
+| 2 | 拖动内容抖动 | 重绘节流 20-140ms 不规则步进 vs 120Hz 面板位移 → 未重绘帧旧位图旧 offset 在新位置重放。日志排除"offset 滞后一帧"（实测同帧一致） | PreDraw 检测面板 onScreen 位置变化（lastDrawnLocation 基线）→ 绕过节流逐帧重绘 |
+| 3 | 模糊=锯齿数量变化 | it.3「降采样系数随半径自适应」本质是锯齿而非高斯（设计缺陷）；BlurMaskFilter 方案（R1）被 QA 证伪——maskFilter 只作用图元 alpha 遮罩不卷积位图内容，视觉零贡献 | **CPU box blur ×3 迭代近似高斯**（Ivan Kutskir fast-gaussian，O(6n) 滑窗，~316×N 小图）：premultiply→blur→unpremultiply 防串色；半径=round(blurRadiusPx/4) coerce(1,60)，sigma=radius/2 对齐 Skia 口径；blurScale<0.5px 走全分辨率 capture 清晰折射路径 |
+
+**QA：** Round 1 抓出 BlurMaskFilter 证伪级 FAIL（多源佐证：maskFilter 仅操作 alpha 遮罩）路由回修；Round 2 聚焦复审全项 PASS（boxesForGauss 三盒尺寸实算、滑窗 O(n) 增量验证、预乘链路、双缓冲不变量、半径三档数字复核、releaseBitmaps 覆盖完整性、回归抽查）。typecheck/guard 全绿，真机无崩溃。
+
+**留痕：** 修前/修后日志对比（static15/drag15 ×2）：静止重绘 5872 行→0 行（环断实锤）；拖动重绘间隔 20-140ms→8-15ms 逐帧对齐。
+
+**观察项（登记不阻塞）：** 四面板同时强糊+拖动的 CPU 成本可后续调降采样档；blurScale=0 全分辨率路径有与 raw 路径等价的理论竞态暴露（静止期不重绘，概率极低）；onDetachedFromWindow 不释放双缓冲（内存驻留非缺陷）；sigma=radius/2 与 Skia σ≈0.577r 有 ±2% 观感差（注释留调节点）。
