@@ -76,15 +76,19 @@ export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
  * - `indicatorRefractionDp` / `indicatorBandDp`：原版 INDICATOR `amount=10dp` / `height=8dp`，
  *   **已把 lockedRefraction 0.8 烘进基数**（10×0.8=8、8×0.8=6.4）——我们保留
  *   「指示器受 lensScale 调节」（用户已验收），但保持原版 8 : 6.4 的带高/位移比例。
- * - `indicatorDispersionDp`：色散基准幅（10dp），`dispersionLevelBase` 为滑块满幅基准。
+ * - `indicatorDispersionDp`：色散基准幅（8dp = 与折射位移 1:1）。原版色散没有独立
+ *   幅度参数（`dispersedCoord = d * grad * dispersionIntensity`，即 = 折射位移 × 象限
+ *   符号），因此这里取「与 indicatorRefractionDp 相同」，滑块满幅 1.0 时 dispK = 1.0
+ *   = 原版；旧实现是 10dp / 0.35 归一（默认 dispK ≈ 3.6，彩虹明显偏重）。
+ * - `dispersionLevelBase`：滑块 0–1 直接作倍数（1.0 = 原版满幅）。
  */
 export const GLASS_LENS_PROFILE = {
   barRefractionDp: 5,
   barBandDp: 3,
   indicatorRefractionDp: 8,
   indicatorBandDp: 6.4,
-  indicatorDispersionDp: 10,
-  dispersionLevelBase: 0.35,
+  indicatorDispersionDp: 8,
+  dispersionLevelBase: 1,
 } as const;
 
 /**

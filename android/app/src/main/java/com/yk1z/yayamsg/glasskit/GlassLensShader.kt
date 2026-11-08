@@ -12,38 +12,41 @@ import androidx.annotation.RequiresApi
  *                                      it.4 起由视图侧双缓冲逐帧 setInputShader 切换）
  * - uniform float2 uSize             ：玻璃面板尺寸（px，本地坐标系）
  * - uniform float uRefractionPx      ：折射位移幅度（px，已乘 lensScale）
- * - uniform float uDispersionPx      ：色散位移幅度（px，已乘 lensScale）
- * - uniform float uLensBandPx        ：it.19 折射带高（px，已乘 lensScale）；
- *                                      ① circleMap 剖面启用，⓪ 仅声明
+ * - uniform float uDispersionPx      ：色散幅度（px，已乘 lensScale；0 = 关闭色散）
+ * - uniform float uLensBandPx        ：it.19 折射带高（px，已乘 lensScale）
  * - uniform float uCornerRadiusPx    ：圆角半径（px，已钳 min(w,h)/2）
  * - uniform float uCornerExponent    ：it.13 连续曲率超椭圆指数 n（Path 同源）
  * - uniform float uDepthEffect       ：it.13 景深开关（0/1）
- * - uniform float uVibrancy          ：it.13 鲜活度 shader 矩阵开关（0/1，默认路径）
+ * - uniform float uVibrancy          ：it.13 鲜活度矩阵开关（0/1，默认路径）
  *
- * it.13 改造（方案 B：Path + AGSL SDF 统一超椭圆）：
- * - sdRoundRect → sdContinuous(p, b, r, n)，n 由 ContinuousRoundRect
- *   .cornerExponent 计算，与本帧 clipPath 用同一个值 —— clip 边界与
- *   SDF 零点严格重合（否则角部会出现「裁剪到位但透镜法线错位」的彩边/锯齿）。
- * - n=2 时 sdContinuous 与 sdRoundRect 逐位等价（L2 范数 + 单位梯度），
- *   胶囊 / 正方形命中 n=2 硬守卫 → it.12 观感零回归。
- * - edgeAA=clamp(-sdf,0,1)（it.10）与 dispFade=clamp(-sdf/max(uDispersionPx,1),0,1)
- *   （it.11）表达式原样保留，只替换 SDF 函数体与调用处。
+ * it.19 P0-3（透镜剖面）—— 对齐原版 `ShadersKt.java:11 RoundedRectRefractionShaderString`：
+ * - 剖面由「线性 `clamp(1 + sdf/refraction)`」改为**圆透镜 `circleMap`**：
+ *     `t = clamp(1 - (-sdf)/uLensBandPx, 0, 1)`；`d = (1 - sqrt(1 - t²)) × uRefractionPx`
+ *   线性剖面在带内 50% 处仍有 50% 位移（整条带一起被拽），circleMap 在同处只有 13%，
+ *   位移集中在贴边一圈 —— 这是「玻璃被弯折」与「整条带糊了一圈」的分界。
+ * - 带外自动直通：`t = 0 ⇒ d = 0 ⇒ 采样点不变`，等价于原版的
+ *   `if (-sd >= refractionHeight) return content.eval(coord)` 早退，无需分支。
+ * - 法线改用**放大半径**的 SDF（`gradRadius = min(r × 1.5, min(w,h)/2)`）：
+ *   角部法线更平滑，避免原实现「角部法线在 r 内剧烈旋转 → 聚光/尖角拖尾」。
  *
- * 实现要点：
- * - 法线：SDF 中心差分梯度（eps=0.5px），归一化为外向法线；
- * - 边缘系数 edgeFactor = clamp(1 + sdf/uRefractionPx, 0, 1)：贴边为 1、
- *   向内按 uRefractionPx 线性衰减到 0（SDF 内部为负，符号订正见 it.2 注释）；
- * - 折射位移：uv' = uv - normal * edgeFactor * uRefractionPx；
- * - 色散：R/G/B 以 uDispersionPx 的 1.0/0.5/0.0 倍错开位移采样，取
- *   cR.r / cG.g / cB.b 合成；dispFade 令边界像素三通道严格重合（it.11 无彩边）；
- * - 形外像素（sdf > 0）返回透明，配合视图侧连续曲率 clip 双保险。
+ * it.19 P0-4（色散）—— 对齐原版 `ShadersKt.java:12 ...WithDispersionShaderString`：
+ * - 3-tap RGB → **7-tap 光谱**（红橙黄绿青蓝紫），权重 `r,g,b` 各 3×(1/3.5)+1×(1/7)=1、
+ *   `a` 7×(1/7)=1（原版是归一化过的 7 点重采样）。
+ * - 强度改为 **∝ d ∝ 贴边最强**，并乘 `(p.x·p.y)/(halfW·halfH)` **象限符号** ⇒
+ *   一对对角偏暖、另一对偏冷（真实棱镜感）。
+ *   旧实现的 `dispFade = clamp(-sdf/disp, 0, 1)`（贴边 0、内缘 1）方向相反，
+ *   彩边出现在**带内侧**而不是轮廓上，本轮删除。
+ * - 色散幅度以「相对折射位移的倍数」解释：`uDispersionPx / max(uRefractionPx,1)`
+ *   （原版这里就是 `d * grad`，没有独立幅度参数）。默认两者 1:1 = 原版。
+ * - `uDispersionPx = 0`（开关关闭）时走单 tap 分支，零多余采样。
+ *
+ * it.13 方案 B（Path + AGSL SDF 统一超椭圆）保持：
+ * - `sdContinuous` 的 n 与本帧 clipPath 同源 ⇒ clip 边界与 SDF 零点严格重合；
+ * - `n = max(uCornerExponent, 2.0)` 兜底（回录帧未下发 uniform 时退化圆弧，零 NaN）；
+ * - `n = 2` 时 `sdContinuous` 与 `sdRoundRect` 逐位等价（胶囊 / 面板回圆弧后都走这里）。
  *
  * ⚠️ 软画布快照回录路径不支持 RuntimeShader（it.8-fix1）：本 shader 只在
- * 硬件加速画布的 drawLensLayer 里创建/下发，回录帧走纯模糊降级，不调用
- * setFloatUniform。为防 uniform 未下发（默认 0）导致 pow(0,负数)/NaN，
- * main 内统一 n = max(uCornerExponent, 2.0) 兜底退化为圆弧；sdContinuous
- * 内 S=0 时 gn 取 1（形内梯度兜底）避免 NaN。uVibrancy 默认 0 ⇒ 鲜活度
- * 矩阵分支跳过，回录帧与 it.12 逐位等价、不抛异常。
+ * 硬件加速画布的 drawLensLayer 里创建/下发，回录帧走纯模糊降级。
  *
  * AGSL 语法均为 RuntimeShader 合法子集：half4 main(float2 fragCoord)、
  * uniform shader/float/float2、用户自定义标量函数、.eval() 采样。
@@ -55,22 +58,23 @@ uniform shader uBlurred;
 uniform float2 uSize;
 uniform float uRefractionPx;
 uniform float uDispersionPx;
-// it.19 折射带高（px）：circleMap 剖面的归一化尺度（对应原版
-// RoundedRectRefractionShaderString 的 refractionHeight）。⓪ 阶段只声明、
-// main 内不读取（AGSL 允许未使用 uniform）⇒ 观感零变化；① 起由剖面使用。
 uniform float uLensBandPx;
 uniform float uCornerRadiusPx;
 uniform float uCornerExponent;
 uniform float uDepthEffect;
 uniform float uVibrancy;
 
+// it.19 圆透镜剖面（原版 ShadersKt.java:11 circleMap）。
+// x=0 → 0（带内缘无位移）；x=1 → 1（贴边满位移），且起步平缓、贴边陡。
+float circleMap(float x) {
+    return 1.0 - sqrt(max(1.0 - x * x, 0.0));
+}
+
 // it.13 连续曲率超椭圆 SDF：p 相对中心，b 半尺寸，r 圆角，n 指数。
 // n=2 时逐位等价于 sdRoundRect（L2 范数=欧氏距离，梯度模长=1）。
-// ⚠️ 形内 S=0 的梯度为 0：若按 1e-4 兜底做 f/gn，会得到 -r/1e-4 的
-//    巨大负距离 → edgeFactor=clamp(1+sdf/refraction,0,1) 在形内直接归零
-//    （折射只剩贴边 1px），且与 sdRoundRect 不等价。正解 = 形内取 gn=1
-//    ⇒ f/gn = -r，返回 -r + min(max(q.x,q.y),0)，与圆弧 SDF 逐位一致；
-//    同时规避 pow(0, 1/n-1)=inf × 0 → NaN（it.8-fix1 崩溃同类教训）。
+// ⚠️ 形内 S=0 的梯度为 0：若按 1e-4 兜底做 f/gn，会得到巨大负距离 →
+//    剖面归零；正解 = 形内取 gn=1 ⇒ f/gn = -r，返回 -r + min(max(q.x,q.y),0)，
+//    与圆弧 SDF 逐位一致；同时规避 pow(0, 1/n-1)=inf × 0 → NaN。
 float sdContinuous(float2 p, float2 b, float r, float n) {
     float2 q  = abs(p) - b + r;
     float2 qc = max(q, float2(0.0));
@@ -103,42 +107,74 @@ half4 main(float2 fragCoord) {
     if (sdf > 0.0) {
         return half4(0.0);
     }
-    float refraction = max(uRefractionPx, 1.0);
-    float edgeFactor = clamp(1.0 + sdf / refraction, 0.0, 1.0);
-    float2 n0 = sdfNormal(p, center, uCornerRadiusPx, n);
-    float2 d = n0 * edgeFactor;
-    // it.13 景深：法线叠加径向分量并归一化（ShadersKt.java 的
-    // normalize(grad + depthEffect * normalize(centeredCoord))）。
-    // 关闭时（uDepthEffect=0）完全走原 n0 路径，与 it.12 逐位等价、零 NaN。
+
+    // ① it.19 P0-3：圆透镜剖面。band 未下发时兜底 1px 防除零（NaN 会直接出黑块）。
+    // sdf 形内为负 ⇒ -sdf = 距轮廓深度；深度 ≥ band 时 t=0 ⇒ 位移 0（带外直通）。
+    float band = max(uLensBandPx, 1.0);
+    float t = clamp(1.0 - (-sdf) / band, 0.0, 1.0);
+    float dScalar = circleMap(t) * max(uRefractionPx, 0.0);
+
+    // ② 法线：放大半径的 SDF（原版 gradRadius = min(radius*1.5, min(halfSize))），
+    //    距离判定仍用真半径，只有求梯度时替换 —— 角部法线更平滑。
+    float gradRadius = min(uCornerRadiusPx * 1.5, min(center.x, center.y));
+    float2 nrm = sdfNormal(p, center, gradRadius, n);
+
+    // ③ it.13 景深：法线叠加径向分量并归一化
+    //    （原版 normalize(grad + depthEffect * normalize(centeredCoord))）。
     if (uDepthEffect > 0.5) {
         float2 radial = length(p) > 0.0001 ? normalize(p) : float2(0.0);
-        float2 mixed = n0 + radial;
+        float2 mixed = nrm + radial;
         float ml = length(mixed);
-        d = (ml > 0.0001 ? mixed / ml : n0) * edgeFactor;
+        nrm = ml > 0.0001 ? mixed / ml : nrm;
     }
-    // it.11 色散贴边收敛（dispFade：边界 0 → 向内满幅），表达式保留不动
-    float dispFade = clamp(-sdf / max(uDispersionPx, 1.0), 0.0, 1.0);
-    half4 cR = uBlurred.eval(fragCoord - d * refraction - d * (uDispersionPx * dispFade));
-    half4 cG = uBlurred.eval(fragCoord - d * refraction - d * (uDispersionPx * 0.5 * dispFade));
-    half4 cB = uBlurred.eval(fragCoord - d * refraction);
+
+    // ④ 位移指向形内（原版把 refractionAmount 取负后传 uniform，等价）。
+    float2 inner = -nrm * dScalar;
+    float2 refractedCoord = fragCoord + inner;
+
+    half4 composite = half4(0.0);
+    if (uDispersionPx > 0.5) {
+        // ⑤ it.19 P0-4：7-tap 光谱 + 象限符号 + ∝ 贴边最强
+        //    dispK：色散幅度相对折射位移的倍数（原版此处即 d*grad，无独立幅度）；
+        //    intensity 含 (p.x·p.y)/(halfW·halfH) 象限符号 ∈ [-1, 1]。
+        float dispK = uDispersionPx / max(uRefractionPx, 1.0);
+        float intensity = dispK * ((p.x * p.y) / max(center.x * center.y, 1.0));
+        float2 sc = inner * intensity;
+
+        half4 cRed    = uBlurred.eval(refractedCoord + sc);
+        half4 cOrange = uBlurred.eval(refractedCoord + sc * (2.0 / 3.0));
+        half4 cYellow = uBlurred.eval(refractedCoord + sc * (1.0 / 3.0));
+        half4 cGreen  = uBlurred.eval(refractedCoord);
+        half4 cCyan   = uBlurred.eval(refractedCoord - sc * (1.0 / 3.0));
+        half4 cBlue   = uBlurred.eval(refractedCoord - sc * (2.0 / 3.0));
+        half4 cPurple = uBlurred.eval(refractedCoord - sc);
+
+        // 权重与原版逐项一致：r = 3×(1/3.5) + 1×(1/7) = 1，g/b = 3×(1/3.5) = 0.857，
+        // a = 7×(1/7) = 1（7 点光谱重采样，已归一化）。
+        float cr = cRed.r / 3.5 + cOrange.r / 3.5 + cYellow.r / 3.5 + cPurple.r / 7.0;
+        float cg = cOrange.g / 7.0 + cYellow.g / 3.5 + cGreen.g / 3.5 + cCyan.g / 3.5;
+        float cb = cCyan.b / 3.0 + cBlue.b / 3.0 + cPurple.b / 3.0;
+        float ca = (cRed.a + cOrange.a + cYellow.a + cGreen.a + cCyan.a + cBlue.a + cPurple.a) / 7.0;
+        composite = half4(cr, cg, cb, ca);
+    } else {
+        // 色散关闭：单 tap（旧路径逐位等价，零多余采样）
+        composite = uBlurred.eval(refractedCoord);
+    }
+
     // it.10 边缘 AA：贴边 1px 内向 alpha 渐变（表达式保留不动）
     float edgeAA = clamp(-sdf, 0.0, 1.0);
-    // it.13 鲜活度默认路径（主理人新指令：跳过真机取证，选风险最低者）：
-    // VIBRANCY_SHADER_FALLBACK=true ⇒ uVibrancy=1，由 shader 末矩阵承担
-    // saturation=1.5；不触碰 GPU 模糊链 / RenderEffect / propGeneration。
-    // 矩阵 = ColorFilterKt.java:16 / 75-85 colorControls(saturation=1.5) 实算：
-    // [1.3935,-0.3575,-0.036; -0.1065,1.1425,-0.036; -0.1065,-0.3575,1.464]。
-    // uVibrancy=0（vibrancyEnabled=false / GPU 备选路径 / 回录帧未下发）⇒
-    // 该分支零开销，逐位等价 it.12。
+    // it.13 鲜活度默认路径：uVibrancy=1 时由末矩阵承担 saturation=1.5
+    // 矩阵 = ColorFilterKt.java:16 / 75-85 colorControls(saturation=1.5) 实算。
+    // it.19：7-tap 之后像素已是**单一合成色**，矩阵输入必须改为 color.rgb
+    //（旧实现在这里拿 cRed.r / cGreen.g / cBlue.b 当三通道，那是 3-tap 的副产物，
+    //  7-tap 下继续这么用会色偏）。
     if (uVibrancy > 0.5) {
-        // 逐分量标量写法（不依赖 half3 / clamp(genType,...) 重载，降低 AGSL
-        // 编译差异风险）；三行即 ColorFilterKt.java:85 的 4x5 矩阵前三行。
-        float vr = clamp(1.3935 * cR.r - 0.3575 * cG.g - 0.036 * cB.b, 0.0, 1.0);
-        float vg = clamp(-0.1065 * cR.r + 1.1425 * cG.g - 0.036 * cB.b, 0.0, 1.0);
-        float vb = clamp(-0.1065 * cR.r - 0.3575 * cG.g + 1.464 * cB.b, 0.0, 1.0);
-        return half4(vr, vg, vb, cG.a * edgeAA);
+        float vr = clamp(1.3935 * composite.r - 0.3575 * composite.g - 0.036 * composite.b, 0.0, 1.0);
+        float vg = clamp(-0.1065 * composite.r + 1.1425 * composite.g - 0.036 * composite.b, 0.0, 1.0);
+        float vb = clamp(-0.1065 * composite.r - 0.3575 * composite.g + 1.464 * composite.b, 0.0, 1.0);
+        return half4(vr, vg, vb, composite.a * edgeAA);
     }
-    return half4(cR.r, cG.g, cB.b, cG.a * edgeAA);
+    return half4(composite.r, composite.g, composite.b, composite.a * edgeAA);
 }
 """.trim()
 

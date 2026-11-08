@@ -807,6 +807,12 @@ class GlassKitView(context: Context) : View(context) {
 
     /** API 33+ 透镜 RuntimeShader 缓存（源码静态，惰性创建；uBlurred / uniform 每次 draw 重设）。 */
     private var lensRuntimeShader: RuntimeShader? = null
+    /**
+     * it.19 防御：AGSL 编译失败（RuntimeShader 构造抛 IllegalArgumentException）后
+     * 永久降级为模糊路径。着色器语法错误只能在运行时暴露，若不在创建处兜住就是
+     * onDraw 崩溃；降级后观感等于「无透镜」，但绝不崩线上。
+     */
+    private var lensShaderFailed: Boolean = false
 
     /** it.4：上次绘制时面板的 onScreen 坐标基线（PreDraw 位置变化检测用）。 */
     private val lastDrawnLocation: IntArray = IntArray(2)
@@ -1311,7 +1317,7 @@ class GlassKitView(context: Context) : View(context) {
         // 降采样；模糊路径保留降采样语义）。lensActive 须在采集前算好（参数依赖）。
         val blurRadiusPx = blurDp * blurScale * density
         val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
+            !lensShaderFailed && lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
         val capture = obtainCaptureBitmap(
             w,
             h,
@@ -2258,7 +2264,15 @@ class GlassKitView(context: Context) : View(context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
         var shader = lensRuntimeShader
         if (shader == null) {
-            shader = GlassLensShader.createRuntimeShader()
+            // it.19：AGSL 语法错误只有运行时才暴露（编译期无校验）⇒ 必须兜住。
+            // 失败即置 lensShaderFailed，本视图此后走纯模糊路径（lensActive 已加门）。
+            shader = try {
+                GlassLensShader.createRuntimeShader()
+            } catch (t: Throwable) {
+                Log.e(logTag, "lens shader create failed → fallback to blur: ${t.message}", t)
+                lensShaderFailed = true
+                return null
+            }
             lensRuntimeShader = shader
         }
         shader.setInputShader("uBlurred", bitmapShader)
