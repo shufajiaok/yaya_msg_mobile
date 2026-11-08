@@ -23,7 +23,7 @@
  * ① 连续曲率（引擎侧，方案 B：Path + AGSL SDF 统一超椭圆）：
  *    - 组件形状分配（测试页 props 层）：dock bar / dock 指示器用
  *      cornerRadiusDp=999（默认 dockRadius=999，真胶囊）→ it.13 引擎 n=2 硬守卫
- *      保持半圆端（it.14 起由 capsuleContinuous 局部覆盖为 n=3）；chip /
+ *      改走精确 Kyant0 Bezier 连续曲率端帽（it.15 方案 A）；chip /
  *      工具条 / hero / clear 用 SHAPE_CONTAINER=24（GlassShape.java:11 container）
  *      → 连续曲率 n≈4（G2）；顶栏演示件亦为真胶囊。GPU 模糊链
  *      （HardwareRenderer / ImageReader / BitmapShader）完全不动，本页不直接
@@ -519,7 +519,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
-          {`${APP_VERSION}-it.14 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.15 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 连续曲率 · 面板可拖动`}
