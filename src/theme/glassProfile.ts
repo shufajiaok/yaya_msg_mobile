@@ -80,6 +80,23 @@ export const GLASS_INDICATOR_FALLBACK = {
 } as const;
 
 /**
+ * dock bar 卡纸底衬色（不透明）。
+ *
+ * 为什么需要（用户 2026-11-08 反馈「dock 应该被卡纸遮罩挡住，看不到后面内容」）：
+ * Kotlin 版底栏之所以像一张不透明卡纸，是因为其页面内容在 bar 区域本来就是背景色
+ * （内容带 bottom inset），玻璃采集到的是纯背景；而 yaya 的列表内容一直延伸到
+ * dock 下方，bar 玻璃的采集源是 App 级 GlassKitBackdrop（整棵内容树）⇒ 内容原样
+ * 透上来。模糊救不了这件事：反编译 GlassSurfaceKt.java:680 的公式是
+ * `blur = level.blurDp × blurScale`，BAR 的 10dp × 0.2 同样只有 2dp。
+ * 修法：bar 内层放一块不透明 surface 色并把它注册成采集源，bar 玻璃只采它
+ * ⇒ 纯色卡纸 + tint/膜层/底缘高光质感；指示器仍采集 bar 本体（玻璃叠玻璃）。
+ */
+export const GLASS_BAR_SURFACE = {
+  dark: '#1E1F24',
+  light: '#F5F6FA',
+} as const;
+
+/**
  * dock 指示器 / bar 所需的两个实时倍率。
  *
  * 为什么放在这里而不是组件里直接 `useGlassStore`：守卫 `glass-api-access`

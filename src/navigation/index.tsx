@@ -20,8 +20,11 @@ import GlassTestScreen, { GLASS_TEST_ROUTE } from '../screens/GlassTestScreen';
  * ⚠️ 临时首屏开关（GlassKit 引擎验证用，用户指令 2026-11-07）：
  * true = 打开 App 直进玻璃测试页；验证完成后改回 false 即恢复原首屏。
  * 测试页路由 GlassTest 常驻注册，不受本开关影响。
+ *
+ * it.16：引擎与组件已验收，进入「App 本体组件替换」阶段 ⇒ 改回 false，
+ * 打开 App 直接进主界面看新底栏；测试页仍可通过 GlassTest 路由进入。
  */
-const GLASS_TEST_FIRST = true;
+const GLASS_TEST_FIRST = false;
 import HomeScreen from '../screens/HomeScreen';
 import MessagesScreen from '../screens/MessagesScreen';
 import MediaScreen from '../screens/MediaScreen';

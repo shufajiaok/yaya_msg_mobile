@@ -40,10 +40,12 @@ import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import GlassKitView from '../native/GlassKitView';
+import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import { useBackdropTag } from '../native/backdropTagStore';
 import { canBlur, canLens } from '../theme/glass';
 import {
   GLASS_BAR_FALLBACK,
+  GLASS_BAR_SURFACE,
   GLASS_EFFECT_DEFAULTS,
   GLASS_INDICATOR_FALLBACK,
   GLASS_PROFILE,
@@ -136,6 +138,9 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
 
   const barGlassRef = useRef(null);
   const [barGlassTag, setBarGlassTag] = useState<number | undefined>(undefined);
+  // 卡纸底衬的采集源 tag（bar 玻璃只采它，不透页面内容）
+  const barBaseRef = useRef(null);
+  const [barBaseTag, setBarBaseTag] = useState<number | undefined>(undefined);
   const [dockWidth, setDockWidth] = useState(0);
 
   const activeIndex = Math.max(
@@ -160,6 +165,12 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const onBarLayout = () => {
     const handle = findNodeHandle(barGlassRef.current);
     if (handle != null) setBarGlassTag(handle);
+  };
+
+  // 卡纸底衬 tag：bar 玻璃以它为采集源（覆盖 App 级 backdrop = 整棵内容树的语义）
+  const onBarBaseLayout = () => {
+    const handle = findNodeHandle(barBaseRef.current);
+    if (handle != null) setBarBaseTag(handle);
   };
 
   const onFrameLayout = (evt: LayoutChangeEvent) => {
@@ -190,13 +201,37 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
         ]}
         onLayout={onFrameLayout}
       >
-        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃） */}
+        {/* 卡纸底衬（不透明 surface 色）+ 注册为采集源：bar 玻璃只采它，
+            页面内容不会透上来（用户 2026-11-08：「dock 应该被卡纸遮罩挡住」）。
+            渲染顺序：底衬 → bar 玻璃 → 指示器 → tabs，后者依次覆盖前者。 */}
+        {!degraded && (
+          <GlassKitBackdrop
+            ref={barBaseRef}
+            style={StyleSheet.absoluteFill}
+            onLayout={onBarBaseLayout}
+            pointerEvents="none"
+          >
+            <View
+              style={[
+                StyleSheet.absoluteFill,
+                {
+                  backgroundColor: isDark
+                    ? GLASS_BAR_SURFACE.dark
+                    : GLASS_BAR_SURFACE.light,
+                },
+              ]}
+            />
+          </GlassKitBackdrop>
+        )}
+
+        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）；
+            backdropTag 指向卡纸底衬（未就绪时退回 App 级 backdrop，避免首帧空采） */}
         {!degraded && (
           <GlassKitView
             ref={barGlassRef}
             style={StyleSheet.absoluteFill}
             onLayout={onBarLayout}
-            backdropTag={backdropTag}
+            backdropTag={barBaseTag ?? backdropTag}
             capturable={true}
             blurDp={10}
             tintAlpha={0.06}
