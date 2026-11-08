@@ -97,6 +97,12 @@ import android.view.ViewTreeObserver
  * ③ capture 分辨率取证日志：位图尺寸变化时打一条「capture res view=WxH
  *   bitmap=WxH scale=… lensFullRes=…」（logcat -s GlassKitBlur），装机可直接核对
  *   capture 实际分辨率 vs 视图分辨率。
+ * it.11（指示器「边缘锯齿」第二轮取证修复，见 obtainSmallBlurBitmap / drawGlassFrame
+ * 注释）：
+ * ① 软画布降级路径（嵌套采集 + 快照回录的唯一渲染链）单步 1/6 降采样 = 双线性
+ *   跳采样混叠 → 改逐级 2 倍半采样链（smallBlurChain 缓存复用）；
+ * ② 嵌套取证日志：nested soft render（软画布降级链路一次性证据）+ frameCache
+ *   snapshot（快照分辨率/格式）——与屏幕帧 lens input=gpu 交替即差异实锤。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -444,6 +450,13 @@ class GlassKitView(context: Context) : View(context) {
     /** 一次性 prop 快照日志：首个 onDraw 打一条，核对桥接层实际到手的 prop 值。 */
     private var loggedPropsSnapshot: Boolean = false
 
+    /**
+     * it.11 嵌套取证一次性日志：lensActive 视图落在软画布（被下游玻璃采集 /
+     * 快照回录）时透镜降级为模糊层、模糊走半采样链——打一条输入链证据
+     * （logcat -s GlassKitBlur，与屏幕帧 lens input=gpu 交替出现即差异实锤）。
+     */
+    private var loggedNestedSoftRender: Boolean = false
+
     /* ------- it.9 闪烁取证计数（GlassKitFlicker） ------- */
     /** onDraw 累计帧序（含 isCapturing 短路帧）。 */
     private var flickerSeq: Long = 0L
@@ -517,6 +530,13 @@ class GlassKitView(context: Context) : View(context) {
     private var smallBlurBitmap: Bitmap? = null
     /** it.3：小位图当前降采样系数（缓存按 (w,h,factor) 三元组判断重建）。 */
     private var smallBlurFactor: Int = 0
+
+    /**
+     * it.11：软画布降采样「逐级半采样链」中间位图缓存（obtainSmallBlurBitmap 用）。
+     * 每级尺寸 = 上级 / 2，链长由 (w, h, factor) 决定——三者不变时逐层复用零分配；
+     * 任一变化时整体重建（releaseBitmaps 一并释放）。
+     */
+    private val smallBlurChain = ArrayList<Bitmap>(3)
 
     /**
      * it.4：透镜输入位图双缓冲（ping-pong）——闪烁根因修复。
@@ -870,6 +890,11 @@ class GlassKitView(context: Context) : View(context) {
     private fun releaseBitmaps() {
         captureBitmap?.recycle()
         captureBitmap = null
+        // it.11：半采样链中间位图一并释放（随降采样档 / 尺寸重建）
+        for (chainBitmap in smallBlurChain) {
+            if (!chainBitmap.isRecycled) chainBitmap.recycle()
+        }
+        smallBlurChain.clear()
         // it.9：GPU 离屏链路随位图释放一并重建（reader 尺寸随 capture 变化）
         releaseGpu()
         // it.8：尺寸变化时快照缓存一并释放（下一次 onDraw 末尾按新尺寸重建）
@@ -982,6 +1007,9 @@ class GlassKitView(context: Context) : View(context) {
             bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             frameCacheBitmap = bitmap
             frameCacheCanvas = Canvas(bitmap)
+            // it.11 取证日志：快照分辨率/格式（仅尺寸变化时打一条）——核对嵌套采集
+            // 回放源是否全分辨率（logcat -s GlassKitBlur）
+            Log.i(logTag, "frameCache snapshot: view=$id bitmap=${w}x$h config=${bitmap.config}")
         }
         val cacheCanvas = frameCacheCanvas ?: return
         bitmap!!.eraseColor(Color.TRANSPARENT)
@@ -1057,6 +1085,18 @@ class GlassKitView(context: Context) : View(context) {
             h,
             allowDownsample = !(lensActive && canvas.isHardwareAccelerated),
         )
+        // it.11 嵌套取证：软画布 + 透镜激活 = 本视图正被下游玻璃采集或回录快照，
+        // 透镜输入是「软画布降级渲染」（透镜→blur、blur→半采样链）——与屏幕帧的
+        // lens input=gpu 交替出现即为「dock 正常 / 指示器锯齿」差异链路证据
+        if (lensActive && !canvas.isHardwareAccelerated && !loggedNestedSoftRender) {
+            loggedNestedSoftRender = true
+            Log.i(
+                logTag,
+                "nested soft render: view=$id lensDowngraded=blur" +
+                    " inputCapture=${capture?.width}x${capture?.height} config=${capture?.config}" +
+                    " blurChain=BLUR_DOWNSAMPLE/$BLUR_DOWNSAMPLE(逐级半采样)",
+            )
+        }
         val captureOk = try {
             isCapturing = true
             capture != null &&
@@ -1766,6 +1806,16 @@ class GlassKitView(context: Context) : View(context) {
      * 透镜输入已改走 obtainLensInputShader（1/4 + CPU box blur ×3 近似高斯）。
      * it.3 缓存键 (w, h, factor) 三元组逻辑保留（参数化 factor 不变）；
      * factor ≤ 1 时跳过拷贝直接返回全分辨率采集位图。
+     *
+     * it.11 嵌套输入质量修复（指示器「边缘锯齿」取证修复①）：旧实现单步 factor
+     * 倍降采样——FILTER_BITMAP（双线性）在 6 倍缩放下每 ~6 个源像素只采 1 样，
+     * 5/6 内容被跳过 → 高频内容镜像混叠（块状/噪声锯齿）。取证（it11-before.log）：
+     * dock（capturable 采集源）屏幕帧走 lens input=gpu 全分辨率，而被指示器采集的
+     * 软画布帧走 downsample(fallback)——指示器透镜输入 = 这份混叠渲染，dock 正常、
+     * 指示器锯齿的差异实锤。修复 = 逐级 2 倍半采样链：每级双线性权重覆盖相邻
+     * 2 像素（≈2 像素 box 均值，无跳采样），循环至残余比率 <2 再一次插值到目标
+     * 尺寸。真机默认 GPU 路径不经此函数（仅软画布降级帧 = 嵌套采集 / 快照回录、
+     * 与模拟器 forceDownsample 调试路径受益）。
      */
     private fun obtainSmallBlurBitmap(w: Int, h: Int, capture: Bitmap, factor: Int): Bitmap? {
         if (factor <= 1) return capture
@@ -1778,10 +1828,32 @@ class GlassKitView(context: Context) : View(context) {
             smallBlurBitmap = small
             smallBlurFactor = factor
         }
-        // 复用位图先清空上一帧内容（采集结果可能含透明区域，避免残影）
-        small.eraseColor(Color.TRANSPARENT)
-        val smallCanvas = Canvas(small)
-        smallCanvas.drawBitmap(capture, null, RectF(0f, 0f, sw.toFloat(), sh.toFloat()), capturePaint)
+        small!!.eraseColor(Color.TRANSPARENT)
+        // 逐级 2 倍半采样：源 → w/2 → w/4 → … → 残余比率 <2 → 目标尺寸
+        var src = capture
+        var srcW = w
+        var srcH = h
+        var level = 0
+        while (srcW / 2 >= sw && srcH / 2 >= sh) {
+            val lw = Math.max(1, srcW / 2)
+            val lh = Math.max(1, srcH / 2)
+            var levelBitmap = smallBlurChain.getOrNull(level)
+            if (levelBitmap == null || levelBitmap.width != lw || levelBitmap.height != lh) {
+                if (levelBitmap != null && !levelBitmap.isRecycled) levelBitmap.recycle()
+                levelBitmap = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888)
+                if (level < smallBlurChain.size) smallBlurChain[level] = levelBitmap
+                else smallBlurChain.add(levelBitmap)
+            }
+            levelBitmap.eraseColor(Color.TRANSPARENT)
+            Canvas(levelBitmap).drawBitmap(
+                src, null, RectF(0f, 0f, lw.toFloat(), lh.toFloat()), capturePaint,
+            )
+            src = levelBitmap
+            srcW = lw
+            srcH = lh
+            level++
+        }
+        Canvas(small).drawBitmap(src, null, RectF(0f, 0f, sw.toFloat(), sh.toFloat()), capturePaint)
         return small
     }
 

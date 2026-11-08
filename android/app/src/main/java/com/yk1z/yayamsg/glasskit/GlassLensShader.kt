@@ -31,6 +31,14 @@ import androidx.annotation.RequiresApi
  *   落向玻璃内部，产生边缘放大/内收的液态玻璃观感）；
  * - 色散：R/G/B 分别以 uDispersionPx 的 1.0 / 0.5 / 0.0 倍叠加位移后采样 uBlurred，
  *   取 cR.r / cG.g / cB.b 合成；
+ *   it.11 边缘收敛（指示器「边缘彩边/锯齿」取证修复②）：it.10 只做了 alpha AA，
+ *   真机复验仍有锯齿——取证结论（it11-before.log）：指示器 dispersionPx=20 /
+ *   refractionPx=16（dock dispersionPx=0 无此现象），三通道在最贴边处采样点错位
+ *   最大 refraction+dispersion≈36px，胶囊曲面边缘每像素 R/G/B 取自不同方向/距离
+ *   的内容 → 彩色镶边，观感即「锯齿」。修复 = 色散分量随贴边距离衰减：
+ *   dispFade = clamp(-sdf / max(uDispersionPx, 1), 0, 1)——sdf=0 边界像素三通道
+ *   采样点严格重合（无错位→无彩边），向内 1×uDispersionPx 后恢复满幅色散
+ *   （色散观感保留在带内中段）；uDispersionPx=0（dock）时三通道恒重合，零影响。
  * - 形外像素（sdf > 0）返回透明，配合视图侧圆角 clip 双保险。
  * - it.10 边缘 AA（指示器「透明边缘锯齿」取证修复）：旧实现形内到形外 1px 硬
  *   翻转（sdf≤0 满 alpha、sdf>0 直接透明，无过渡带）——胶囊曲面边界上每个像素
@@ -81,9 +89,11 @@ half4 main(float2 fragCoord) {
     float edgeFactor = clamp(1.0 + sdf / refraction, 0.0, 1.0);
     float2 n = sdfNormal(p, center, uCornerRadiusPx);
     float2 d = n * edgeFactor;
-    // 色散：R / G / B 以 uDispersionPx 的 1.0 / 0.5 / 0.0 倍错开位移采样
-    half4 cR = uBlurred.eval(fragCoord - d * (refraction + uDispersionPx));
-    half4 cG = uBlurred.eval(fragCoord - d * (refraction + uDispersionPx * 0.5));
+    // 色散：R / G / B 以 uDispersionPx 的 1.0 / 0.5 / 0.0 倍错开位移采样；
+    // it.11 色散分量贴边收敛（dispFade：边界 0 → 向内满幅），边缘三通道重合无彩边
+    float dispFade = clamp(-sdf / max(uDispersionPx, 1.0), 0.0, 1.0);
+    half4 cR = uBlurred.eval(fragCoord - d * refraction - d * (uDispersionPx * dispFade));
+    half4 cG = uBlurred.eval(fragCoord - d * refraction - d * (uDispersionPx * 0.5 * dispFade));
     half4 cB = uBlurred.eval(fragCoord - d * refraction);
     // it.10 边缘 AA：贴边 1px 内向 alpha 渐变（过渡带全在形内，不被视图侧无 AA
     // clipPath 切掉）；sdf=0 边界像素 alpha=0 → 曲线边缘无硬翻转阶梯
