@@ -145,6 +145,12 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.capturable = value
     }
 
+    /** it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38；tint 后压暗前）。 */
+    @ReactProp(name = "membraneAlpha", defaultFloat = 0.38f)
+    fun setMembraneAlpha(view: GlassKitView, value: Float) {
+        view.membraneAlpha = value
+    }
+
     override fun onDropViewInstance(view: GlassKitView) {
         // View 从窗口摘除时清掉 PreDraw 监听（视图自身 onDetachedFromWindow 也会兜底清理）
         super.onDropViewInstance(view)

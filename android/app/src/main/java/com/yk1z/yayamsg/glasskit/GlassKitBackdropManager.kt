@@ -1,6 +1,7 @@
 package com.yk1z.yayamsg.glasskit
 
 import android.content.Context
+import android.graphics.Canvas
 import android.view.ViewGroup
 import com.facebook.react.uimanager.ThemedReactContext
 import com.facebook.react.uimanager.ViewGroupManager
@@ -31,6 +32,20 @@ import com.facebook.react.uimanager.ViewGroupManager
  * 的注册保留作双保险（SparseArray put 幂等覆盖，晚到也无害）。
  */
 class GlassKitBackdropView(context: Context) : ViewGroup(context) {
+
+    /**
+     * it.9 闪烁修复：真实屏幕绘制代数指纹（玻璃面板 PreDraw 判定「背景源真变了」）。
+     * 仅硬件加速画布的绘制自增——GlassCaptureEngine.capture 的 targetView.draw
+     * （软画布）是采集机制本身，不是内容变化，计入会让面板互相采集重演重绘风暴。
+     */
+    var drawGeneration: Long = 0L
+        private set
+
+    override fun dispatchDraw(canvas: Canvas) {
+        if (canvas.isHardwareAccelerated) drawGeneration++
+        super.dispatchDraw(canvas)
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         // no-op：布局全权交给 Yoga（见类注释），禁止任何 Android 侧重排
     }

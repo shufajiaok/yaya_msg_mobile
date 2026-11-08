@@ -5,14 +5,20 @@ import android.graphics.Bitmap
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorSpace
+import android.graphics.HardwareRenderer
+import android.media.ImageReader
+import android.hardware.HardwareBuffer
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.RenderNode
 import android.graphics.RuntimeShader
+import android.media.Image
 import android.util.Log
 import kotlin.math.floor
 import android.graphics.Shader
@@ -70,6 +76,15 @@ import android.view.ViewTreeObserver
  * 玻璃链路）；② 嵌套采集重入降级——capturable 视图短路重入时回放最近合成帧
  * 快照（onDraw / recordFrameCache，透镜回录走专用槽 2）；③ 发丝线 alpha 随
  * max(glowTopScale, glowBottomScale) 缩放（顶/底全关 = 完全无高光）。
+ * it.9：① 透镜输入 GPU 全分辨率离屏模糊（纱窗感修复）——HardwareRenderer +
+ * RenderNode(RenderEffect 高斯) → ImageReader → wrapHardwareBuffer 硬件位图
+ * → BitmapShader 喂 AGSL；CPU「1/4 降采样 + box blur ×3」退役为 forceDownsample
+ * 回退路径；② 闪烁回归修复（取证结论）：静止期 6 视图 PreDraw 交叉触发风暴
+ * （GlassKitFlicker 日志：静止 30fps×6 持续重绘、dock 回录 records≈seq）→ UI
+ * 超前 RT ≥2 帧 → 双槽采样碰撞。修复 = 真实刺激代数指纹（propGeneration /
+ * 背景源 drawGeneration，重满预算）+ 无关交叉触发预算递减至静止 + 回录只在
+ * 屏幕帧做 + CPU 槽位升四槽（0/1/2 轮换 + 槽 3 回录专用）；③ membraneAlpha
+ * 膜层 prop（tint 后压暗前白色覆盖层，默认 0.38）。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -93,8 +108,9 @@ class GlassKitView(context: Context) : View(context) {
         /**
          * it.4 透镜输入固定降采样档（常量，不再随模糊半径变化——it.3 的
          * lensDownsampleFactor 自适应设计已废弃为锯齿源，见类头注释）。
-         * 1/4 是「小图 CPU box blur 成本」与「放大后细节保留」的折中档：
-         * hero 1264 宽 → 小图 ~316 宽，box blur 半径 ~12px，单帧成本可控。
+         * ⚠️ it.9 起该档仅剩 forceDownsample（模拟器调试）回退路径使用：
+         * 真机默认走 GPU 全分辨率离屏模糊（HardwareRenderer + RenderEffect 高斯），
+         * 「固定 1/4 降采样 + CPU box blur ×3 → 双线性放大」的像素网格纱窗感链路退役。
          */
         const val LENS_DOWNSAMPLE: Int = 4
 
@@ -113,6 +129,31 @@ class GlassKitView(context: Context) : View(context) {
         const val TARGET_RETRY_MAX: Int = 50
 
         /**
+         * it.9 GPU 全分辨率透镜输入（纱窗感修复）：
+         * HardwareRenderer + RenderNode(RenderEffect 高斯) → ImageReader(RGBA_8888,
+         * GPU_COLOR_OUTPUT|GPU_SAMPLED) → acquireLatestImage → Bitmap.wrapHardwareBuffer
+         * → 硬件位图 BitmapShader 喂 AGSL RuntimeShader。真机默认路径（canLens≥33
+         * 已覆盖 API 门槛：HardwareRenderer/带 usage 的 ImageReader.newInstance 需 29+，
+         * RenderEffect 需 31+）；forceDownsample=true（模拟器）回退 CPU 槽位路径。
+         */
+        /** GPU 路径 ImageReader 最大并发 Image 数（采集持有 ≤ RETAIN，余量给队列）。 */
+        const val GPU_READER_MAX_IMAGES: Int = 4
+        /** GPU 路径已包装硬件位图的保留帧数：RT 回放落后 ≤(RETAIN-1) 帧不碰撞
+         * （与 CPU 三槽 ping-pong 同理；被逐出的 Image close 后缓冲回到 reader 队列复用）。 */
+        const val GPU_IMAGE_RETAIN: Int = 3
+
+        /**
+         * it.9 闪烁修复：静止期外部交叉触发重绘预算。
+         * 取证（GlassKitFlicker 真机日志）：6 玻璃视图互相触发 PreDraw（统一挂在窗口
+         * 根 observer，任一视图重绘即全员收到）→ 静止期持续 ~30fps 重绘风暴；it.4 的
+         * 自激励打断只防「自身 postInvalidate 链」，防不住多视图互triggering。风暴使
+         * UI 帧速超 RenderThread 回放 → 采样落后 ≥2 帧 → 双槽 ping-pong 碰撞（采样
+         * 半擦除小图）= it.4 同款闪烁回归。修复：外部触发按预算调度（每帧自绘不续
+         * 预算），预算耗尽即静止；位移（moved）与 prop 变更（invalidate 直接调用）重满。
+         */
+        const val FOREIGN_REDRAW_BUDGET: Int = 3
+
+        /**
          * 模糊路径强制降级开关：已从编译期常量改为 JS 可控 prop（forceDownsample，
          * GlassKitManager.setForceDownsample 注入）——真机默认走 RenderEffect 真高斯
          *（真机实装反馈：1/6 降采样双线性放大呈锯齿、模糊观感不足），模拟器由测试页
@@ -126,6 +167,15 @@ class GlassKitView(context: Context) : View(context) {
          */
         /** drawBlurredLayer 诊断日志 tag（logcat: adb logcat -s GlassKitBlur）。 */
         const val BLUR_LOG_TAG: String = "GlassKitBlur"
+
+        /**
+         * it.9 闪烁取证日志 tag（logcat: adb logcat -s GlassKitFlicker）：
+         * onDraw 帧序/帧间隔/透镜槽位/短路与回录计数——定位「全部组件静止期闪烁」回归。
+         * 前每视图 600 帧逐帧打点，之后每 300 帧打一条汇总（防刷屏）。
+         */
+        const val FLICKER_LOG_TAG: String = "GlassKitFlicker"
+        const val FLICKER_LOG_FULL_FRAMES: Long = 600L
+        const val FLICKER_LOG_STEP: Long = 300L
 
         /**
          * it.7 边缘高光窄带的 stop 位置表：t = 距轮廓边缘的距离 / 带深度 ∈ [0,1]，
@@ -163,7 +213,7 @@ class GlassKitView(context: Context) : View(context) {
             // 会连累新 tag 的晚挂载重试提前停摆）
             pendingResolveRetries = 0
             resolveTarget()
-            invalidate()
+            markPropChanged()
         }
 
     /** 基准模糊半径（dp；最终半径 = blurDp * blurScale * density）。 */
@@ -171,7 +221,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** tint 基准 alpha（最终 alpha = min(tintAlpha * tintScale, 0.12)）。 */
@@ -179,7 +229,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** tint 颜色（ColorInt；alpha 分量被 withAlpha 覆盖，只取 RGB）。 */
@@ -191,7 +241,7 @@ class GlassKitView(context: Context) : View(context) {
             }
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** 折射位移基准（px；透镜时乘 lensScale）。 */
@@ -202,7 +252,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 0f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** 色散位移基准（px；透镜时乘 lensScale）。 */
@@ -212,7 +262,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 0f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** 圆角半径（dp）。 */
@@ -222,7 +272,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 0f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** 压暗层 alpha（#000，独立于 tint）。 */
@@ -232,7 +282,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 0f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** 模糊倍率（glass.ts blurScale，区间 0–2.5 由 JS store 钳制）。 */
@@ -240,7 +290,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** tint 倍率（glass.ts tintScale，区间 0–3 由 JS store 钳制）。 */
@@ -248,7 +298,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** 透镜倍率（glass.ts lensScale，区间 0–2 由 JS store 钳制；0 = 关透镜）。 */
@@ -256,7 +306,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /** 模糊总开关（JS reduceTransparency 门控用）。 */
@@ -264,7 +314,7 @@ class GlassKitView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
-            invalidate()
+            markPropChanged()
         }
 
     /**
@@ -277,7 +327,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 1f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** it.6 柔光细化：描边亮度倍率（基准 alpha = 0.14 × glowScale × glowAlphaScale，clamp 0–1）。 */
@@ -286,7 +336,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 1f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** it.6 柔光细化：描边宽度倍率（宽 = 1dp × glowScale × glowWidthScale，clamp 0.5–8dp）。 */
@@ -295,7 +345,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 1f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** it.6 柔光细化：顶缘高光加强倍率（视图上半描边 alpha 再乘本值，clamp 0–1 终值）。 */
@@ -304,7 +354,7 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 1f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
     /** it.6 柔光细化：底缘高光加强倍率（视图下半描边 alpha 再乘本值，clamp 0–1 终值）。 */
@@ -313,17 +363,32 @@ class GlassKitView(context: Context) : View(context) {
             val v = if (value.isFinite()) value else 1f
             if (field == v) return
             field = v
-            invalidate()
+            markPropChanged()
         }
 
-    /** 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时由测试页开关开启）。 */
+    /** 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时由测试页开关开启）。
+     *  it.9 起同时控制透镜输入路径：true = CPU 槽位降采样模糊；false = GPU 全分辨率离屏高斯。 */
     var forceDownsample: Boolean = false
         set(value) {
             if (field == value) return
             field = value
             // 路径切换后重置日志去重，让新分支重新打一条诊断日志
             lastLoggedBlurPath = null
-            invalidate()
+            markPropChanged()
+        }
+
+    /**
+     * it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38）。绘制顺序在 ③tint 之后、
+     * ④压暗之前——实例库「膜层」的等效物（通透度越低膜越厚；参考库
+     * LiquidGlass.kt:230 tintAlpha=(1-transparency) 同构，此处按任务书口径
+     * 以独立白色层表达，不影响 H1 tint 钳制契约）。
+     */
+    var membraneAlpha: Float = 0.38f
+        set(value) {
+            val v = if (value.isFinite()) value.coerceIn(0f, 1f) else 0.38f
+            if (field == v) return
+            field = v
+            markPropChanged()
         }
 
     /**
@@ -349,6 +414,15 @@ class GlassKitView(context: Context) : View(context) {
 
     private val density: Float = resources.displayMetrics.density
 
+    /**
+     * it.9 闪烁修复：真实屏幕绘制代数指纹——本视图作为采集源（capturable=true，
+     * 其他玻璃的 backdropTag 指向本视图）时，下游玻璃的 PreDraw 用它判定「源内容
+     * 真变了」。仅硬件加速画布的自绘自增；采集链路内的软画布 onDraw（被下游
+     * capture 时）与快照回录不计入（同 GlassKitBackdropView.drawGeneration 口径）。
+     */
+    var drawGeneration: Long = 0L
+        private set
+
     /** drawBlurredLayer 诊断日志 tag（companion.BLUR_LOG_TAG 同值，实例侧便捷引用）。 */
     private val logTag: String = BLUR_LOG_TAG
 
@@ -358,8 +432,26 @@ class GlassKitView(context: Context) : View(context) {
     /** 一次性 prop 快照日志：首个 onDraw 打一条，核对桥接层实际到手的 prop 值。 */
     private var loggedPropsSnapshot: Boolean = false
 
+    /* ------- it.9 闪烁取证计数（GlassKitFlicker） ------- */
+    /** onDraw 累计帧序（含 isCapturing 短路帧）。 */
+    private var flickerSeq: Long = 0L
+    /** 上一次 onDraw 的 uptimeMillis（帧间隔计算）。 */
+    private var flickerLastUptime: Long = 0L
+    /** 帧间隔 <8ms 的帧数（异常高频重绘证据）。 */
+    private var flickerFastFrames: Int = 0
+    /** isCapturing 短路帧数（capture 重入路径）。 */
+    private var flickerCaptureSkips: Int = 0
+    /** recordFrameCache 回录次数（capturable 视图）。 */
+    private var flickerRecordCount: Int = 0
+    /** 透镜输入槽位写入次数（obtainLensInputShader 模糊路径）。 */
+    private var flickerSlotWrites: Int = 0
+    /** 节流调度打点上限（imm/delay 分支，防刷屏）。 */
+    private var flickerSchedLogs: Int = 0
+
     private val capturePaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val tintPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    /** it.9 膜层专用 Paint（WHITE，alpha 每次 draw 重设）。 */
+    private val membranePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val dimmingPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val strokePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -421,23 +513,24 @@ class GlassKitView(context: Context) : View(context) {
      * （用户反馈「遮挡和不遮挡之间切换」）。双缓冲后第 N 帧写入的位图与第 N-1 帧
      * 被 RenderThread 采样的位图恒不同实例，竞态根除。
      */
-    private val lensInputBuffers: Array<Bitmap?> = arrayOfNulls(3)
+    private val lensInputBuffers: Array<Bitmap?> = arrayOfNulls(4)
     /** it.4：双缓冲各自的 BitmapShader（绑定各自位图实例，位图重建时一并重建）。
-     *  it.8：槽位扩为 3——0/1 仍为屏幕绘制 ping-pong；槽 2 为快照回录专用
-     *  （recordFrameCache 重跑透镜管线时不参与屏幕帧轮换，避免覆写 RenderThread
-     *  正在采样的槽位、重演双缓冲消灭过的跨帧竞态）。 */
-    private val lensShaderInputs: Array<BitmapShader?> = arrayOfNulls(3)
-    /** it.4：本帧写入的双缓冲槽位（屏幕绘制路径 0/1 交替；快照回录固定槽 2）。 */
+     *  it.8：槽位扩 3——0/1 屏幕 ping-pong；槽 2 快照回录专用。
+     *  it.9：扩为 4——CPU 回退路径 ping-pong 升级为三槽轮换（0/1/2，RT 回放落后
+     *  ≤2 帧不碰撞），槽 3 快照回录专用（取证结论：静止期重绘风暴下 RT 落后可超
+     *  1 帧，双槽会碰撞；回录槽位再隔离一档）。 */
+    private val lensShaderInputs: Array<BitmapShader?> = arrayOfNulls(4)
+    /** it.4：本帧写入的槽位（屏幕绘制路径 0/1/2 三槽轮换；快照回录固定槽 3）。 */
     private var lensInputSlot: Int = 0
 
     /* ------- it.4-R2（QA 回修）：小图 CPU box blur 缓冲与复用对象（零每帧分配） ------- */
 
     /** 各槽位像素缓冲（box blur 原地读写），尺寸随槽位位图复用。 */
-    private val lensPixelBuffers: Array<IntArray?> = arrayOfNulls(3)
+    private val lensPixelBuffers: Array<IntArray?> = arrayOfNulls(4)
     /** box blur 水平/垂直 pass 的临时缓冲（UI 单线程使用，尺寸复用）。 */
     private var lensBlurTempBuffer: IntArray? = null
     /** 各槽位复用 Canvas（绑定槽位位图实例，位图重建时一并重建）。 */
-    private val lensCanvases: Array<Canvas?> = arrayOfNulls(3)
+    private val lensCanvases: Array<Canvas?> = arrayOfNulls(4)
     /** 三盒半径缓存（boxesForGauss 结果，radius 不变时复用）。 */
     private var lensBoxSizes: IntArray? = null
     private var lensBoxRadius: Int = -1
@@ -457,6 +550,28 @@ class GlassKitView(context: Context) : View(context) {
 
     /** API 31+ RenderNode 模糊路径的复用节点。 */
     private var blurRenderNode: RenderNode? = null
+
+    /* ------- it.9 GPU 全分辨率透镜输入（纱窗感修复） ------- */
+
+    /** 离屏渲染器（绑定 ImageReader surface；尺寸变化 / detach 时重建释放）。 */
+    private var gpuRenderer: HardwareRenderer? = null
+    /** 离屏录制节点：内容 = 全分辨率 capture 位图，effect = 高斯 RenderEffect。 */
+    private var gpuNode: RenderNode? = null
+    /** 离屏接收器：RGBA_8888 + GPU_COLOR_OUTPUT|GPU_SAMPLED，acquire 硬件缓冲。 */
+    private var gpuReader: ImageReader? = null
+    /** reader 尺寸（capture 位图尺寸，变化时重建）。 */
+    private var gpuReaderWidth: Int = -1
+    private var gpuReaderHeight: Int = -1
+    /** 已包装硬件位图保留环（Image+Bitmap 配对，逐出即 close 归还缓冲）。 */
+    private val gpuImageRing = ArrayList<Image>(GPU_IMAGE_RETAIN + 1)
+    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸不变复用）。 */
+    private var gpuBlurEffect: RenderEffect? = null
+    private var gpuBlurSigma: Float = -1f
+    private var gpuEffectWidth: Int = -1
+    private var gpuEffectHeight: Int = -1
+    /** 当前帧 GPU 输出的 BitmapShader（硬件位图实例逐帧更换，随换重建）。 */
+    private var gpuInputShader: BitmapShader? = null
+    private var gpuInputShaderBitmap: Bitmap? = null
 
     /** S2 修复：RenderEffect 缓存（半径/尺寸变化才重建，避免每帧新建；detach 释放）。 */
     private var blurEffect: RenderEffect? = null
@@ -480,6 +595,28 @@ class GlassKitView(context: Context) : View(context) {
      */
     private var selfInvalidationPending: Boolean = false
 
+    /**
+     * it.9 闪烁修复：prop 代数（真实外部刺激指纹，见 markPropChanged 注释）。
+     * PreDraw 据此区分「真实 prop 变化」（重满外部预算）与「无关视图交叉触发」
+     * （预算递减直至静止）。
+     */
+    private var propGeneration: Long = 0L
+    /** PreDraw 侧已见过的 propGeneration（变化才视为真实刺激）。 */
+    private var lastSeenPropGeneration: Long = -1L
+    /** 背景源（GlassKitBackdropView / capturable GlassKitView）已见过的 drawGeneration。 */
+    private var lastSeenSourceGeneration: Long = -1L
+
+    /**
+     * it.9 闪烁修复：静止期外部交叉触发重绘剩余预算。
+     * 取证（GlassKitFlicker 真机日志）：6 玻璃视图的 PreDraw 统一挂在窗口根
+     * observer，任一视图重绘全员收到 → 静止期持续 ~30fps 重绘风暴；it.4 的自激励
+     * 打断只防「自身 postInvalidate 链」，防不住多视图互triggering。风暴使 UI 帧速
+     * 超 RenderThread 回放 → 采样落后 ≥2 帧 → 双槽 ping-pong 碰撞（采样半擦除小
+     * 图）= it.4 同款闪烁回归。修复：无关交叉触发按预算调度直至静止；真实刺激
+     * （位移 / prop 代数变化 / 背景源 drawGeneration 变化）重满预算。
+     */
+    private var foreignRedrawBudget: Int = FOREIGN_REDRAW_BUDGET
+
     private val preDrawListener = ViewTreeObserver.OnPreDrawListener {
         // it.4 修复（抖动）：面板 onScreen 位置变化（拖动 / 滚动）→ 立即 invalidate
         // 绕过 33ms 节流——重绘帧内 onDraw 用 getLocationOnScreen 现值采集，内容与
@@ -489,15 +626,38 @@ class GlassKitView(context: Context) : View(context) {
         val moved = !hasLastDrawnLocation ||
             preDrawLocation[0] != lastDrawnLocation[0] ||
             preDrawLocation[1] != lastDrawnLocation[1]
+        // 背景源真实重绘指纹（it.9）：采集目标自身 hw 绘制时自增（见各源类）。
+        // 捕获路径的软画布绘制不计入（capture 的 targetView.draw 是采集机制本身，
+        // 不是内容变化——若计入，面板互相采集会重演风暴）。
+        val sourceGeneration = when (val target = targetView) {
+            is GlassKitBackdropView -> target.drawGeneration
+            is GlassKitView -> target.drawGeneration
+            else -> -1L
+        }
         if (moved) {
+            // it.9：位移是真实外部刺激，重满外部重绘预算
+            foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
             invalidate()
         } else if (selfInvalidationPending) {
             // it.4 修复（闪烁伴生）：本次 traversal 由自身 postInvalidate 触发
-            // （静止自激励环）→ 不再续期，静止后自然停绘
+            // → 不再续期；it.9：自绘消费不续预算（防风暴复活）
             selfInvalidationPending = false
-        } else {
+        } else if (propGeneration != lastSeenPropGeneration) {
+            // it.9：prop 真实变化（滑块拖动 / blurEnabled / backdropTag 等）→ 重满
+            lastSeenPropGeneration = propGeneration
+            foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
+            scheduleThrottledInvalidate()
+        } else if (sourceGeneration >= 0L && sourceGeneration != lastSeenSourceGeneration) {
+            // it.9：背景源真实重绘（滚动 / 背景动画 / 下层玻璃内容变化）→ 重满
+            lastSeenSourceGeneration = sourceGeneration
+            foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
+            scheduleThrottledInvalidate()
+        } else if (foreignRedrawBudget > 0) {
+            // it.9：无关交叉触发按预算调度——预算递减，耗尽即静止（风暴打断）
+            foreignRedrawBudget--
             scheduleThrottledInvalidate()
         }
+        // it.9：预算耗尽的无关 PreDraw 直接忽略（等待真实刺激）
         true // 恒返回 true：只监听，不拦截背景树自身的绘制
     }
 
@@ -541,6 +701,8 @@ class GlassKitView(context: Context) : View(context) {
         detachPreDraw()
         // S2 修复：RenderEffect 缓存随 detach 释放，不留跨窗口引用
         releaseBlurEffect()
+        // it.9：GPU 离屏链路（Image 环 / reader / renderer）随 detach 释放
+        releaseGpu()
         // E2 修复：不跨窗口持有 backdrop 视图引用（重挂载时 resolveTarget 会从
         // 注册表重新解析，早退分支依赖的 targetView 重建后依然正确）
         targetView = null
@@ -653,17 +815,42 @@ class GlassKitView(context: Context) : View(context) {
         attachedObserver = null
     }
 
+    /**
+     * it.9 闪烁修复：prop 代数指纹（真实外部刺激标记）。
+     * 仅 prop setter 经本方法触发重绘时自增 propGeneration——PreDraw 据此区分
+     * 「真实 prop 变化」（重满预算）与「无关视图交叉触发」（预算递减直至静止）。
+     * ⚠️ 不能在 invalidate() 覆写里打指纹：节流延迟帧（postInvalidateDelayed）的
+     * 标志可能已被无关 traversal 的 PreDraw 提前消费，该帧 invalidate 会被误判为
+     * prop 变化 → 重满预算 → 6 视图互相喂帧的重绘风暴永不停歇（真机取证复现）。
+     */
+    private fun markPropChanged() {
+        propGeneration++
+        invalidate()
+    }
+
     /** 33ms 节流：到点直接 invalidate，未到点用 postInvalidateDelayed 排队到下一拍。
      *  it.4：自激励环打断——本方法设置的 selfInvalidationPending 会让「由本调用引发的
-     *  traversal」的 PreDraw 不再续期（见 preDrawListener）。 */
+     *  traversal」的 PreDraw 不再续期（见 preDrawListener）。
+     *  it.9：延迟分支同样置位（旧实现漏置——延迟帧被误判为外部刺激，风暴通道之一）。 */
     private fun scheduleThrottledInvalidate() {
         val now = SystemClock.uptimeMillis()
         val elapsed = now - lastInvalidateAt
         if (elapsed >= FRAME_INTERVAL_MS) {
             lastInvalidateAt = now
             selfInvalidationPending = true
+            // it.9 取证：imm = 立即排队（自激励环入口）
+            if (flickerSchedLogs < 600) {
+                flickerSchedLogs++
+                Log.i(FLICKER_LOG_TAG, "view=$id sched=imm elapsed=${elapsed}ms budget=$foreignRedrawBudget")
+            }
             postInvalidate()
         } else {
+            selfInvalidationPending = true
+            // it.9 取证：delay = 延迟排队
+            if (flickerSchedLogs < 600) {
+                flickerSchedLogs++
+                Log.i(FLICKER_LOG_TAG, "view=$id sched=delay elapsed=${elapsed}ms budget=$foreignRedrawBudget")
+            }
             postInvalidateDelayed(FRAME_INTERVAL_MS - elapsed)
         }
     }
@@ -671,6 +858,8 @@ class GlassKitView(context: Context) : View(context) {
     private fun releaseBitmaps() {
         captureBitmap?.recycle()
         captureBitmap = null
+        // it.9：GPU 离屏链路随位图释放一并重建（reader 尺寸随 capture 变化）
+        releaseGpu()
         // it.8：尺寸变化时快照缓存一并释放（下一次 onDraw 末尾按新尺寸重建）
         frameCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
         frameCacheBitmap = null
@@ -716,6 +905,23 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // it.9：真实屏幕绘制代数自增（仅 hw 画布；软画布 = 被下游采集 / 回录，非内容变化）
+        if (canvas.isHardwareAccelerated) drawGeneration++
+        // it.9 闪烁取证：帧序 / 帧间隔 / 短路与回录计数（前 600 帧逐帧，之后每 300 帧）
+        flickerSeq++
+        val now = SystemClock.uptimeMillis()
+        val delta = if (flickerLastUptime > 0L) now - flickerLastUptime else -1L
+        flickerLastUptime = now
+        if (delta in 1..8) flickerFastFrames++
+        val fullLog = flickerSeq <= FLICKER_LOG_FULL_FRAMES
+        if (fullLog || flickerSeq % FLICKER_LOG_STEP == 0L) {
+            Log.i(
+                FLICKER_LOG_TAG,
+                "view=$id seq=$flickerSeq delta=${delta}ms fast=$flickerFastFrames" +
+                    " skips=$flickerCaptureSkips records=$flickerRecordCount" +
+                    " slotWrites=$flickerSlotWrites hw=${canvas.isHardwareAccelerated}",
+            )
+        }
         // it.7 POC 采集重入防护：capture() 经 backdrop.draw 间接触发本 onDraw 时
         // 直接跳过（见 isCapturing 注释），防止无限递归与自采集反馈。
         // it.8 嵌套采集降级：capturable 视图（可能被下游玻璃采集）在重入短路时
@@ -723,6 +929,7 @@ class GlassKitView(context: Context) : View(context) {
         // （recordingFrameCache）仍纯短路，防缓存位图自绘别名。非 capturable
         // 视图维持空白短路（backdrop 自采集时排除自身的期望语义不变）。
         if (isCapturing) {
+            flickerCaptureSkips++
             if (capturable && !recordingFrameCache) {
                 frameCacheBitmap?.let { snap ->
                     if (!snap.isRecycled && width > 0 && height > 0) {
@@ -738,7 +945,10 @@ class GlassKitView(context: Context) : View(context) {
             return
         }
         drawGlassFrame(canvas)
-        if (capturable) recordFrameCache()
+        // it.9 取证结论修复：快照回录只在屏幕帧（hw 画布）做——采集链路内的软画布
+        // onDraw（下游玻璃 capture 触发）回录是纯浪费：内容与刚画完的屏幕帧相同，
+        // 且每次回录都重跑一次 backdrop 采集（取证日志 records≈seq：dock 每帧双管线）。
+        if (capturable && canvas.isHardwareAccelerated) recordFrameCache()
     }
 
     /**
@@ -763,6 +973,7 @@ class GlassKitView(context: Context) : View(context) {
         }
         val cacheCanvas = frameCacheCanvas ?: return
         bitmap!!.eraseColor(Color.TRANSPARENT)
+        flickerRecordCount++
         recordingFrameCache = true
         try {
             drawGlassFrame(cacheCanvas)
@@ -864,6 +1075,15 @@ class GlassKitView(context: Context) : View(context) {
             // floor=30 → 30/255≈0.1176 ≤ 0.12，H1 契约恒不超出）
             tintPaint.alpha = floor(finalTintAlpha * 255f).toInt()
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), tintPaint)
+        }
+
+        // ④.5 膜层（it.9）：WHITE @ membraneAlpha——实例库「膜层」的等效物
+        // （通透度越低膜越厚）。绘制顺序在 tint 之后、压暗之前（任务书规格）；
+        // 原生侧绘制，不产生 JS 内联 rgba，glass-guard inline-rgba 计数无影响。
+        if (membraneAlpha > 0f) {
+            membranePaint.color = Color.WHITE
+            membranePaint.alpha = Math.round(membraneAlpha * 255f)
+            canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), membranePaint)
         }
 
         // ⑤ 压暗：#000 @ dimmingAlpha（独立于 tint）
@@ -1026,10 +1246,11 @@ class GlassKitView(context: Context) : View(context) {
      */
 
     /**
-     * ③ 透镜路径（API 33+）：it.4-R2 真模糊输入——「1/4 降采样 + 小图 CPU
-     * box blur ×3 近似高斯」（见 obtainLensInputShader），模糊结果经双缓冲
-     * BitmapShader 喂 RuntimeShader，uRefractionPx / uDispersionPx 乘 lensScale，
-     * 一次 drawRect 逐像素求值。lensPaint 为复用实例（QA GC churn 顺带修）。
+     * ③ 透镜路径（API 33+）：it.9 GPU 全分辨率离屏高斯输入（默认）——
+     * HardwareRenderer + RenderNode(RenderEffect) → ImageReader → 硬件位图
+     * BitmapShader 喂 RuntimeShader（obtainGpuInputShader）；forceDownsample 或
+     * GPU 失败时回退 CPU 路径（四槽轮换 + 小图 box blur ×3）。uRefractionPx /
+     * uDispersionPx 乘 lensScale，一次 drawRect 逐像素求值。lensPaint 为复用实例。
      */
     private fun drawLensLayer(
         canvas: Canvas,
@@ -1050,31 +1271,26 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     /**
-     * it.4-R2（QA 回修）：透镜输入 =「固定 1/4 降采样 + 小图 CPU box blur ×3
-     * 迭代近似高斯」+ 双缓冲。
+     * it.9：透镜输入获取（纱窗感修复核心）。
      *
-     * 首版 BlurMaskFilter 方案被 QA 证伪废弃：BlurMaskFilter 只作用于绘制图元的
-     * alpha 遮罩（Skia 管线 geometry→mask→maskFilter→×shader color），不参与
-     * shader 采样的位图内容；外扩 pad 绘制后可见区全部落在遮罩内部（coverage
-     * ≈99.5%），模糊输出全在位图外不可见区，视觉零贡献——等价于纯 1/4 双线性
-     * 降采样放大。回修为标准 CPU 三盒高斯近似（Ivan Kutskir fast-gaussian：
-     * boxesForGauss(sigma, 3)，每盒水平 + 垂直各一次 O(n) 滑窗）：
-     * - radius（小图坐标系）= round(blurRadiusPx / LENS_DOWNSAMPLE)，钳 1–60；
-     *   sigma = radius / 2（对齐 Skia「radius≈2σ」口径，hero 默认档 sigma≈6）。
-     * - 像素走 ARGB IntArray，先预乘（premultiply）再模糊后反预乘，杜绝
-     *   半透明像素通道串色的暗边；滑窗边界 clamp（不引入透明 padding，
-     *   天然无边缘透明衰减，首版 CLAMP 外扩 pad 方案一并废弃）。
-     * - blur 在槽位位图副本（IntArray）上原地完成，本帧写入槽位 (slot+1)%2，
-     *   与 RenderThread 正在采样的上一帧槽位恒不同实例——双缓冲竞态防护不变。
-     * - blurRadiusPx < 0.5（blurScale≈0）：跳过整条降采样+模糊管线，零拷贝绑定
-     *   全分辨率 capture（localMatrix 映射回视图坐标；capture 超宽降采样时
-     *   为 ~1.04× 轻微放大，观感对齐 it.3 清晰折射）。已知的理论暴露：
-     *   RenderThread 采样 captureBitmap 与下一帧 capture() 变异跨帧竞态——与
-     *   raw/RenderNode 路径既有暴露等价，非本回修引入。
-     * 纯模糊路径（drawBlurredLayer 固定 1/6 档）行为不动，不经此处。
+     * 真机默认 = GPU 全分辨率离屏模糊路径：capture 位图（全分辨率）→
+     * HardwareRenderer + RenderNode(RenderEffect.createBlurEffect 高斯) →
+     * ImageReader（RGBA_8888，GPU_COLOR_OUTPUT|GPU_SAMPLED_IMAGE）→
+     * acquireLatestImage → Bitmap.wrapHardwareBuffer → 硬件位图 → BitmapShader
+     * → AGSL RuntimeShader setInputShader。每帧产出全新硬件位图（保留
+     * GPU_IMAGE_RETAIN=3 帧环，RenderThread 回放落后 ≤2 帧不碰撞）——
+     * ① it.4 的「固定 1/4 降采样 + CPU box blur ×3 → 双线性放大」像素网格
+     *   （用户报告的「网格纱窗感」，根因：小图放大插值）根除；
+     * ② 跨帧采样竞态结构性消除（硬件缓冲 acquire 后只读，永不 UI 变异）。
+     * blurScale≈0（blurRadiusPx<0.5）同样走 GPU 离屏（不挂 RenderEffect），
+     * 消除旧零拷贝路径「RT 采样 captureBitmap vs UI 每帧变异」的已知竞态；
+     * GPU 不可用时 sharp 才回退零拷贝（维持 it.4-R2 行为，竞态暴露与旧版一致）。
      *
-     * @return 本帧输入的 BitmapShader（模糊路径 = 新写入槽位；清晰路径 = capture
-     *         零拷贝），已设好位图→视图坐标放大矩阵；null = 位图/缓冲创建失败。
+     * forceDownsample=true（模拟器 GPU 缺陷调试）：整条 GPU 路径跳过，直接走
+     * CPU 槽位路径（保留 it.4-R2「1/4 降采样 + box blur ×3」观感）。
+     *
+     * @return 本帧输入的 BitmapShader（已设位图→视图坐标放大矩阵）；
+     *         null = 位图/缓冲创建失败。
      */
     private fun obtainLensInputShader(
         w: Int,
@@ -1082,7 +1298,16 @@ class GlassKitView(context: Context) : View(context) {
         capture: Bitmap,
         blurRadiusPx: Float,
     ): BitmapShader? {
-        // ---- blurScale≈0：全分辨率清晰折射（零拷贝，QA 观察项恢复） ----
+        // ---- it.9 GPU 全分辨率离屏路径（真机默认） ----
+        if (!forceDownsample && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val gpuShader = obtainGpuInputShader(w, h, capture, blurRadiusPx)
+            if (gpuShader != null) return gpuShader
+            // GPU 链路任一环失败（reader/renderer 创建、renderFrame、wrap）：
+            // 一次性日志后落 CPU 回退，不为失败帧中断玻璃渲染
+            logBlurPathOnce("lens input=cpu(gpu-fallback)", blurRadiusPx, true)
+        }
+
+        // ---- blurScale≈0 回退：全分辨率清晰折射（零拷贝，it.4-R2 语义保留） ----
         if (blurRadiusPx < 0.5f) {
             var sharp = lensSharpShader
             if (sharp == null || lensSharpShaderCapture !== capture) {
@@ -1099,17 +1324,16 @@ class GlassKitView(context: Context) : View(context) {
             return sharp
         }
 
-        // ---- 模糊路径：1/4 降采样 → box blur ×3 ----
+        // ---- CPU 槽位回退：1/4 降采样 → box blur ×3（forceDownsample / GPU 失败） ----
         val sw = Math.max(1, w / LENS_DOWNSAMPLE)
         val sh = Math.max(1, h / LENS_DOWNSAMPLE)
-        // ping-pong：切到「非上一帧采样中」的槽位再写入；快照回录固定走专用槽 2
-        //（it.8：回录与屏幕绘制同一帧内先后各跑一次管线，若共用 ping-pong 槽位，
-        // 第二次会写回 RenderThread 正在采样的槽——三槽隔离根除该竞态）
+        // it.9：屏幕帧三槽轮换（0/1/2，RT 回放落后 ≤2 帧不碰撞）；快照回录固定走
+        // 专用槽 3（回录与屏幕绘制同帧先后各跑一次管线时互不覆写采样槽）
         val slot: Int
         if (recordingFrameCache) {
-            slot = 2
+            slot = 3
         } else {
-            lensInputSlot = (lensInputSlot + 1) % 2
+            lensInputSlot = (lensInputSlot + 1) % 3
             slot = lensInputSlot
         }
         var small = lensInputBuffers[slot]
@@ -1156,7 +1380,212 @@ class GlassKitView(context: Context) : View(context) {
             h.toFloat() / sh.toFloat(),
         )
         input.setLocalMatrix(lensMatrix)
+        // it.9 取证：槽位写入计数（含槽位号，核对 ping-pong/回录槽隔离）
+        flickerSlotWrites++
+        val fullLog = flickerSeq <= FLICKER_LOG_FULL_FRAMES
+        if (fullLog || flickerSlotWrites % 120 == 0) {
+            Log.i(
+                FLICKER_LOG_TAG,
+                "view=$id slotWrite=$flickerSlotWrites slot=$slot rec=$recordingFrameCache" +
+                    " small=${sw}x$sh radius=$radius",
+            )
+        }
         return input
+    }
+
+    /* ---------------- it.9 GPU 全分辨率离屏模糊链路 ---------------- */
+
+    /**
+     * GPU 离屏渲染一帧 capture → 硬件位图 BitmapShader。
+     *
+     * 链路：RenderNode（内容 = capture 全分辨率位图）+ RenderEffect（高斯，
+     * sigma 按 captureScale 折算——capture 可能因 MAX_CAPTURE_WIDTH_PX 超宽降采样，
+     * 视图 px 的模糊半径需乘 captureScale 才是位图像素语义）→ HardwareRenderer
+     * （setOpaque(false) 保 alpha；AOSP ScreenshotHardwareRenderer 同款同步模式：
+     * renderFrame 阻塞至 GPU 完成后才 acquire）→ acquireLatestImage →
+     * wrapHardwareBuffer。Image 保留环 GPU_IMAGE_RETAIN=3：逐出（close 归还
+     * reader 缓冲）的是 3 帧前的缓冲，RT 回放落后 ≤2 帧不采样到将复用缓冲。
+     *
+     * @return 已设好位图→视图坐标放大矩阵的 BitmapShader；null = 链路失败（调用方落 CPU 回退）。
+     */
+    private fun obtainGpuInputShader(
+        w: Int,
+        h: Int,
+        capture: Bitmap,
+        blurRadiusPx: Float,
+    ): BitmapShader? {
+        val cw = capture.width
+        val ch = capture.height
+        val reader = obtainGpuReader(cw, ch) ?: return null
+        val renderer = obtainGpuRenderer(reader) ?: return null
+        val node = obtainGpuNode(cw, ch)
+        // sigma：视图 px 半径 × captureScale → 位图 px；Effect 缓存（半径/尺寸不变复用）
+        val captureScaleX = cw.toFloat() / w.toFloat()
+        if (blurRadiusPx >= 0.5f) {
+            val sigma = (blurRadiusPx * captureScaleX).coerceAtLeast(0.5f)
+            node.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
+        } else {
+            // blurScale≈0（清晰折射）：不挂 Effect，仅借离屏链路产独立硬件缓冲
+            node.setRenderEffect(null)
+        }
+        val recordingCanvas = node.beginRecording()
+        try {
+            recordingCanvas.drawBitmap(capture, null, RectF(0f, 0f, cw.toFloat(), ch.toFloat()), capturePaint)
+        } finally {
+            node.endRecording()
+        }
+        renderer.setContentRoot(node)
+        // 同步渲染（AOSP ScreenshotHardwareRenderer 同款模式）：setWaitForPresent(true)
+        // 阻塞至帧提交完成，返回后 ImageReader 队列内必有一帧可 acquire。
+        val syncStatus = try {
+            renderer.createRenderRequest().setWaitForPresent(true).syncAndDraw()
+        } catch (t: Throwable) {
+            Log.w(logTag, "GPU syncAndDraw failed: $t")
+            HardwareRenderer.SYNC_CONTEXT_IS_STOPPED
+        }
+        if (syncStatus != HardwareRenderer.SYNC_OK &&
+            syncStatus != HardwareRenderer.SYNC_REDRAW_REQUESTED
+        ) {
+            return null
+        }
+        val image = reader.acquireLatestImage() ?: return null
+        val hardwareBuffer = image.hardwareBuffer
+        val bitmap = if (hardwareBuffer != null) {
+            try {
+                Bitmap.wrapHardwareBuffer(hardwareBuffer, ColorSpace.get(ColorSpace.Named.SRGB))
+            } catch (t: Throwable) {
+                Log.w(logTag, "wrapHardwareBuffer failed: $t")
+                null
+            }
+        } else {
+            null
+        }
+        if (bitmap == null) {
+            image.close()
+            return null
+        }
+        // 保留环：超出 RETAIN 的旧 Image close（缓冲归还 reader，可被后续帧复用；
+        // RT 回放落后 ≤2 帧时采样的仍是环内未逐出缓冲）
+        gpuImageRing.add(image)
+        while (gpuImageRing.size > GPU_IMAGE_RETAIN) {
+            gpuImageRing.removeAt(0).close()
+        }
+        // 一次性路径日志（分支去重）：确认真机确实走 GPU（logcat -s GlassKitBlur）
+        logBlurPathOnce(
+            "lens input=gpu sigma=${if (blurRadiusPx >= 0.5f) blurRadiusPx * captureScaleX else 0f}",
+            blurRadiusPx,
+            true,
+        )
+        var shader = gpuInputShader
+        if (shader == null || gpuInputShaderBitmap !== bitmap) {
+            shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            gpuInputShader = shader
+            gpuInputShaderBitmap = bitmap
+        }
+        // capture 可能超宽降采样：位图坐标 → 视图坐标放大矩阵（视图 px 采样语义）
+        lensMatrix.setScale(
+            w.toFloat() / cw.toFloat(),
+            h.toFloat() / ch.toFloat(),
+        )
+        shader.setLocalMatrix(lensMatrix)
+        return shader
+    }
+
+    /** ImageReader 复用（capture 尺寸变化时整体重建；GPU_IMAGE_RETAIN+1 容量）。 */
+    private fun obtainGpuReader(width: Int, height: Int): ImageReader? {
+        val existing = gpuReader
+        if (existing != null && gpuReaderWidth == width && gpuReaderHeight == height) return existing
+        releaseGpu()
+        return try {
+            val usage = HardwareBuffer.USAGE_GPU_COLOR_OUTPUT or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE
+            val reader = ImageReader.newInstance(
+                width, height, PixelFormat.RGBA_8888, GPU_READER_MAX_IMAGES, usage,
+            )
+            gpuReader = reader
+            gpuReaderWidth = width
+            gpuReaderHeight = height
+            reader
+        } catch (t: Throwable) {
+            Log.w(logTag, "ImageReader create failed: $t")
+            null
+        }
+    }
+
+    /** HardwareRenderer 复用（setOpaque(false) 保 alpha 通道；surface 绑定 reader）。 */
+    private fun obtainGpuRenderer(reader: ImageReader): HardwareRenderer? {
+        gpuRenderer?.let { return it }
+        return try {
+            val renderer = HardwareRenderer()
+            renderer.setOpaque(false)
+            renderer.setSurface(reader.surface)
+            gpuRenderer = renderer
+            renderer
+        } catch (t: Throwable) {
+            Log.w(logTag, "HardwareRenderer create failed: $t")
+            null
+        }
+    }
+
+    /** GPU 录制节点复用（尺寸 = capture 位图，变化时重建）。 */
+    private fun obtainGpuNode(width: Int, height: Int): RenderNode {
+        var node = gpuNode
+        if (node == null || node.width != width || node.height != height) {
+            node = RenderNode("GlassKitLensInput")
+            node.setPosition(0, 0, width, height)
+            gpuNode = node
+        }
+        return node
+    }
+
+    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸不变复用；EdgeMode=CLAMP 不引入透明衰减）。 */
+    private fun obtainGpuBlurEffect(sigma: Float, width: Int, height: Int): RenderEffect {
+        val cached = gpuBlurEffect
+        if (cached != null && gpuBlurSigma == sigma && gpuEffectWidth == width && gpuEffectHeight == height) {
+            return cached
+        }
+        val effect = RenderEffect.createBlurEffect(sigma, sigma, Shader.TileMode.CLAMP)
+        gpuBlurEffect = effect
+        gpuBlurSigma = sigma
+        gpuEffectWidth = width
+        gpuEffectHeight = height
+        return effect
+    }
+
+    /** GPU 链路整体释放（尺寸变化 / detach）：Image 环、reader、renderer、Effect 缓存。 */
+    private fun releaseGpu() {
+        for (image in gpuImageRing) {
+            try {
+                image.close()
+            } catch (_: Exception) {
+                // 已 close 的 Image 二次 close 抛异常属正常，忽略
+            }
+        }
+        gpuImageRing.clear()
+        gpuInputShader = null
+        gpuInputShaderBitmap = null
+        gpuBlurEffect = null
+        gpuBlurSigma = -1f
+        gpuEffectWidth = -1
+        gpuEffectHeight = -1
+        gpuNode = null
+        gpuRenderer?.let { renderer ->
+            try {
+                renderer.setSurface(null)
+            } catch (_: Exception) {
+                // 释放路径防御：任何异常不阻断清理链
+            }
+        }
+        gpuRenderer = null
+        gpuReader?.let { reader ->
+            try {
+                reader.close()
+            } catch (_: Exception) {
+                // 同上
+            }
+        }
+        gpuReader = null
+        gpuReaderWidth = -1
+        gpuReaderHeight = -1
     }
 
     /**
