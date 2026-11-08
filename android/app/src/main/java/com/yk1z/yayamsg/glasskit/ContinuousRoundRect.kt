@@ -45,6 +45,16 @@ import kotlin.math.sin
  *
  * 圆角钳制红线：生成前一律 r = min(r, min(w,h)/2)，与 GlassKitView
  * drawGlassFrame 的 cornerRadiusPx 钳制、AGSL SDF 的半尺寸语义一致。
+ *
+ * ★ it.19 P0-6 变更：**面板形状回真圆弧**。cornerExponent() 恒返回 N_MIN=2，
+ *   即 buildContinuousRoundRect 永远命中「n ≤ N_MIN + 1e-4 → addRoundRect」
+ *   的原生圆弧快路径（真圆弧，非折线），AGSL 侧 sdContinuous(n=2) 与
+ *   sdRoundRect 逐位等价 ⇒ **shader 一行未改**，Path / SDF 零点继续严格
+ *   重合（「Path 与 SDF 同 n」不变量成立）。
+ *   连带死代码（登记待删，不在本笔删除以缩小 diff）：CORNER_SEGMENTS 与
+ *   appendCorner() 的超椭圆折线采样、N_MAX / BLEND_START / BLEND_END / smoothstep。
+ *   胶囊（capsuleContinuous && isCapsule）继续走 buildKyant0ContinuousRoundRect，
+ *   it.14 / it.15 的 Kyant0 精确 Bezier 零改动。
  */
 object ContinuousRoundRect {
 
@@ -69,9 +79,29 @@ object ContinuousRoundRect {
     private const val HALF_PI: Float = 1.5707963f
 
     /**
-     * 计算本帧统一超椭圆指数 n（Path 与 AGSL SDF 共用，一次计算全帧复用）。
-     * t 小（圆角远小于半短边）→ n=nMax=4；t→1 → n 平滑回落到 2；
-     * 胶囊（r≥半短边−0.5px）硬守卫强制 n=2。
+     * 计算本帧「形状指数」n（Path 与 AGSL SDF 共用，一次计算全帧复用）。
+     *
+     * it.19 P0-6：**恒返回 N_MIN = 2.0（真圆弧）**。
+     *
+     * 原 it.13 实现按 t = r / halfMin 在 [N_MIN, N_MAX] 之间插值：
+     * 普通面板（r=24dp，halfMin 远大于 r ⇒ blend=1）取满 n=4，超椭圆对角
+     * 方向 |x| = |y| = r / 2^(1/4) = 0.8409r，而圆弧为 0.7071r ⇒ **每轴外扩
+     * 0.1338r（r=24dp 即 3.2dp/轴，沿对角线 4.5dp）**。真机上表现为「普通
+     * 面板的角比设计稿胖一圈」，且边角处高光走向与卡片 / 弹层不一致。
+     *
+     * 依据：原版 Kyant 库 RoundedRectangleOutlineKt.java:28-32 的退化判定是
+     * 「style ≠ Circular 且 (w≠h 或 r<maxRadius) → 连续曲率」——即**只有真
+     * 胶囊 / 正方形以外的面才可能走 Generic**，而它 Capsule / 普通面板（默认
+     * Circular）都是圆弧；Android 系统 ShapeAppearance 与 Material 亦全为
+     * 圆弧（G1）。it.13 的超椭圆是为对齐 SwiftUI `.continuous` 做的妥协，
+     * it.19 起按原版与设计稿回到圆弧。
+     *
+     * 胶囊分支不读本返回值：`capsuleContinuous && isCapsule` 时 GlassKitView
+     * 直接传 [GlassKitView.KYANT0_SDF_N] 且 clipPath 走
+     * [buildKyant0ContinuousRoundRect]（it.14 / it.15 成果零改动）。
+     *
+     * 回滚路径：把函数体最后一行改成 `return n`，即恢复 it.13 的超椭圆行为，
+     * Path 与 SDF 无需其他改动。
      */
     fun cornerExponent(w: Float, h: Float, r: Float): Float {
         val halfMin = 0.5f * minOf(w, h)
@@ -80,7 +110,9 @@ object ContinuousRoundRect {
         val blend = 1f - smoothstep(BLEND_START, BLEND_END, t)
         var n = N_MIN + (N_MAX - N_MIN) * blend
         if (r >= halfMin - CAPSULE_GUARD_PX) n = N_MIN
-        return n
+        // it.19 P0-6：上面算出的 it.13 超椭圆指数不再生效，一律钳到 N_MIN
+        // （n ∈ [N_MIN, N_MAX] ⇒ 结果恒为 2.0）。n 仍计算，仅为保持回滚点。
+        return minOf(n, N_MIN)
     }
 
     /** 手写 smoothstep(edge0, edge1, x)（Kotlin 标准库无该顶层函数）。 */

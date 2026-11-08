@@ -1276,15 +1276,17 @@ class GlassKitView(context: Context) : View(context) {
         //（胶囊无模糊/折射/透镜的根因）。钳到 min(w,h)/2 即标准胶囊语义，与 Skia
         // clip 路径自带的钳制行为对齐；普通面板半径小于半尺寸，钳制零影响。
         val cornerRadiusPx = minOf(cornerRadiusDp * density, minOf(w, h) / 2f)
-        // it.13：本帧统一超椭圆指数（Path 与 AGSL SDF 共用，一次计算全帧复用）。
-        // 胶囊 / 正方形命中 cornerExponent 的 n=2 硬守卫 → 严格圆弧，it.12 零回归；
-        // 容器面板 r=24（GlassShape.container）→ n≈4，G2 连续曲率。
+        // it.13：本帧统一形状指数（Path 与 AGSL SDF 共用，一次计算全帧复用）。
+        // it.19 P0-6：面板形状回真圆弧 —— cornerExponent() 自 it.19 起恒返回
+        // N_MIN=2.0，buildContinuousRoundRect 因此固定命中原生 addRoundRect
+        // 快路径；SDF 侧 sdContinuous(n=2) ≡ sdRoundRect，shader 零改动，
+        // 「Path 与 SDF 同 n」不变量继续成立。
         // it.14 Continuous Capsule：dock bar / 指示器 / 顶栏演示件显式开启
         // it.15 方案 A：capsuleContinuous 且半径已钳到半短边（真胶囊，999→h/2）
         // 时，clipPath 走精确 Kyant0 3 段 cubic Bezier Path（外形与 Kotlin 逐点
         // 一致）；uCornerExponent 传 KYANT0_SDF_N=2.0（圆弧 SDF，shader 零改动）。
         // 其余情况（hero/chip/工具条/clear 的 r=24、未开启的胶囊、正方形）一律
-        // 保持原 cornerExponent() + 超椭圆 Path，逐位零回归。
+        // 走 buildContinuousRoundRect 的圆弧分支（it.19 前是 n≈4 超椭圆）。
         // 回录帧不创建 RuntimeShader，clipPath 与屏幕帧同形，不新增差异。
         val halfMin = minOf(w, h) / 2f
         val isCapsule = cornerRadiusPx >= halfMin - 0.5f
