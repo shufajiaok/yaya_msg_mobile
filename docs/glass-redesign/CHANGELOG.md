@@ -14,6 +14,7 @@
 | 004 | 2026-11-07 | **路线 B 拍板 · 基线回退** | 用户选 **B**：切回 `e324df4`，严格按 v2.1 §9 P0 原清单从零做。**离线**用本地 codeload 快照重建源码树（无需 fetch），移除 `c428b29` 后续新增：`member-db/` 大数据库、社区/分析等 6 页、Expo 55 升级、6 个玻璃组件(819 行)、`android-apk.yml`；恢复 Expo ~54.0.33 / RN 0.81.5 / `expo-blur ~15` / `quality.yml` | 用户回复「b」；v2.1 §9 P0 清单 | 快照与 `yaya_e324df4.tar.gz` 逐字节核验一致；`FollowedRoomsScreen.tsx` 3123 行 / 4 处 `BlurView` 与调研基线吻合；`src/theme/glass.ts`、`GlassSurface.tsx` 均不存在（符合拟建）；`docs/glass-redesign/` 9 份留档未受影响 | `e0584f6` |
 | 005 | 2026-11-07 | 文档口径同步 | CHANGELOG 回填 001–003a 的 commit hash；`P0-改动清单.md` 第四节改为 B 路线；`README.md` / `WORKSPACE.md` 更新基线与上云状态 | 留档规则「每批改动即登记」 | — | `15d4ebc` |
 | 006 | 2026-11-07 | **最终收口** | 登记 QA Round 2 结论与主理人对 5 条建议的裁决；订正 `lowEnd` 分支与 TDZ 归因两处留档措辞；回填两个 docs commit hash；`README.md` / `WORKSPACE.md` 列全 12 个待推 commit | QA Round 2 报告；主理人汇编 | 见文末「QA Round 2」节 | 本 commit |
+| 007 | 2026-11-09 | it.19 引擎对齐（P0-5） | **H1 tint 上界 0.12 → 0.24**：`glass.ts TINT_ALPHA_MAX 0.12→0.24`、`TINT_ALPHA_BASE 0.06→0.10`、Kotlin `DEFAULT_TINT_ALPHA_MAX 0.12f→0.24f` 三处同改（拆开会出现「JS 算 0.20、native 裁回 0.12」）；业务调用点（`AppTabBar` / `GlassTestScreen`）改引 `TINT_ALPHA_BASE`，不再写死 0.06 | 原版 `GlassSurfaceKt.java:317` `coerceAtMost(tintAlpha × tintScale, 0.24f)`；`GlassLevel.java:123-124` 档位 tintAlpha 0.10/0.12 | `glass-guard` PASS（0 硬规则命中/无新增）；`tsc --noEmit` 0 error；`assembleRelease` BUILD SUCCESSFUL；aapt2 versionCode=2076023 | 见 it.19 ③ 提交 |
 
 ## 待登记批次（按 P0 清单顺序，分批 commit / push）
 

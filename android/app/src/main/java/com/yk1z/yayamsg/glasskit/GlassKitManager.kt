@@ -44,7 +44,7 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.blurDp = value
     }
 
-    /** tint 基准 alpha（最终 alpha 由原生按 H1 钳到 0.12）。 */
+    /** tint 基准 alpha（最终 alpha 由原生按 H1 钳到 0.24，it.19 P0-5）。 */
     @ReactProp(name = "tintAlpha", defaultFloat = 0f)
     fun setTintAlpha(view: GlassKitView, value: Float) {
         view.tintAlpha = value
@@ -204,7 +204,7 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
      * it.14 指示器专属 White 提亮 alpha（默认 **0f**，仅 dock 指示器传 0.05）。
      * 出处 Kotlin GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708；
      * Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）⇒ 硬编码常量、不加滑块。
-     * 视图侧 setter 已按 H1 上界 0.12f 钳制并走 markPropChanged()。
+     * 视图侧 setter 已按 H1 上界 0.24f 钳制并走 markPropChanged()。
      */
     @ReactProp(name = "indicatorBoostAlpha", defaultFloat = 0f)
     fun setIndicatorBoostAlpha(view: GlassKitView, value: Float) {

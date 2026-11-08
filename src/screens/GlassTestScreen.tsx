@@ -42,7 +42,7 @@
  *      → 连续曲率 n≈4（G2）；顶栏演示件亦为真胶囊。GPU 模糊链
  *      （HardwareRenderer / ImageReader / BitmapShader）完全不动，本页不直接
  *      参与几何计算，只负责把 cornerRadiusDp 送进引擎。
- *    - 契约红线不动：H1 tint≤0.12、canBlur≥31/canLens≥33、绘制顺序
+ *    - 契约红线：H1 tint≤0.24（it.19 P0-5 由 0.12 提到原版同值）、canBlur≥31/canLens≥33、绘制顺序
  *      ①采集→②模糊/透镜→③tint→④膜层→⑤压暗→⑥高光、圆角钳 min(w,h)/2。
  * ② 滑块数值完全对齐（SettingsScreenKt.java:1898-2128 / GlassTuning.java:21-57）：
  *    Q1「膜层」= tintScale 0–2/2.0（不是 membraneAlpha）；Q5 Kotlin 无对应的
@@ -52,9 +52,9 @@
  * ③ 三开关（默认全 true）：色散（整层画三遍）/ 景深 / 鲜活度，走引擎新 prop；
  *    顶缘高光 0–1/0.2 驱动 highlightScale（18dp 竖向渐变，GlassSurfaceKt.java:710-713）。
  * ④ 膜层语义：删除「膜层浓度」滑块，native membraneAlpha 默认 0.38→0，白膜
- *    层引擎代码保留但默认不画；Q1 修正口径：测试页透传 tintAlpha 基准 0.06，
- *    0.06 × tintScale(2.0) = 0.12，正好用满 H1 上界（native coerceIn(0,0.12)、
- *    0.12 常量、floor 一字不动，floor(0.12×255)=30 ≤30）。颜色继续随主题
+ *    层引擎代码保留但默认不画；it.19 P0-5 口径：测试页透传 tintAlpha 基准
+ *    TINT_ALPHA_BASE(0.10)，0.10 × tintScale(2.0) = 0.20 ≤ 0.24 上界
+ *    （native coerceIn(0,0.24)、0.24 常量，floor 取整口径不变）。颜色继续随主题
  *    panelTintFor(scheme) 亮 #FFFFFF / 暗 #1B242B（GlassThemeKt.java:41/45）。
  * ⑤ Q3 指示器折射：保留现状——指示器仍随 lensScale（「折射」滑块）变化，
  *    **不**按 Kotlin lockedRefraction=0.8 锁死（GlassLevel.java:37）。理由：
@@ -349,8 +349,8 @@ function DraggableGlass(props: {
 
 /**
  * 玻璃面板容器：GlassKitView（功能层叶子）+ 叠加说明文字。
- * it.13 Q1 修正口径：测试页透传 tintAlpha 基准 0.06（0.06×tintScale(2.0)=0.12
- * 正好用满 H1，native coerceIn(0,0.12)/0.12 常量/floor 一字不动）；
+ * it.19 P0-5 口径：测试页透传 tintAlpha 基准 TINT_ALPHA_BASE(0.10)
+ * （0.10×tintScale(2.0)=0.20 ≤ 0.24 上界，native coerceIn(0,0.24)）；
  * membraneAlpha 不传（native 默认 0，白膜层默认不画）；新增四效果
  * prop；glowTopScale 固定 1（glow 双带降为扩展调试，顶缘改由 highlightScale 承担）。
  */
@@ -385,7 +385,7 @@ function GlassPanel(props: {
         style={StyleSheet.absoluteFill}
         backdropTag={props.backdropTag}
         blurDp={props.blurDp}
-        tintAlpha={0.06}
+        tintAlpha={TINT_ALPHA_BASE}
         tintColor={panelTintFor(scheme)}
         cornerRadiusDp={props.cornerRadiusDp}
         refractionPx={props.refractionPx}
@@ -520,8 +520,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。
   // it.17：dock bar 的 tint 与 AppTabBar 同一口径 —— resolveTintAlpha 是 glass.ts 的
-  // H1 唯一出口（0.06 × tintScale，≤0.12）；原生最终 alpha = min(tintAlpha × tintScale,
-  // 0.12)，若再传 store 的 tintScale 会二次乘算，故显式传 tintScale={1}。
+  // H1 唯一出口（0.10 × tintScale，≤0.24）；原生最终 alpha = min(tintAlpha × tintScale,
+  // 0.24)，若再传 store 的 tintScale 会二次乘算，故显式传 tintScale={1}。
   const dockBarTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
 
   // it.8：chip/toolbar 行宽缩放（对同乘 widthScale 是 no-op，改缩放整行宽度）。

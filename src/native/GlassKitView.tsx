@@ -3,8 +3,9 @@
  *
  * 契约（与原生 GlassKitManager @ReactProp 一一对应）：
  * - blurDp        基准模糊半径 dp（原生最终半径 = blurDp × blurScale × density）
- * - tintAlpha     tint 基准 alpha（原生最终 alpha = min(tintAlpha × tintScale, 0.12)，
- *                 0.12 为 glass.ts H1 硬约束上界，原生侧 clamp）
+ * - tintAlpha     tint 基准 alpha（原生最终 alpha = min(tintAlpha × tintScale, 0.24)，
+ *                 0.24 为 glass.ts H1 硬约束上界（it.19 P0-5 由 0.12 提到原版
+ *                 GlassSurfaceKt.java:317 同值），原生侧 clamp）
  * - tintColor     tint 颜色（旧架构 Paper：传原始色值字符串如 '#DCE6FF'，由桥接
  *                 做唯一一次 processColor；禁止调用方预 processColor——Paper 渲染器
  *                 对 customType="Color" prop 会自动再执行一次 processColor
@@ -57,7 +58,7 @@ import { canBlur, canLens, useGlassStore } from '../theme/glass';
 export interface GlassKitViewProps extends ViewProps {
   /** 基准模糊半径（dp），四档语义见 glass.ts BLUR_DP_BY_KIND。 */
   blurDp?: number;
-  /** tint 基准 alpha（原生按 H1 钳到 ≤0.12）。 */
+  /** tint 基准 alpha（原生按 H1 钳到 ≤0.24；基准值走 glass.ts TINT_ALPHA_BASE=0.10）。 */
   tintAlpha?: number;
   /** tint 颜色。
    *  旧架构 Android（Paper / requireNativeComponent）：必须传**原始色值字符串**
@@ -129,7 +130,7 @@ export interface GlassKitViewProps extends ViewProps {
    */
   membraneAlpha?: number;
   /**
-   * it.14 指示器专属 White@0.05 提亮 alpha（默认 0，上界复用 H1 的 0.12）。
+   * it.14 指示器专属 White@0.05 提亮 alpha（默认 0，上界复用 H1 的 0.24）。
    * 出处 Kotlin GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708
    * 的第二笔 drawRect($tint)；SettingsScreenKt.java:1898-2128 无对应滑块，
    * 故为硬编码常量，仅 dock 指示器传 0.05，不加滑块 / 开关。

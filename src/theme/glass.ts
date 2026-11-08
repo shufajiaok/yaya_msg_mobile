@@ -67,10 +67,11 @@ export interface ScaleRange {
  * - lensScale「折射」     0–3，   默认 3.0  （:1923 rangeTo(0,3)   / :24 3.0f）
  * - tintScale「膜层」     0–2，   默认 2.0  （:1947 rangeTo(0,2)   / :27 2.0f）
  * ⚠️ 「膜层」标签的字段是 tintScale，不是原生 membraneAlpha（后者默认归 0）。
- * ⚠️ H1 tint≤0.12 契约不动：Q1 修正口径，tintAlpha 基准 0.06（不再按 0.5
- *   比例因子折算 0.05），tintScale 0–2 / 默认 2.0 ⇒ 0.06×2.0=0.12 正好用满
- *   H1 上界；native coerceIn(0,0.12)、0.12 常量、floor 一字不动，app 侧
- *   resolveTintAlpha 仍以 TINT_ALPHA_MAX 兜底。滑块区间本身完全对齐。
+ * ⚠️ H1 tint 上界 it.19 起 0.12 → **0.24**（原版 `GlassSurfaceKt.java:317`
+ *   `coerceAtMost(level.tintAlpha × tintScale, 0.24f)`，tintAlpha 基准 0.10）：
+ *   tintAlpha 基准 0.10，tintScale 0–2 / 默认 2.0 ⇒ 0.10×2.0=0.20（≤0.24，
+ *   **不再顶格**，滑块 0–2 全区间线性有效）；native coerceIn(0,0.24) 与 0.24
+ *   常量同步改，app 侧 resolveTintAlpha 仍以 TINT_ALPHA_MAX 兜底。滑块区间对齐。
  *   颜色继续用 panelTintFor(scheme) 亮 #FFFFFF / 暗 #1B242B。
  * - glowScale 属「Kotlin 无对应的扩展调试项」，区间 / 默认保持 it.5 值不变
  *   （04 §2.7 X4 下限 >0，避免柔光三团 alpha 全灭触发铁律③ 反例）。
@@ -119,15 +120,26 @@ export const BLUR_DP_BY_KIND: Record<GlassKind, number> = {
   indicator: 0,
 } as const;
 
-/** H1 上界：任何 tint 计算最后一步必须过此值（03 §3.5 H1 / 04 §2.7 X2） */
-export const TINT_ALPHA_MAX = 0.12;
 /**
- * ④ tintAlpha 基准（铁律①）。it.13 Q1 修正口径：0.10 → **0.06**，
- * 使 tintScale 默认 2.0 时 0.06×2.0=0.12 正好用满 H1（未经 coerceIn 截断），
- * 且 0–2 全区间线性有效（旧 0.10 在 tintScale≥1.2 即触顶、滑块后半段失效）。
- * 与测试页透传给 native 的 tintAlpha={0.06} 同源，全项目单一基准。
+ * H1 上界：任何 tint 计算最后一步必须过此值（03 §3.5 H1 / 04 §2.7 X2）。
+ *
+ * it.19 P0-5：**0.12 → 0.24**，对齐原版 `GlassSurfaceKt.java:317`
+ * `coerceAtMost(level.getTintAlpha() * tintScale, 0.24f)`。
+ * 原版档位 tintAlpha：BAR / CONTROL 0.10、OVERLAY 0.12、INDICATOR 0.0，
+ * 配 tintScale 默认 2.0 ⇒ BAR 0.20、OVERLAY 0.24（正好顶到 0.24 上界）。
+ * 旧值 0.12 让 tint 只剩原版的一半，是 it.19 差异清单里最"糊"的一条。
+ * ⚠️ 三处必须同改，否则 JS 算 0.20 会被 native 裁回 0.12：
+ *   本常量 / `TINT_ALPHA_BASE` / Kotlin `GlassKitView.DEFAULT_TINT_ALPHA_MAX`。
  */
-export const TINT_ALPHA_BASE = 0.06;
+export const TINT_ALPHA_MAX = 0.24;
+/**
+ * ④ tintAlpha 基准（铁律①）。it.19 P0-5：0.06 → **0.10**，回到原版
+ * `GlassLevel` BAR / CONTROL 的 `tintAlpha = 0.10`（`GlassLevel.java:123-124`）。
+ * tintScale 默认 2.0 ⇒ 0.10×2.0 = 0.20，落在 0.24 上界之内（**不顶格**，
+ * 滑块 0–2 全程线性有效；旧 0.06 时代 0.12 上界恰好被 2.0 顶死）。
+ * 与测试页透传给 native 的 tintAlpha 基准同源，全项目单一基准。
+ */
+export const TINT_ALPHA_BASE = 0.10;
 
 /** ④ 单层 1dp / #FFF @0.14 边缘高光（04 §2.3 GlassKit L88-90；无三层渐变 / 无 12dp 白雾） */
 export interface EdgeHighlight {
@@ -322,15 +334,16 @@ export const useGlassStore = create<GlassState>()(
  * ------------------------------------------------------------------ */
 
 /**
- * H1：任何 tint 计算的最后一步必须过上界 TINT_ALPHA_MAX = 0.12（等价于 Math.min(tintAlpha, 0.12)）。
+ * H1：任何 tint 计算的最后一步必须过上界 TINT_ALPHA_MAX = 0.24（等价于
+ * Math.min(tintAlpha, 0.24)；it.19 P0-5 起由 0.12 提到原版同值 0.24）。
  * 修 04 §2.7 X2（历史 tintScale 上限 3、基准 0.10 时 0.10×3=0.30 未夹上界）
- * 与 X1（选中 Chip 0.34）；it.13 基准 0.06 × 上限 2.0 = 0.12 正好触上界，
+ * 与 X1（选中 Chip 0.34）；it.19 基准 0.10 × 默认 2.0 = 0.20（不顶格），
  * 仍由本函数 Math.min(..., TINT_ALPHA_MAX) 统一兜底。
  * 本函数是全项目唯一的 tint alpha 出口，禁止在别处再算一遍 tint。
  *
  * S1：baseAlpha 先做 Number.isFinite 兜底，非有限值（NaN / Infinity / -Infinity）回退
  *     TINT_ALPHA_BASE，负值夹到 0；否则 `Math.min(NaN, 上界)` 会把 NaN 透传给下游样式。
- * S2：上界统一引用导出的 TINT_ALPHA_MAX，不再写死 0.12，避免改常量时漏改钳制。
+ * S2：上界统一引用导出的 TINT_ALPHA_MAX，不再写死数字，避免改常量时漏改钳制。
  */
 export function resolveTintAlpha(baseAlpha: number = TINT_ALPHA_BASE, tintScale?: number): number {
   const scale = tintScale === undefined ? useGlassStore.getState().tintScale : tintScale;

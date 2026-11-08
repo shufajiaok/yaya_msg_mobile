@@ -14,14 +14,14 @@
  *
  * 玻璃（与实验页 dock 同一套派生逻辑，保证「实验页所见 = 本体所得」）：
  * - bar：capturable（指示器的采集源）+ capsuleContinuous（n=3 连续曲率端帽）、
- *   blurDp 10 × blurScale、tintAlpha = resolveTintAlpha(0.06, tintScale)、
+ *   blurDp 10 × blurScale、tintAlpha = resolveTintAlpha(0.10, tintScale)（H1 上界 0.24）、
  *   refraction 5dp × density、带高 3dp × density（native 再乘 lensScale 一次）、
  *   dispersion 0、highlightScale / glow 三倍率来自 store。
  * - 指示器：backdropTag 指向 bar 原生 handle（玻璃叠玻璃）、内缩 = dockInnerPadDp、
  *   capsuleContinuous、indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451
  *   的 White@0.05）、highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
  *   blur 2dp × blurScale、refraction 8dp × density、带高 6.4dp × density、
- *   dispersion 10dp × density × (dispersionLevel/0.35)（三者都由 native 再乘 lensScale；
+ *   dispersion 8dp × density × (dispersionLevel/1.0)（三者都由 native 再乘 lensScale；
  *   与实验页同一公式）。
  *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
  *   绝不用累加增量）。
@@ -208,8 +208,9 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const dockIndicatorX = useRef(new Animated.Value(innerPad)).current;
 
   // —— 玻璃派生值（与实验页 dock 段同一套公式）——
-  // tint：resolveTintAlpha 是 glass.ts 的 H1 唯一出口（0.06 × tintScale，≤0.12）。
-  // 原生侧最终 alpha = min(tintAlpha × tintScale, 0.12)＝若再传 tintScale 会二次乘算，
+  // tint：resolveTintAlpha 是 glass.ts 的 H1 唯一出口（0.10 × tintScale，≤0.24；
+  // it.19 P0-5：上界 0.12 → 0.24，对齐原版 GlassSurfaceKt.java:317 的 0.24f）。
+  // 原生侧最终 alpha = min(tintAlpha × tintScale, 0.24)＝若再传 tintScale 会二次乘算，
   // 故显式传 tintScale={1}，让 JS 的 resolveTintAlpha 成为唯一一次乘算。
   const barTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
   const indicatorBlurDp = Math.round(2 * blurScale);

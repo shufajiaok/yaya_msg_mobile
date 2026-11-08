@@ -53,7 +53,7 @@ git ls-remote origin refs/heads/glass-ui-rework   # 核验
 | 项 | 结果 |
 | --- | --- |
 | 代码量 | P0 三批 15 文件 / +2027 −74；QA 后增量 3 文件 / +51 −9 |
-| 核心契约 | `src/theme/glass.ts`：zustand + AsyncStorage 四倍率、H1 `tint ≤ 0.12`、H2 `canBlur(≥31)` / `canLens(≥33)` 双档、H3 `degrade()` 六类、4 档 blurDp 14/12/10/8、七种 kind 分派、`contentScrim`/`glassDimming` 分档、`useGlassBudget()`、`childRadius()`、`layer` 断言 |
+| 核心契约 | `src/theme/glass.ts`：zustand + AsyncStorage 四倍率、H1 `tint ≤ 0.24`（it.19 P0-5，原 0.12）、H2 `canBlur(≥31)` / `canLens(≥33)` 双档、H3 `degrade()` 六类、4 档 blurDp 14/12/10/8、七种 kind 分派、`contentScrim`/`glassDimming` 分档、`useGlassBudget()`、`childRadius()`、`layer` 断言 |
 | 静态守卫 | `scripts/glass-guard.js` 纯 Node 零依赖，7 条基线规则（含 `glass-api-access: 0` 防玻璃 API 误接线），注入违规样本能 `EXIT=1` 拦截 |
 | 团队流程 | 工程师实现 → QA Round 1（9/9 PASS，证伪 2 缺口）→ 有限增量修复 → QA Round 2（5/5 PASS，84 断言 0 FAIL，负对照证实）→ **路由 NoOne，2 轮硬上限收口** |
 | 边界 | §9.2 不动清单全程 0 命中；`DanmakuOverlay.tsx` 逐字节未变；30 页路由 / 4 Tab / `package.json` / `android/` 全未动；**未新增依赖、未写任何页面视觉代码** |

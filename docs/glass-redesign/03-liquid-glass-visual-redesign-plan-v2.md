@@ -451,7 +451,7 @@ HIG Layout **M9** 要求「全屏背景延伸到 sidebar / toolbar / tab bar 下
 
 | # | 硬约束 | 说明 |
 | --- | --- | --- |
-| H1 | **`Math.min(tintAlpha, 0.12)` 上界** | 修引擎自身矛盾 **X2**：`tintScale` 上限 3、`GlassTint 0.10 × 3 = 0.30`，而 `glassSurface` 只 `coerceIn(0f,1f)` 未夹到 0.12（GlassKit L84、GlassSettings L17）；也覆盖 X1（选中 Chip `0.34`）。任何 tint 计算最后一步必须过此上界 |
+| H1 | **`Math.min(tintAlpha, 0.24)` 上界** | 修引擎自身矛盾 **X2**：`tintScale` 上限 3、`GlassTint 0.10 × 3 = 0.30`，而 `glassSurface` 只 `coerceIn(0f,1f)` 未夹到上界（GlassKit L84、GlassSettings L17）；也覆盖 X1（选中 Chip `0.34`）。任何 tint 计算最后一步必须过此上界。**it.19 P0-5：上界 0.12 → 0.24**，对齐原版 `GlassSurfaceKt.java:317` 的 `coerceAtMost(tintAlpha × tintScale, 0.24f)`（档位 tintAlpha：BAR/CONTROL 0.10、OVERLAY 0.12）；JS `glass.ts TINT_ALPHA_MAX` 与 Kotlin `DEFAULT_TINT_ALPHA_MAX` 两处同改 |
 | H2 | **`canBlur(≥31)` / `canLens(≥33)` 双档** | 取代 v1 的「按 API 31 单档一刀切」判断（04 §3.2 #17 / §7.2 / B8）：blur + vibrancy = **API 31（Android 12）**；`lens` / `chromaticAberration` / `gammaAdjustment` = **API 33（Android 13）**。App `minSdk 26` → 26–30 无任何效果、31–32 有 blur 但无折射 |
 | H3 | **`degrade(reason)` 单一路径覆盖 6 类** | `api<31` / `lens 不可用 api<33` / `reduceTransparency` / `reduceMotion` / `lowEnd` / `budget`。同时补齐引擎缺失的 4 项（04 §2.4）：无「关闭玻璃」总开关、无 `reduceTransparency` / `reduceMotion` / DynamicType 任何分支 |
 
@@ -461,7 +461,7 @@ HIG Layout **M9** 要求「全屏背景延伸到 sidebar / toolbar / tab bar 下
 | --- | --- | --- | --- |
 | 四倍率 | `blurScale / tintScale / lensScale / glowScale = 1f` | `0–2.5 / 0–3 / 0–2 / 0–2` | 见②；`tint` 过 H1 上界 |
 | **`blurDp`（四档）** | `14 dp`（`glassSurface` 默认）/ `12 dp`（`GlassDetailBar`）/ `10 dp`（`GlassBottomTabs` bar）/ `8 dp`（`glassCompact`） | 按 `resolveGlass(kind)` 分派 | GlassKit L73 / L330 / L243 / L99；四档统一乘 `blurScale` |
-| `tintAlpha` | **`0.10`** | **上限 0.12（H1）** | `GlassTint = #DCE6FF @0.10`；铁律① |
+| `tintAlpha` | **`0.10`** | **上限 0.24（H1，it.19 P0-5）** | `GlassTint = #DCE6FF @0.10` × tintScale 默认 2.0 = 0.20；铁律① |
 | `edgeHighlight` | **`1dp / #FFF @0.14` 单层描边** | 固定 | 引擎 `onDrawSurface`（GlassKit L88-90）；**新引擎只有这一层，无三层渐变、无 12dp 顶部白雾**（04 §3.2 #14） |
 | `glassDimming` | `#000000 @ 0.35` | 固定、[M] 官方硬值 | **保留**：仅 `clear` + 亮底；与 `contentScrim` 分档管理 |
 | `contentScrim` | 归一单值（由 `0.88 / 0.92 / 0.34` 收敛） | — | **保留**：内容层整体压暗（[LV] darkening），归一而非删除 |

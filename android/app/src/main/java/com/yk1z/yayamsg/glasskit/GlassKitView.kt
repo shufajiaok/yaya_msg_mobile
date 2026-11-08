@@ -52,7 +52,7 @@ import android.view.ViewTreeObserver
  *    时跳过模糊，直接零拷贝绑定全分辨率 capture（清晰折射观感对齐 it.3）；
  *    模糊与透镜不互斥，四面板对 blurScale / lensScale 同时有可见响应；
  *    非透镜面板走纯模糊路径不变；
- * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
+ * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.24)) —— H1 硬约束钳制；
  * 5. 压暗：#000 @ dimmingAlpha；
  * 6. 高光（it.7 重做，Apple Liquid Glass 调研口径）：贴轮廓的顶/底窄带
  *    LinearGradient 多 stop 非线性衰减（边缘最亮、向内快速衰减，陡在边缘平在
@@ -124,15 +124,22 @@ import android.view.ViewTreeObserver
  *   propGeneration；GPU ColorFilterEffect 路径保留为编译期开关供真机 A/B。
  *   四新 prop 全部走 markPropChanged()，静止期零重绘契约不变。
  * ④ 膜层语义：membraneAlpha 默认 0.38 → 0（「膜层」滑块改绑 tintScale），
- *   白膜层绘制代码保留但默认不画；H1 tint≤0.12 钳制一行未动。
+ *   白膜层绘制代码保留但默认不画；H1 tint 上界 it.19 起 0.12 → 0.24。
  * ⑤ 软画布快照回录帧不创建 RuntimeShader、不下发任何新 uniform，
  *   保持原模糊降级（it.8-fix1 教训）。
  */
 class GlassKitView(context: Context) : View(context) {
 
     companion object {
-        /** JS reduceTransparency 门控的总开关默认值由 Manager 传入，此处为视图默认。 */
-        const val DEFAULT_TINT_ALPHA_MAX: Float = 0.12f
+        /**
+         * H1 tint 上界（it.19 P0-5：0.12 → 0.24）。
+         *
+         * 原版 `GlassSurfaceKt.java:317`：`coerceAtMost(level.tintAlpha × tintScale, 0.24f)`，
+         * 档位 tintAlpha = BAR/CONTROL 0.10、OVERLAY 0.12、INDICATOR 0.0
+         * ⇒ 默认 tintScale 2.0 时 BAR 0.20 / OVERLAY 0.24（顶格）。
+         * JS 侧 `glass.ts TINT_ALPHA_MAX` 必须同值，否则 JS 算 0.20 会被这里裁回 0.12。
+         */
+        const val DEFAULT_TINT_ALPHA_MAX: Float = 0.24f
         /** 边缘高光描边宽度（dp）——glass.ts EDGE_HIGHLIGHT.widthDp 单层 1dp。 */
         const val EDGE_HIGHLIGHT_DP: Float = 1f
         /** 边缘高光 alpha ——glass.ts EDGE_HIGHLIGHT.alpha 0.14。 */
@@ -303,7 +310,7 @@ class GlassKitView(context: Context) : View(context) {
             markPropChanged()
         }
 
-    /** tint 基准 alpha（最终 alpha = min(tintAlpha * tintScale, 0.12)）。 */
+    /** tint 基准 alpha（最终 alpha = min(tintAlpha * tintScale, 0.24)）。 */
     var tintAlpha: Float = 0f
         set(value) {
             if (field == value) return
@@ -496,7 +503,7 @@ class GlassKitView(context: Context) : View(context) {
      * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。绘制顺序在 ③tint 之后、
      * ④压暗之前。⚠️ 语义变更：HealthCheckIn 的「膜层」滑块字段是 tintScale
      * （SettingsScreenKt.java:1946-1961），本白膜层 Kotlin 无对应 → 默认不画，
-     * 代码保留供 A/B。H1 tint≤0.12 契约不受影响。
+     * 代码保留供 A/B。H1 tint 上界（it.19 起 0.24）契约不受影响。
      */
     var membraneAlpha: Float = 0f
         set(value) {
@@ -512,8 +519,8 @@ class GlassKitView(context: Context) : View(context) {
      * 作为 GlassSurface 第 5 参 tint）→ GlassSurfaceKt.java:704-708 的第二笔
      * drawRect($tint)。Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）
      * ⇒ 硬编码常量，native 也不加滑块 / 开关。
-     * 上界复用 H1 的 DEFAULT_TINT_ALPHA_MAX=0.12f，不进 finalTintAlpha 公式、
-     * 不乘 tintScale、不进 glass.ts resolveTintAlpha（单层最大 0.05 < 0.12）。
+     * 上界复用 H1 的 DEFAULT_TINT_ALPHA_MAX（it.19 起 0.24f），不进 finalTintAlpha 公式、
+     * 不乘 tintScale、不进 glass.ts resolveTintAlpha（单层最大 0.05 远小于上界）。
      * NaN/Inf 回退 0（同 :341/:351/:396 口径）；走 markPropChanged()。
      */
     var indicatorBoostAlpha: Float = 0f
@@ -1244,7 +1251,7 @@ class GlassKitView(context: Context) : View(context) {
      *    API 26–30 / 软件画布 → 固定档降采样 1/6 + 双线性放大近似（H2 单档语义）；
      * 3. 透镜（API 33+）：1/4 降采样 + 小图 CPU box blur ×3 近似高斯输入 +
      *    AGSL RuntimeShader 折射/色散（it.4-R2 真模糊化输入）；
-     * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
+     * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.24)) —— H1 硬约束钳制；
      * 5. 压暗：#000 @ dimmingAlpha；
      * 6. 高光：顶/底窄带非线性渐变 + 1dp 发丝线（it.8：发丝线随顶/底加强倍率缩放）；
      * 7. 裁剪：圆角矩形 Path clip。
@@ -1370,12 +1377,12 @@ class GlassKitView(context: Context) : View(context) {
             canvas.drawColor(FALLBACK_COLOR)
         }
 
-        // ④ tint：H1 硬约束——任何 tint 计算最后一步钳到 0.12
+        // ④ tint：H1 硬约束——任何 tint 计算最后一步钳到上界（it.19 起 0.24）
         val finalTintAlpha = (tintAlpha * tintScale).coerceIn(0f, DEFAULT_TINT_ALPHA_MAX)
         if (tintColor != 0 && finalTintAlpha > 0f) {
             tintPaint.color = tintColor
-            // S1 修复：floor 取整（round(0.12*255)=31 → 31/255≈0.1216 微超 0.12；
-            // floor=30 → 30/255≈0.1176 ≤ 0.12，H1 契约恒不超出）
+            // S1 修复：floor 取整（it.19 上界 0.24：round(0.24*255)=61 → 61/255≈0.2392
+            // 已 ≤0.24；floor 后同样 61，H1 契约恒不超出。保留 floor 口径不变）
             tintPaint.alpha = floor(finalTintAlpha * 255f).toInt()
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), tintPaint)
         }
@@ -1390,7 +1397,7 @@ class GlassKitView(context: Context) : View(context) {
         // 叠加顺序：③tint → ③′boost → ④.5 膜层 → ⑤压暗 → ⑥.0 18dp 顶缘 → ⑥ 高光，
         // 与 Kotlin :703→:708→:710-713 一一对应；不重排任何既有绘制阶段。
         // H1：不进 finalTintAlpha 公式、不乘 tintScale、不进 glass.ts resolveTintAlpha；
-        // setter 已 coerceIn(0f, DEFAULT_TINT_ALPHA_MAX=0.12f)，单层 ≤0.05，
+        // setter 已 coerceIn(0f, DEFAULT_TINT_ALPHA_MAX=0.24f)，单层 ≤0.05，
         // floor 取整口径同 :1264 / :1291 / :1333。默认 0 ⇒ 其它面板逐位等价 it.13。
         if (indicatorBoostAlpha > 0f) {
             indicatorBoostPaint.color = Color.WHITE
