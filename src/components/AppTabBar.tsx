@@ -90,6 +90,13 @@ export interface AppTabBarProps {
 /** dock 指示器弹簧：spring(0.85, 380) → RN damping 0.85×2×√380 ≈ 33.14（与测试页同源）。 */
 const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
 
+/**
+ * it.19 P0-2：dock bar 外投影的内缩环带（dp）。
+ * 24dp 模糊 + 4dp 下移 ⇒ 至少 28dp 才不切边；32dp 留 4dp 余量。
+ * 只有 dock bar 与顶栏开启 inset，其余玻璃调用点默认 0（零回归）。
+ */
+const DOCK_SHADOW_INSET_DP = 32;
+
 /** bar 的基准模糊半径 dp（Kotlin BAR 档 = 10dp，最终半径 = 10 × blurScale × density）。 */
 const BAR_BLUR_DP = 10;
 /** 指示器专属提亮 alpha（Kotlin GlassKitKt.java:1434-1435,1451，无对应滑块）。 */
@@ -265,24 +272,32 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   // 指示器真实渲染条件：有透镜能力 + 玻璃叠玻璃开关打开 + bar 采集源就绪。
   const showIndicatorGlass = !degraded && glassOnGlass && barGlassTag != null;
 
+  /**
+   * it.19 P0-2：dock bar 外投影的内缩环带（dp）。
+   * 32dp = 24dp 模糊半径 + 4dp 下移 + 4dp 余量（24dp 会切掉约 35% 尾部、边缘突然消失）。
+   *
+   * ⚠️ 补偿全部写在 **frame 层**：frame 尺寸 +2×inset、内容层 absolute 内缩 inset、
+   * outer 的 paddingBottom 同步 −inset（否则 dock 会整体上移 inset）。
+   * `dockWidth`（onLayout 在内容层量）→ `tabWidth` → 弹簧目标 x **全部不动**。
+   */
+  const dockInsetDp = DOCK_SHADOW_INSET_DP;
+
+  // outer 的 paddingBottom 减掉 inset：frame 长高 2×inset 且 outer 是 bottom 锚定，
+  // 不补偿的话 dock 会整体上移 inset（视觉几何必须一点不变）。
   return (
-    <View pointerEvents="box-none" style={[styles.outer, { paddingBottom: dockFloatDp }]}>
+    <View
+      pointerEvents="box-none"
+      style={[styles.outer, { paddingBottom: Math.max(0, dockFloatDp - dockInsetDp) }]}
+    >
       <View
         style={[
           styles.frame,
           {
-            width: frameWidth,
-            height: frameHeight,
+            width: frameWidth + dockInsetDp * 2,
+            height: frameHeight + dockInsetDp * 2,
             alignSelf: 'center',
-            borderRadius: frameRadius,
-            backgroundColor: degraded
-              ? isDark
-                ? GLASS_BAR_FALLBACK.dark
-                : GLASS_BAR_FALLBACK.light
-              : 'transparent',
           },
         ]}
-        onLayout={onFrameLayout}
       >
         {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）。
             it.17 起 backdropTag 回到 App 级采集源 ⇒ 透视玻璃（不再是卡纸底衬）。 */}
@@ -292,10 +307,31 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             bar 采 App backdrop 时把自己的图标与上一帧玻璃烘进纹理）。
             注意：指示器采集 bar（目标在本容器内）时照常绘制，玻璃叠玻璃不受影响。 */}
         <GlassKitBackdrop excludeFromCapture style={StyleSheet.absoluteFill} pointerEvents="box-none">
+        {/* it.19 P0-2 内容层：绝对定位内缩 inset ⇒ 尺寸/位置与 it.18 的 frame 完全一致
+            （dockWidth 在这里量、指示器 track 与 tabsRow 仍按这个矩形布局）。 */}
+        <View
+          style={[
+            styles.dockBody,
+            {
+              left: dockInsetDp,
+              top: dockInsetDp,
+              right: dockInsetDp,
+              bottom: dockInsetDp,
+              borderRadius: frameRadius,
+              backgroundColor: degraded
+                ? isDark
+                  ? GLASS_BAR_FALLBACK.dark
+                  : GLASS_BAR_FALLBACK.light
+                : 'transparent',
+            },
+          ]}
+          onLayout={onFrameLayout}
+        >
         {!degraded && (
           <GlassKitView
             ref={attachBarGlass}
             style={StyleSheet.absoluteFill}
+            glassInsetDp={dockInsetDp}
             onLayout={onBarLayout}
             backdropTag={backdropTag}
             capturable={true}
@@ -396,6 +432,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             />
           ))}
         </View>
+        </View>{/* /it.19 P0-2 内容层 */}
         </GlassKitBackdrop>
       </View>
     </View>
@@ -412,7 +449,10 @@ const styles = StyleSheet.create({
     // paddingBottom 由 JSX inline 从 store 的 dockFloatDp 驱动
   },
   // 宽 / 高 / 圆角全部由 JSX inline 从 store 驱动；不写死圆角（守卫 R3）。
+  // it.19 P0-2：frame 只是「本体 + 投影环带」的宿主（无背景、无圆角、不裁剪）。
   frame: {},
+  // it.19 P0-2 内容层：absolute + inset 四边内缩，几何等于 it.18 的 frame。
+  dockBody: { position: 'absolute' },
   indicatorTrack: { position: 'absolute', top: 0, left: 0 },
   indicator: { position: 'absolute' },
   indicatorFallback: { position: 'absolute' },

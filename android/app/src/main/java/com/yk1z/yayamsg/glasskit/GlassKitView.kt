@@ -2,6 +2,7 @@ package com.yk1z.yayamsg.glasskit
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
@@ -16,6 +17,8 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.RenderEffect
@@ -161,6 +164,24 @@ class GlassKitView(context: Context) : View(context) {
          * （obtainSmallBlurBitmap 共用本档，AGSL 侧有 scaleX/scaleY 补偿）。
          */
         const val BLUR_DOWNSAMPLE: Int = 6
+
+        /**
+         * it.19 P0-2 外投影几何（team-lead 裁决的固定值，不做滑块）：
+         * - 模糊半径 **24dp**：24dp 会让尾部在 inset 内自然收干；再小投影过硬，
+         *   再大则需要更宽的 inset 才不被切边。
+         * - 下移 **4dp**（offset (0, +4dp)）：玻璃「浮」在背景之上，光从上方来。
+         * - inset 建议 **32dp**（= 24dp 模糊 + 4dp 位移 + 4dp 余量）：24dp 会切掉
+         *   约 35% 的尾部、边缘突然消失。
+         */
+        const val SHADOW_RADIUS_DP: Float = 24f
+        const val SHADOW_OFFSET_Y_DP: Float = 4f
+
+        /**
+         * 投影位图渲染倍率（0.5 ⇒ 半分辨率渲染再双线性放大）。
+         * 投影本身就是大半径模糊，半分辨率无可见损失；内存降到 1/4
+         * （dock bar @3x 外扩后 (~1100×~900) 全分辨率 4MB → 1MB 量级）。
+         */
+        const val SHADOW_BITMAP_SCALE: Float = 0.5f
 
         /**
          * it.4 透镜输入固定降采样档（常量，不再随模糊半径变化——it.3 的
@@ -384,6 +405,55 @@ class GlassKitView(context: Context) : View(context) {
             field = v
             markPropChanged()
         }
+
+    /**
+     * it.19 P0-2：**外扩内缩量（dp）**，默认 **0**（= 既有行为，12 个调用点零影响）。
+     *
+     * 语义：视图尺寸 = 玻璃本体尺寸 + `2 × glassInsetDp`，玻璃本体画在
+     * `(inset, inset) → (w-inset, h-inset)` 的中心矩形里，中间的 inset 环带**只**用来
+     * 放外投影（View 只能在自己 bounds 内绘制，24dp 模糊半径的投影放不进玻璃本体）。
+     *
+     * ⚠️ 口径（team-lead 裁决）：**JS 负责外扩** —— `Visual(W,H)` →
+     * `View(W + 2×inset, H + 2×inset)` + 内容反向位移 `inset`，视觉几何一点不变；
+     * native 不做内缩反算，只把（已放大的）视图当成「本体 + 环带」来画。
+     * 补偿只写在 `AppTabBar` 的 frame 层，**不改** `dockWidth / tabWidth / 弹簧目标 x`。
+     *
+     * 联动三处（同一笔改完，缺一处就会错位）：
+     * 1. `drawGlassFrame`：先画投影 → `canvas.translate(inset)` → 本体按缩小的 w/h 画；
+     * 2. `GlassCaptureEngine.capture`：采集源矩形同步内缩（否则背景被放大 32dp）；
+     * 3. `recordFrameCache`：快照位图只存本体（供指示器玻璃叠玻璃回放，不含投影）。
+     */
+    var glassInsetDp: Float = 0f
+        set(value) {
+            val v = if (value.isFinite()) value.coerceIn(0f, 64f) else 0f
+            if (field == v) return
+            field = v
+            markPropChanged()
+        }
+
+    /**
+     * it.19 P0-2：外投影 alpha（默认 **0.1** = 原版 `Black@0.1`）。
+     * 仅 `glassInsetDp > 0` 时生效；几何常量见 [SHADOW_RADIUS_DP] / [SHADOW_OFFSET_Y_DP]。
+     */
+    var shadowAlpha: Float = 0.1f
+        set(value) {
+            val v = if (value.isFinite()) value.coerceIn(0f, 1f) else 0.1f
+            if (field == v) return
+            field = v
+            markPropChanged()
+        }
+
+    /** 玻璃本体宽度（px）= 视图宽 − 2×inset。 */
+    private val bodyWidthPx: Int
+        get() = width - Math.round(2f * glassInsetPx)
+
+    /** 玻璃本体高度（px）= 视图高 − 2×inset。 */
+    private val bodyHeightPx: Int
+        get() = height - Math.round(2f * glassInsetPx)
+
+    /** 外扩内缩量（px）。 */
+    private val glassInsetPx: Float
+        get() = glassInsetDp * resources.displayMetrics.density
 
     /**
      * it.14 Continuous Capsule 开关（默认 **false** ⇒ 零回归）。
@@ -648,6 +718,25 @@ class GlassKitView(context: Context) : View(context) {
     private var flickerSchedLogs: Int = 0
 
     private val capturePaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * it.19 P0-2 外投影画笔（软件位图上作画，语义确定、不动硬件画布分层）：
+     * - fill：黑色 + `BlurMaskFilter(24dp)`，负责模糊轮廓；
+     * - punch：`PorterDuff.CLEAR`，把轮廓内侧（含模糊内溢）挖掉 ⇒ 只留外侧投影；
+     * - blit：半分辨率位图放大回全尺寸（双线性）。
+     */
+    private val shadowFillPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val shadowPunchPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.BLACK
+    }
+    private val shadowPunchXfermode: PorterDuffXfermode =
+        PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    private val shadowBlitPaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private var shadowCacheBitmap: Bitmap? = null
+    private var shadowCacheKey: String? = null
     private val tintPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     /** it.9 膜层专用 Paint（WHITE，alpha 每次 draw 重设）。 */
     private val membranePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1194,11 +1283,16 @@ class GlassKitView(context: Context) : View(context) {
             flickerCaptureSkips++
             if (capturable && !recordingFrameCache) {
                 frameCacheBitmap?.let { snap ->
-                    if (!snap.isRecycled && width > 0 && height > 0) {
+                    // it.19 P0-2：快照只含玻璃**本体**（不含 inset 环带）⇒ 回放目标矩形
+                    // 必须是本体矩形 (inset, inset)-(inset+bw, inset+bh)，不能用整视图
+                    val insetPx = glassInsetPx
+                    val bw = bodyWidthPx
+                    val bh = bodyHeightPx
+                    if (!snap.isRecycled && bw > 0 && bh > 0) {
                         canvas.drawBitmap(
                             snap,
                             null,
-                            RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                            RectF(insetPx, insetPx, insetPx + bw, insetPx + bh),
                             capturePaint,
                         )
                     }
@@ -1223,8 +1317,10 @@ class GlassKitView(context: Context) : View(context) {
      * 竞态」暴露等价，不另加防护。
      */
     private fun recordFrameCache() {
-        val w = width
-        val h = height
+        // it.19 P0-2：快照只存**玻璃本体**（不含 inset 环带里的投影）——
+        // 指示器的「玻璃叠玻璃」按本体几何回放，多了 32dp 环带就会错位。
+        val w = bodyWidthPx
+        val h = bodyHeightPx
         if (w <= 0 || h <= 0) return
         var bitmap = frameCacheBitmap
         if (bitmap == null || bitmap.width != w || bitmap.height != h) {
@@ -1240,9 +1336,15 @@ class GlassKitView(context: Context) : View(context) {
         bitmap!!.eraseColor(Color.TRANSPARENT)
         flickerRecordCount++
         recordingFrameCache = true
+        val insetPx = glassInsetPx
+        cacheCanvas.save()
         try {
+            // 预平移 −inset：drawGlassFrame 内部会 +inset 画本体，两者抵消 ⇒ 本体落在
+            // 位图 (0,0)；投影被推到负坐标，天然被位图边界裁掉（不进快照）
+            if (insetPx > 0f) cacheCanvas.translate(-insetPx, -insetPx)
             drawGlassFrame(cacheCanvas)
         } finally {
+            cacheCanvas.restore()
             recordingFrameCache = false
         }
     }
@@ -1272,11 +1374,116 @@ class GlassKitView(context: Context) : View(context) {
                     " membraneAlpha=$membraneAlpha highlightScale=$highlightScale" +
                     " chromatic=$chromaticEnabled depth=$depthEffect vibrancy=$vibrancyEnabled" +
                     " capsuleContinuous=$capsuleContinuous indicatorBoostAlpha=$indicatorBoostAlpha" +
-                    " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height",
+                    " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height" +
+                    " glassInsetDp=$glassInsetDp shadowAlpha=$shadowAlpha",
             )
         }
-        val w = width
-        val h = height
+        // it.19 P0-2：glassInsetDp = 0 时走原路径（逐位等价 it.18，12 个既有调用点零影响）
+        val insetPx = glassInsetPx
+        val bodyW = width - Math.round(2f * insetPx)
+        val bodyH = height - Math.round(2f * insetPx)
+        if (bodyW <= 0 || bodyH <= 0) return
+        if (insetPx <= 0f) {
+            drawGlassBody(canvas, bodyW, bodyH)
+            return
+        }
+        // 外投影画在玻璃**下层**（先画影子再画玻璃），且完全落在 inset 环带内
+        drawOuterShadow(canvas, width.toFloat(), height.toFloat(), insetPx)
+        canvas.save()
+        try {
+            // 本体坐标：把画布原点移到本体左上角 ⇒ 下面所有 0..w / 0..h 的绘制自动内缩
+            canvas.translate(insetPx, insetPx)
+            drawGlassBody(canvas, bodyW, bodyH)
+        } finally {
+            canvas.restore()
+        }
+    }
+
+    /**
+     * it.19 P0-2：**外投影**（原版 GlassSurface 的 `shadowElevation` 等效物）。
+     *
+     * 画法：半分辨率离屏位图 + `BlurMaskFilter` + `PorterDuff.CLEAR` 挖内孔，
+     * 再整张 blit 到画布 `(0,0)-(w,h)`。
+     * - 用离屏位图而不是直接 `saveLayer` + `DST_OUT`：软件位图上的 `CLEAR` 语义
+     *   完全确定，不依赖硬件画布的分层行为；且位图按尺寸缓存，静止期零分配。
+     * - 挖内孔的目的：玻璃本体是半透明的，若不挖，投影会透过玻璃把内部压暗一圈
+     *   （原版同样是「只在外侧」）。
+     * - 位图里就带上 `+4dp` 位移，blit 时贴 (0,0)，避免底部越界被 View 裁掉。
+     */
+    private fun drawOuterShadow(canvas: Canvas, fullW: Float, fullH: Float, insetPx: Float) {
+        if (shadowAlpha <= 0f) return
+        val bitmap = obtainShadowBitmap(fullW, fullH, insetPx) ?: return
+        canvas.drawBitmap(bitmap, null, RectF(0f, 0f, fullW, fullH), shadowBlitPaint)
+    }
+
+    /** 投影位图（按 尺寸 + inset + alpha 缓存，变化才重建）。 */
+    private fun obtainShadowBitmap(fullW: Float, fullH: Float, insetPx: Float): Bitmap? {
+        val scale = SHADOW_BITMAP_SCALE
+        val bw = Math.max(1, Math.round(fullW * scale))
+        val bh = Math.max(1, Math.round(fullH * scale))
+        val key = "$bw x $bh @ ${Math.round(insetPx * 10f)} / ${Math.round(shadowAlpha * 255f)}"
+        if (key == shadowCacheKey) return shadowCacheBitmap
+        shadowCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
+        shadowCacheBitmap = null
+        shadowCacheKey = null
+
+        val bitmap = try {
+            Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+        } catch (t: Throwable) {
+            // OOM 兜底：没有投影也不能崩帧（玻璃本体照常画）
+            Log.e(logTag, "shadow bitmap alloc failed: ${t.message}", t)
+            return null
+        }
+        val c = Canvas(bitmap)
+        val inset = insetPx * scale
+        val bodyW = fullW * scale - 2f * inset
+        val bodyH = fullH * scale - 2f * inset
+        if (bodyW <= 0f || bodyH <= 0f) return null
+        val radius = minOf(cornerRadiusDp * density * scale, minOf(bodyW, bodyH) / 2f)
+        val offsetY = SHADOW_OFFSET_Y_DP * density * scale
+        val rect = RectF(inset, inset + offsetY, inset + bodyW, inset + bodyH + offsetY)
+
+        // ① 模糊投影（外扩 + 内溢，内溢稍后被 ② 挖掉）
+        shadowFillPaint.color = Color.BLACK
+        shadowFillPaint.alpha = Math.round(shadowAlpha * 255f).coerceIn(0, 255)
+        shadowFillPaint.maskFilter = BlurMaskFilter(
+            SHADOW_RADIUS_DP * density * scale, BlurMaskFilter.Blur.NORMAL,
+        )
+        c.drawRoundRect(rect, radius, radius, shadowFillPaint)
+        shadowFillPaint.maskFilter = null
+
+        // ② DST_OUT 挖内孔：只保留轮廓外的那一圈（PorterDuff.CLEAR 等价 DST_OUT@1）
+        shadowPunchPaint.xfermode = shadowPunchXfermode
+        c.drawRoundRect(rect, radius, radius, shadowPunchPaint)
+
+        shadowCacheBitmap = bitmap
+        shadowCacheKey = key
+        Log.i(
+            logTag,
+            "shadow bitmap: view=${fullW.toInt()}x${fullH.toInt()} bitmap=${bw}x$bh" +
+                " insetPx=$insetPx radiusDp=$SHADOW_RADIUS_DP offsetYDp=$SHADOW_OFFSET_Y_DP" +
+                " alpha=$shadowAlpha scale=$scale bodyWH=${bodyW.toInt()}x${bodyH.toInt()}",
+        )
+        return bitmap
+    }
+
+    /**
+     * it.8：完整玻璃渲染管线（原 onDraw 主体抽出，屏幕绘制与快照回录共用）。
+     * 管线顺序（it.19 起每条仍严格按编号）：
+     * 0. 外投影（仅 glassInsetDp > 0，画在本体外侧的 inset 环带里，见 drawOuterShadow）；
+     * 1. 捕获：GlassCaptureEngine 按 backdropTag 找背景视图，采玻璃覆盖区（失败画兜底底色）；
+     * 2. 模糊：API 31+ 且画布硬件加速 → RenderNode + RenderEffect.createBlurEffect；
+     *    API 26–30 / 软件画布 → 固定档降采样 1/6 + 双线性放大近似（H2 单档语义）；
+     * 3. 透镜（API 33+）：1/4 降采样 + 小图 CPU box blur ×3 近似高斯输入 +
+     *    AGSL RuntimeShader 折射/色散（it.4-R2 真模糊化输入）；
+     * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.24)) —— H1 硬约束钳制；
+     * 5. 压暗：#000 @ dimmingAlpha；
+     * 6. 高光：顶/底窄带非线性渐变 + 1dp 发丝线（it.8：发丝线随顶/底加强倍率缩放）；
+     * 7. 裁剪：圆角矩形 Path clip。
+     *
+     * @param w/h 玻璃**本体**尺寸（px）。`glassInsetDp = 0` 时等于视图尺寸。
+     */
+    private fun drawGlassBody(canvas: Canvas, w: Int, h: Int) {
         if (w <= 0 || h <= 0) return
 
         // it.4：记录本帧 onScreen 位置基线（PreDraw 位置变化检测用；layout 已完成，
@@ -1355,7 +1562,12 @@ class GlassKitView(context: Context) : View(context) {
             isCapturing = true
             capture != null &&
                 targetView != null &&
-                GlassCaptureEngine.capture(targetView!!, this, capture!!)
+                GlassCaptureEngine.capture(
+                    targetView!!, this, capture!!,
+                    // it.19 P0-2：glassInsetDp > 0 时本体不是整个视图，采集源矩形必须
+                    // 同步内缩，否则背景被按 (W+2i)/W 放大、内容整体漂移
+                    insetPx = glassInsetPx,
+                )
         } finally {
             isCapturing = false
         }
@@ -1371,7 +1583,7 @@ class GlassKitView(context: Context) : View(context) {
                     canvas, capture, w, h, cornerRadiusPx, blurRadiusPx, cornerExponentN,
                 )
             } else if (blurRadiusPx >= 0.5f) {
-                drawBlurredLayer(canvas, capture, blurRadiusPx)
+                drawBlurredLayer(canvas, capture, blurRadiusPx, w, h)
             } else {
                 // 无模糊需求（blurDp=0 或 blurScale=0）：直接画清晰采集结果
                 drawCaptureScaled(canvas, capture, w, h)
@@ -1556,9 +1768,7 @@ class GlassKitView(context: Context) : View(context) {
      * 装机排查法：adb logcat -s GlassKitBlur —— 真机若走了 rendernode 分支但画面
      * 不模糊（锯齿/1px 过渡带），在测试页打开「强制降采样」开关切近似路径。
      */
-    private fun drawBlurredLayer(canvas: Canvas, capture: Bitmap, blurRadiusPx: Float) {
-        val w = width
-        val h = height
+    private fun drawBlurredLayer(canvas: Canvas, capture: Bitmap, blurRadiusPx: Float, w: Int, h: Int) {
         val useRenderNode = !forceDownsample &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             canvas.isHardwareAccelerated

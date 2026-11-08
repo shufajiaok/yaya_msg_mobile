@@ -94,11 +94,22 @@ object GlassCaptureEngine {
      * 降采样：outBitmap 尺寸由调用方按 MAX_CAPTURE_WIDTH_PX 预算好；本方法按
      * 「位图坐标 = scale × (背景坐标 − offset)」的关系先缩放再平移（it.3 修正矩阵顺序）。
      *
+     * it.19 P0-2：`insetPx > 0` 时玻璃本体只占视图中心的
+     * `(inset, inset) → (w-inset, h-inset)` ⇒ 采集源矩形同步内缩（尺寸减 2×inset、
+     * 偏移加 inset）。默认 0 ⇒ 与既有行为逐位等价，12 个既有调用点零影响。
+     *
+     * @param insetPx 玻璃本体相对视图边界的内缩量（px），0 = 整视图即本体。
      * @return false 表示无法采集（视图未布局 / 尺寸为 0 / 参数不一致），调用方应画兜底底色。
      */
-    fun capture(targetView: View, glassView: View, outBitmap: Bitmap): Boolean {
-        val glassWidth = glassView.width
-        val glassHeight = glassView.height
+    fun capture(
+        targetView: View,
+        glassView: View,
+        outBitmap: Bitmap,
+        insetPx: Float = 0f,
+    ): Boolean {
+        val inset = if (insetPx.isFinite() && insetPx > 0f) insetPx else 0f
+        val glassWidth = glassView.width - Math.round(2f * inset)
+        val glassHeight = glassView.height - Math.round(2f * inset)
         if (glassWidth <= 0 || glassHeight <= 0) return false
         if (targetView.width <= 0 || targetView.height <= 0) return false
         if (outBitmap.width <= 0 || outBitmap.height <= 0) return false
@@ -112,9 +123,9 @@ object GlassCaptureEngine {
         val targetLocation = IntArray(2)
         glassView.getLocationOnScreen(glassLocation)
         targetView.getLocationOnScreen(targetLocation)
-        // 玻璃左上角在 targetView 坐标系内的偏移
-        val offsetX = (glassLocation[0] - targetLocation[0]).toFloat()
-        val offsetY = (glassLocation[1] - targetLocation[1]).toFloat()
+        // 玻璃左上角在 targetView 坐标系内的偏移（it.19 P0-2：本体左上角 + inset）
+        val offsetX = (glassLocation[0] - targetLocation[0]).toFloat() + inset
+        val offsetY = (glassLocation[1] - targetLocation[1]).toFloat() + inset
         // 完全不在背景范围内时放弃采集（避免画出纯空内容）
         if (offsetX + glassWidth <= 0f || offsetY + glassHeight <= 0f) return false
         if (offsetX >= targetView.width || offsetY >= targetView.height) return false

@@ -88,6 +88,17 @@ export interface GlassKitViewProps extends ViewProps {
    * clipPath 与 AGSL uCornerExponent 同 n；hero/chip/工具条/clear 不开启（零回归）。
    */
   capsuleContinuous?: boolean;
+  /**
+   * it.19 P0-2 外扩内缩量（dp，默认 0 = 零回归）。
+   *
+   * 语义：本组件的 View 尺寸 = 玻璃本体 + `2 × glassInsetDp`，本体画在中心矩形，
+   * 四周的环带只用来放外投影（View 只能在自己 bounds 内绘制，24dp 模糊的投影
+   * 放不进本体）。**外扩由调用方负责**：容器 `W+2×inset`，本组件 absoluteFill，
+   * 内容层反向位移 `inset`，视觉几何一点不变。
+   */
+  glassInsetDp?: number;
+  /** it.19 P0-2 外投影 alpha（默认 0.1 = 原版 Black@0.1；仅 glassInsetDp > 0 生效）。 */
+  shadowAlpha?: number;
   /** 压暗层 alpha（#000 @0.35 语义见 glass.ts GLASS_DIMMING）。 */
   dimmingAlpha?: number;
   /** 背景容器原生 tag（findNodeHandle(GlassKitBackdrop ref)）。 */
@@ -236,6 +247,8 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         liveBackdrop={props.liveBackdrop ?? false}
         membraneAlpha={props.membraneAlpha ?? 0}
         capsuleContinuous={props.capsuleContinuous ?? false}
+        glassInsetDp={props.glassInsetDp ?? 0}
+        shadowAlpha={props.shadowAlpha ?? 0.1}
         indicatorBoostAlpha={props.indicatorBoostAlpha ?? 0}
         highlightScale={props.highlightScale ?? 0.2}
         chromaticEnabled={props.chromaticEnabled ?? true}

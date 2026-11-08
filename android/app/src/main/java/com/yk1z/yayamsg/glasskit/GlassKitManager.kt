@@ -14,7 +14,7 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * cornerRadiusDp / dimmingAlpha / backdropTag / blurScale / tintScale / lensScale /
  * blurEnabled / glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
  * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled /
- * capsuleContinuous / indicatorBoostAlpha / liveBackdrop。
+ * capsuleContinuous / indicatorBoostAlpha / liveBackdrop / glassInsetDp / shadowAlpha。
  * 所有 setter 对 JS 空值做兜底（default* 注解 + null 合并），倍率默认 1f，
  * blurEnabled 默认 true（H2 语义：能力门控在 JS 侧 canBlur/canLens 收口）。
  *
@@ -90,6 +90,22 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "cornerRadiusDp", defaultFloat = 0f)
     fun setCornerRadiusDp(view: GlassKitView, value: Float) {
         view.cornerRadiusDp = value
+    }
+
+    /**
+     * it.19 P0-2 外扩内缩量（dp，默认 **0** = 零回归）。
+     * JS 负责把 View 放大到 `W+2×inset` 并反向位移 inset；native 在 inset 环带里
+     * 画外投影、本体画在中心矩形。仅 dock bar / 顶栏开启，其余调用点不传。
+     */
+    @ReactProp(name = "glassInsetDp", defaultFloat = 0f)
+    fun setGlassInsetDp(view: GlassKitView, value: Float) {
+        view.glassInsetDp = value
+    }
+
+    /** it.19 P0-2 外投影 alpha（默认 0.1 = 原版 Black@0.1；仅 glassInsetDp > 0 生效）。 */
+    @ReactProp(name = "shadowAlpha", defaultFloat = 0.1f)
+    fun setShadowAlpha(view: GlassKitView, value: Float) {
+        view.shadowAlpha = value
     }
 
     /**
