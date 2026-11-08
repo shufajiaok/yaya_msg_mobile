@@ -21,6 +21,9 @@ import {
 import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+// it.7 POC：玻璃背景层（只加效果，不动既有结构——降级实底保留为兜底，玻璃垫其上）
+import GlassKitView from '../native/GlassKitView';
+import { useBackdropTag } from '../native/backdropTagStore';
 
 export interface TabBarItem {
   key: string;
@@ -97,7 +100,14 @@ function TabCell({
 export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const palette = usePalette();
   const isDark = palette.name === 'dark';
-  // 旧 expo-blur 引擎已删除（独立分支决策）；此处待 UI 重写接入 GlassKitView 原生引擎
+  // it.7 POC：原生玻璃背景层（采集 App 级 GlassKitBackdrop 内容）。tag 由
+  // App.tsx 经模块级 store 广播（tab bar 从 props/路由拿不到 backdrop 引用）；
+  // 未就绪（undefined）时原生侧走兜底底色，不影响既有降级实底观感。
+  // 参数：blurDp 12 / tintAlpha 0.10 / 圆角沿用 bar 的 28 / 不开透镜
+  //（refraction/dispersion 不传 = 0，铁律② lens 仅 indicator）；
+  // blurScale/tintScale 不传 → GlassKitView 内部取 glass store 值。
+  const backdropTag = useBackdropTag();
+  // 旧 expo-blur 引擎已删除（独立分支决策）；it.7 POC 接入 GlassKitView 原生引擎
   // 降级：无模糊半透明实底（原 tint 色提高不透明度），保持胶囊布局与高光观感
   return (
     <View
@@ -114,6 +124,16 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
           },
         ]}
       >
+        {/* it.7 POC：原生玻璃层，absoluteFill 垫在既有内容之下（bar overflow:hidden
+            + 圆角已把它裁进胶囊）；bar 自身实底画在子节点之下 = 玻璃的兜底 */}
+        <GlassKitView
+          style={StyleSheet.absoluteFill}
+          backdropTag={backdropTag}
+          blurDp={12}
+          tintAlpha={0.10}
+          tintColor={isDark ? '#1E1F24' : '#F5F6FA'}
+          cornerRadiusDp={28}
+        />
         {/* tint 色相层：保证可读；浅色几乎透, 深色轻提亮 */}
         <View
           style={[

@@ -1,5 +1,5 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator, ImageBackground, Modal, Image, TouchableOpacity, Linking, StyleSheet, Animated, Easing, AppState } from 'react-native';
+import React, { useCallback, useRef, useEffect, useState } from 'react';
+import { View, Text, ActivityIndicator, ImageBackground, Modal, Image, TouchableOpacity, Linking, StyleSheet, Animated, Easing, AppState, findNodeHandle, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import AppNavigator from './src/navigation';
 import { loadSettings } from './src/services/settings';
@@ -32,6 +32,10 @@ import { fetchCoverToFile, normalizeCoverUrl } from './src/utils/coverToFile';
 import { usePalette } from './src/theme/colors';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import { useSafeAreaInsets } from './src/hooks/useSafeAreaInsets';
+// it.7 POC：内容层外包 GlassKitBackdrop（采集源），tag 经模块级 store 广播给
+// AppTabBar 内的 GlassKitView 玻璃背景层（props 链到不了 tab bar，走单例 store）
+import GlassKitBackdrop from './src/native/GlassKitBackdrop';
+import { setGlobalBackdropTag } from './src/native/backdropTagStore';
 // 仅用 JS 包的安全区上下文（不链接其 native 包）：react-navigation 的 BottomTabView 会无条件
 // 包 SafeAreaProviderCompat，若无 insets 上下文它将渲染 RNCSafeAreaProvider 原生视图；
 // 本工程已在 autolinking 排除 react-native-safe-area-context（无原生 Provider），
@@ -524,6 +528,8 @@ function MusicForegroundBridge() {
 export default function App() {
   const [ready, setReady] = useState(false);
   const [message, setMessage] = useState('正在初始化...');
+  // it.7 POC：GlassKitBackdrop 原生 tag（onLayout 后 findNodeHandle 实测）
+  const glassBackdropRef = useRef(null);
   const appTheme = useResolvedTheme();
   const palette = usePalette();
   const customBackgroundFile = useSettingsStore((state) => state.settings.customBackgroundFile);
@@ -637,6 +643,12 @@ export default function App() {
     ? { uri: backgroundUri.match(/^[a-z][a-z0-9+.-]*:/i) ? backgroundUri : `file://${backgroundUri}` }
     : null;
 
+  // it.7 POC：backdrop 挂载/布局后实测原生 tag 广播（GlassTestScreen 同模式）
+  const onGlassBackdropLayout = useCallback(() => {
+    const handle = findNodeHandle(glassBackdropRef.current);
+    setGlobalBackdropTag(handle != null ? handle : undefined);
+  }, []);
+
   const content = (
     <View style={{ flex: 1, backgroundColor: backgroundSource ? 'transparent' : palette.background }}>
       <StatusBar style={appTheme === 'dark' ? 'light' : 'dark'} />
@@ -645,9 +657,24 @@ export default function App() {
           <Text style={{ color: '#fff', fontSize: 11 }} numberOfLines={2}>{backgroundLoadError}</Text>
         </View>
       ) : null}
-      <SafeAreaBridge>
-        <AppNavigator />
-      </SafeAreaBridge>
+      {/* it.7 POC：内容层外包 GlassKitBackdrop（原生采集源，仅 Android）——
+          AppTabBar 的玻璃层经 backdropTagStore 拿 tag 采集本子树渲染玻璃。
+          非 Android 平台 backdrop 组件返回 null，这里条件分支保证内容照常渲染。 */}
+      {Platform.OS === 'android' ? (
+        <GlassKitBackdrop
+          ref={glassBackdropRef}
+          style={{ flex: 1 }}
+          onLayout={onGlassBackdropLayout}
+        >
+          <SafeAreaBridge>
+            <AppNavigator />
+          </SafeAreaBridge>
+        </GlassKitBackdrop>
+      ) : (
+        <SafeAreaBridge>
+          <AppNavigator />
+        </SafeAreaBridge>
+      )}
       {/* v2.6: Global announcement modal */}
       <Modal visible={!!announceModal} transparent animationType="fade" onRequestClose={() => setAnnounceModal(null)}>
         <View style={anStyles.overlay}>
