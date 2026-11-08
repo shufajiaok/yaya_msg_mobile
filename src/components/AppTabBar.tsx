@@ -1,29 +1,45 @@
 /**
- * AppTabBar · it.16 App 底栏（GlassKit dock：连续曲率 + 指示器透镜）
+ * AppTabBar · it.17 App 底栏（GlassKit dock：连续曲率 + 指示器透镜 + 参数全量接 store）
  *
- * 视觉 / 交互以 GlassTestScreen dock 渲染段为唯一模板，几何全部来自
- * src/theme/glassProfile.ts（用户 2026-11-08 指定的 HealthCheckIn 实测配置），
- * 不自创尺寸：
- * - frame：宽 = 屏宽 × 0.81、高 56.86、圆角 999（引擎钳到 min(w,h)/2 = 真胶囊）；
+ * 视觉 / 交互以 GlassTestScreen dock 渲染段为唯一模板。it.17 的核心变化：
+ * **本组件不再有任何写死的玻璃 / 几何数值**，全部从 `glassDockStore` 与
+ * `useGlassScales()` 读取 —— 实验页拖滑块，本体底栏实时联动（「同步统一调节」）。
+ *
+ * 几何（全部来自 store，默认值来自 glassProfile.ts）：
+ * - frame：宽 = 屏宽 × dockWidthScale(0.81)、高 = dockHeightDp(56.86)、
+ *   圆角 = min(dockRadiusDp, 高/2)（默认 999 → 真胶囊）；
  *   **不加 overflow:'hidden'**（it.14 结论：圆弧父 View 的 clip 会先裁掉连续曲率
  *   端帽的外扩部分，加回去会让端帽被切平）。
- * - bar 玻璃层：GlassKitView capturable（作为指示器的采集源），blurDp 10 /
- *   tintAlpha 0.06 / cornerRadiusDp 999 + capsuleContinuous（n=3 连续曲率端帽）。
- * - 指示器：Animated track + GlassKitView（backdropTag 指向 bar 原生 handle =
- *   玻璃叠玻璃），top/left/right/bottom = 内缩 5.36、capsuleContinuous、
- *   indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451 的 White@0.05）、
- *   highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）。
+ * - 内缩 = dockInnerPadDp(5.36)、底部留白 = dockFloatDp(15.3)。
+ *
+ * 玻璃（与实验页 dock 同一套派生逻辑，保证「实验页所见 = 本体所得」）：
+ * - bar：capturable（指示器的采集源）+ capsuleContinuous（n=3 连续曲率端帽）、
+ *   blurDp 10 × blurScale、tintAlpha = resolveTintAlpha(0.06, tintScale)、
+ *   refraction 5dp × lensScale、dispersion 0、highlightScale / glow 三倍率来自 store。
+ * - 指示器：backdropTag 指向 bar 原生 handle（玻璃叠玻璃）、内缩 = dockInnerPadDp、
+ *   capsuleContinuous、indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451
+ *   的 White@0.05）、highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
+ *   blur 2dp × blurScale、refraction 8dp × lensScale、
+ *   dispersion 10dp × lensScale × (dispersionLevel/0.35)（与实验页同一公式）。
  *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
  *   绝不用累加增量）。
- * - tabs：每 tab flex:1 居中，图标 size 23、label typography.caption2（11sp，守卫 R6
- *   合规）；active 色 palette.tint / 未选中 palette.labelSecondary；active 图标
- *   spring pop 保留原实现（motion.spring.bouncy）。
- * - 降级（!canBlur() || !canLens()）：bar 用半透明实底、指示器退化为半透明实底
- *   View，不渲染任何 GlassKitView。实底色值来自 glassProfile.ts（theme 目录豁免
- *   inline-rgba 基线），本文件零内联 rgba。
+ *
+ * it.17 撤销卡纸底衬（用户 2026-11-08：「确实有一层卡纸」→ 要求透视玻璃）：
+ * 已删除 it.16-fix1 的 `GlassKitBackdrop` 内层渲染与 barBaseRef / barBaseTag /
+ * onBarBaseLayout，bar 的 backdropTag 回到 `useBackdropTag()`（App 级采集源）。
+ * `GLASS_BAR_SURFACE` 常量保留在 glassProfile.ts 并注明恢复方式。
+ *
+ * tabs：每 tab flex:1 居中，图标 size 23、label typography.caption2（11sp，守卫 R6
+ * 合规）；active 色 palette.tint / 未选中 palette.labelSecondary；active 图标
+ * spring pop 保留原实现（motion.spring.bouncy）。
+ *
+ * 降级（!canBlur() || !canLens()）：bar 用半透明实底、指示器退化为半透明实底
+ * View，不渲染任何 GlassKitView。实底色值来自 glassProfile.ts（theme 目录豁免
+ * inline-rgba 基线），本文件零内联 rgba。
  *
  * 契约：AppTabBarProps（items / activeKey / onSelect）与 MCI 导出签名不变，
- * src/navigation/index.tsx 零改动。
+ * src/navigation/index.tsx 零改动。tab 选中态仍由 props 的 activeKey 驱动
+ * （导航真相源），**不**用 store 的 dockSelected 覆盖（后者只给实验页对齐测试用）。
  */
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -40,19 +56,14 @@ import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import GlassKitView from '../native/GlassKitView';
-import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import { useBackdropTag } from '../native/backdropTagStore';
-import { canBlur, canLens } from '../theme/glass';
+import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/glass';
 import {
   GLASS_BAR_FALLBACK,
-  GLASS_BAR_SURFACE,
-  GLASS_EFFECT_DEFAULTS,
   GLASS_INDICATOR_FALLBACK,
-  GLASS_PROFILE,
-  GLASS_SWITCH_DEFAULTS,
   GLASS_TINT_COLOR,
-  useGlassScales,
 } from '../theme/glassProfile';
+import { useDockSettings, useGlassScales } from '../theme/glassDockStore';
 
 export interface TabBarItem {
   key: string;
@@ -68,6 +79,19 @@ export interface AppTabBarProps {
 
 /** dock 指示器弹簧：spring(0.85, 380) → RN damping 0.85×2×√380 ≈ 33.14（与测试页同源）。 */
 const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
+
+/** bar 的基准模糊半径 dp（Kotlin BAR 档 = 10dp，最终半径 = 10 × blurScale × density）。 */
+const BAR_BLUR_DP = 10;
+/** bar 折射基准 dp（最终 = 5 × lensScale px，与实验页 dock bar 同一基准）。 */
+const BAR_REFRACTION_DP = 5;
+/** 指示器折射基准 dp（最终 = 8 × lensScale px）。 */
+const INDICATOR_REFRACTION_DP = 8;
+/** 指示器色散基准 dp（最终 = 10 × lensScale × dispersionLevel/0.35 px）。 */
+const INDICATOR_DISPERSION_DP = 10;
+/** 色散强度归一基准（实验页 dispersionLevel 滑块默认 1.0 时 = 10dp × lensScale）。 */
+const DISPERSION_LEVEL_BASE = 0.35;
+/** 指示器专属提亮 alpha（Kotlin GlassKitKt.java:1434-1435,1451，无对应滑块）。 */
+const INDICATOR_BOOST_ALPHA = 0.05;
 
 /** 单个 tab：图标 + label；active 时图标 spring pop（保留替换前实现）。 */
 function TabCell({
@@ -129,8 +153,28 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const isDark = palette.name === 'dark';
   // App 级 backdrop 容器 tag（App.tsx 经模块级 store 广播；未就绪时原生走兜底底色）。
   const backdropTag = useBackdropTag();
-  // 四倍率实时值：订阅收敛在 glassProfile.ts（守卫 glass-api-access 基线为 0 新增）。
-  const { blurScale, lensScale } = useGlassScales();
+  // 四倍率实时值（订阅收敛在 .ts，守卫 glass-api-access 只对 .tsx 计数）。
+  const { blurScale, tintScale, lensScale, glowScale } = useGlassScales();
+  // 22 项可调参数（开关 / 几何 / 高光 / 扩展调试）：与实验页同一份 store。
+  const {
+    blurEnabled,
+    forceDownsample,
+    glassOnGlass,
+    chromaticEnabled,
+    depthEffect,
+    vibrancyEnabled,
+    dockWidthScale,
+    dockHeightDp,
+    dockInnerPadDp,
+    dockFloatDp,
+    dockRadiusDp,
+    highlightScale,
+    glowAlpha,
+    glowWidth,
+    glowBottom,
+    dispersionLevel,
+  } = useDockSettings();
+
   const winWidth = useWindowDimensions().width;
 
   // 降级：无模糊能力（API<31）或无透镜能力（API<33）时整条 dock 退实底。
@@ -138,19 +182,34 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
 
   const barGlassRef = useRef(null);
   const [barGlassTag, setBarGlassTag] = useState<number | undefined>(undefined);
-  // 卡纸底衬的采集源 tag（bar 玻璃只采它，不透页面内容）
-  const barBaseRef = useRef(null);
-  const [barBaseTag, setBarBaseTag] = useState<number | undefined>(undefined);
   const [dockWidth, setDockWidth] = useState(0);
 
   const activeIndex = Math.max(
     0,
     items.findIndex((item) => item.key === activeKey),
   );
-  const innerPad = GLASS_PROFILE.dockInnerPadDp;
+
+  // —— 几何（全部 store 驱动）——
+  const innerPad = dockInnerPadDp;
+  const frameHeight = dockHeightDp;
+  const frameWidth = Math.round(winWidth * dockWidthScale);
+  // frame 的圆角钳到高的一半（真胶囊）；999 默认值即取到半高。
+  const frameRadius = Math.min(dockRadiusDp, frameHeight / 2);
   const tabWidth =
     dockWidth > 0 && items.length > 0 ? (dockWidth - innerPad * 2) / items.length : 0;
   const dockIndicatorX = useRef(new Animated.Value(innerPad)).current;
+
+  // —— 玻璃派生值（与实验页 dock 段同一套公式）——
+  // tint：resolveTintAlpha 是 glass.ts 的 H1 唯一出口（0.06 × tintScale，≤0.12）。
+  // 原生侧最终 alpha = min(tintAlpha × tintScale, 0.12)＝若再传 tintScale 会二次乘算，
+  // 故显式传 tintScale={1}，让 JS 的 resolveTintAlpha 成为唯一一次乘算。
+  const barTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
+  const barRefractionPx = Math.round(BAR_REFRACTION_DP * lensScale);
+  const indicatorBlurDp = Math.round(2 * blurScale);
+  const indicatorRefractionPx = Math.round(INDICATOR_REFRACTION_DP * lensScale);
+  const indicatorDispersionPx = Math.round(
+    INDICATOR_DISPERSION_DP * lensScale * (dispersionLevel / DISPERSION_LEVEL_BASE),
+  );
 
   // 指示器只做「绝对目标 x」的 spring，不累加增量（it.10 漂移根因）。
   useEffect(() => {
@@ -167,31 +226,23 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
     if (handle != null) setBarGlassTag(handle);
   };
 
-  // 卡纸底衬 tag：bar 玻璃以它为采集源（覆盖 App 级 backdrop = 整棵内容树的语义）
-  const onBarBaseLayout = () => {
-    const handle = findNodeHandle(barBaseRef.current);
-    if (handle != null) setBarBaseTag(handle);
-  };
-
   const onFrameLayout = (evt: LayoutChangeEvent) => {
     setDockWidth(evt.nativeEvent.layout.width);
   };
 
-  const frameHeight = GLASS_PROFILE.dockHeightDp;
+  // 指示器真实渲染条件：有透镜能力 + 玻璃叠玻璃开关打开 + bar 采集源就绪。
+  const showIndicatorGlass = !degraded && glassOnGlass && barGlassTag != null;
 
   return (
-    <View
-      pointerEvents="box-none"
-      style={[styles.outer, { paddingBottom: GLASS_PROFILE.dockFloatDp }]}
-    >
+    <View pointerEvents="box-none" style={[styles.outer, { paddingBottom: dockFloatDp }]}>
       <View
         style={[
           styles.frame,
           {
-            width: Math.round(winWidth * GLASS_PROFILE.dockWidthScale),
+            width: frameWidth,
             height: frameHeight,
             alignSelf: 'center',
-            borderRadius: Math.min(999, frameHeight / 2),
+            borderRadius: frameRadius,
             backgroundColor: degraded
               ? isDark
                 ? GLASS_BAR_FALLBACK.dark
@@ -201,50 +252,34 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
         ]}
         onLayout={onFrameLayout}
       >
-        {/* 卡纸底衬（不透明 surface 色）+ 注册为采集源：bar 玻璃只采它，
-            页面内容不会透上来（用户 2026-11-08：「dock 应该被卡纸遮罩挡住」）。
-            渲染顺序：底衬 → bar 玻璃 → 指示器 → tabs，后者依次覆盖前者。 */}
-        {!degraded && (
-          <GlassKitBackdrop
-            ref={barBaseRef}
-            style={StyleSheet.absoluteFill}
-            onLayout={onBarBaseLayout}
-            pointerEvents="none"
-          >
-            <View
-              style={[
-                StyleSheet.absoluteFill,
-                {
-                  backgroundColor: isDark
-                    ? GLASS_BAR_SURFACE.dark
-                    : GLASS_BAR_SURFACE.light,
-                },
-              ]}
-            />
-          </GlassKitBackdrop>
-        )}
-
-        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）；
-            backdropTag 指向卡纸底衬（未就绪时退回 App 级 backdrop，避免首帧空采） */}
+        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）。
+            it.17 起 backdropTag 回到 App 级采集源 ⇒ 透视玻璃（不再是卡纸底衬）。 */}
         {!degraded && (
           <GlassKitView
             ref={barGlassRef}
             style={StyleSheet.absoluteFill}
             onLayout={onBarLayout}
-            backdropTag={barBaseTag ?? backdropTag}
+            backdropTag={backdropTag}
             capturable={true}
-            blurDp={10}
-            tintAlpha={0.06}
+            blurDp={BAR_BLUR_DP}
+            blurScale={blurScale}
+            tintAlpha={barTintAlpha}
+            tintScale={1}
             tintColor={isDark ? GLASS_TINT_COLOR.dark : GLASS_TINT_COLOR.light}
-            cornerRadiusDp={999}
+            cornerRadiusDp={dockRadiusDp}
             capsuleContinuous={true}
-            refractionPx={Math.round(5 * lensScale)}
+            refractionPx={barRefractionPx}
             dispersionPx={0}
-            highlightScale={GLASS_PROFILE.highlightScale}
-            chromaticEnabled={GLASS_EFFECT_DEFAULTS.chromaticEnabled}
-            depthEffect={GLASS_EFFECT_DEFAULTS.depthEffect}
-            vibrancyEnabled={GLASS_EFFECT_DEFAULTS.vibrancyEnabled}
-            blurEnabled={GLASS_SWITCH_DEFAULTS.blurEnabled}
+            highlightScale={highlightScale}
+            glowScale={glowScale}
+            glowAlphaScale={glowAlpha}
+            glowWidthScale={glowWidth}
+            glowBottomScale={glowBottom}
+            chromaticEnabled={chromaticEnabled}
+            depthEffect={depthEffect}
+            vibrancyEnabled={vibrancyEnabled}
+            blurEnabled={blurEnabled}
+            forceDownsample={forceDownsample}
           />
         )}
 
@@ -261,22 +296,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             ]}
             pointerEvents="none"
           >
-            {degraded ? (
-              <View
-                style={[
-                  styles.indicatorFallback,
-                  {
-                    top: innerPad,
-                    left: innerPad,
-                    right: innerPad,
-                    bottom: innerPad,
-                    borderRadius: Math.max(0, (frameHeight - innerPad * 2) / 2),
-                    backgroundColor: GLASS_INDICATOR_FALLBACK.color,
-                    opacity: GLASS_INDICATOR_FALLBACK.opacity,
-                  },
-                ]}
-              />
-            ) : barGlassTag != null ? (
+            {showIndicatorGlass ? (
               <GlassKitView
                 style={[
                   styles.indicator,
@@ -288,15 +308,39 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
                   },
                 ]}
                 backdropTag={barGlassTag}
-                blurDp={Math.round(2 * blurScale)}
-                cornerRadiusDp={999}
+                blurDp={indicatorBlurDp}
+                cornerRadiusDp={dockRadiusDp}
                 capsuleContinuous={true}
-                indicatorBoostAlpha={0.05}
-                refractionPx={Math.round(8 * lensScale)}
-                dispersionPx={Math.round(10 * lensScale)}
+                indicatorBoostAlpha={INDICATOR_BOOST_ALPHA}
+                refractionPx={indicatorRefractionPx}
+                dispersionPx={indicatorDispersionPx}
                 highlightScale={0}
+                chromaticEnabled={chromaticEnabled}
+                depthEffect={depthEffect}
+                vibrancyEnabled={vibrancyEnabled}
+                blurEnabled={blurEnabled}
+                forceDownsample={forceDownsample}
               />
-            ) : null}
+            ) : (
+              // 降级 / 关闭「玻璃叠玻璃」：退半透明实底占位（不渲染内层玻璃）。
+              <View
+                style={[
+                  styles.indicatorFallback,
+                  {
+                    top: innerPad,
+                    left: innerPad,
+                    right: innerPad,
+                    bottom: innerPad,
+                    borderRadius: Math.max(
+                      0,
+                      Math.min(dockRadiusDp, (frameHeight - innerPad * 2) / 2),
+                    ),
+                    backgroundColor: GLASS_INDICATOR_FALLBACK.color,
+                    opacity: GLASS_INDICATOR_FALLBACK.opacity,
+                  },
+                ]}
+              />
+            )}
           </Animated.View>
         )}
 
@@ -323,9 +367,9 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: 'center',
-    // paddingBottom 由 JSX inline 从 GLASS_PROFILE.dockFloatDp 驱动
+    // paddingBottom 由 JSX inline 从 store 的 dockFloatDp 驱动
   },
-  // 宽 / 高 / 圆角全部由 JSX inline 从 GLASS_PROFILE 驱动；不写死圆角（守卫 R3）。
+  // 宽 / 高 / 圆角全部由 JSX inline 从 store 驱动；不写死圆角（守卫 R3）。
   frame: {},
   indicatorTrack: { position: 'absolute', top: 0, left: 0 },
   indicator: { position: 'absolute' },
