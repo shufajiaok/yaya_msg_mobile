@@ -88,6 +88,10 @@ export interface GlassKitViewProps extends ViewProps {
    *  detach 自动注销），其他玻璃的 backdropTag 指向本视图 handle（findNodeHandle）
    *  即可采集本视图的合成帧——内层再叠一层透镜 = 双重透镜。默认 false。 */
   capturable?: boolean;
+  /** it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38）。绘制顺序在 tint 之后、
+   *  压暗之前——实例库「膜层」的等效物（通透度越低膜越厚）。原生侧绘制，
+   *  不产生 JS 内联 rgba。 */
+  membraneAlpha?: number;
   /** 模糊总开关（reduceTransparency 时本组件强制传 false）。 */
   blurEnabled?: boolean;
 }
@@ -166,6 +170,7 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         glowBottomScale={props.glowBottomScale ?? 1}
         forceDownsample={props.forceDownsample ?? false}
         capturable={props.capturable ?? false}
+        membraneAlpha={props.membraneAlpha ?? 0.38}
         ref={ref as Ref<NativeViewInstance>}
       />
     );
