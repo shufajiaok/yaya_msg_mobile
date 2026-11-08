@@ -63,6 +63,7 @@ import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import GlassKitView from '../native/GlassKitView';
 import GlassKitBackdrop from '../native/GlassKitBackdrop';
+import GlassKitRimView from '../native/GlassKitRimView';
 import { useBackdropTag } from '../native/backdropTagStore';
 import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/glass';
 import {
@@ -437,6 +438,18 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             />
           ))}
         </View>
+
+        {/*
+          it.19 P0-1 轮廓光（rim）接到 dock bar。
+          ⚠️ 几何：必须放在 **dockBody**（= 玻璃本体 1026×199）里，而不是外扩后的
+          frame（1250×423）—— 否则边光会浮在玻璃外 32dp 处形成鬼影。
+          放在 dockBody 内 ⇒ view 尺寸天然 = 本体尺寸，无需再传 inset（比加
+          insetDp prop 少一个可能漂移的参数）。
+          必须最后一个子节点：原版 HighlightNode 在内容之后绘制，要盖住图标/文字。
+        */}
+        {!degraded && (
+          <GlassKitRimView cornerRadiusDp={dockRadiusDp} capsuleContinuous />
+        )}
         </View>{/* /it.19 P0-2 内容层 */}
         </GlassKitBackdrop>
       </View>

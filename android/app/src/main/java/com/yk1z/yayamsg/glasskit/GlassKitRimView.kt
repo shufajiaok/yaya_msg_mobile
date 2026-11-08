@@ -290,7 +290,11 @@ class GlassKitRimView(context: Context) : View(context) {
         blurPx: Float,
         shaderOn: Boolean,
     ) {
-        val flags = "rim: view=$id size=${w.toInt()}x${h.toInt()} r=$radius" +
+        // it.19 2076029：显式打 bodyWH —— rim 要画在**玻璃本体**上。当前接线把 rim 放进
+        // dockBody（本体容器）里，所以 view 尺寸 == 本体尺寸（bodyWH == size）；
+        // 若哪天改贴到外扩后的 frame 上，bodyWH 必须先减去 2×inset，否则边光浮在玻璃外。
+        val flags = "rim: view=$id size=${w.toInt()}x${h.toInt()}" +
+            " bodyWH=${w.toInt()}x${h.toInt()} r=$radius" +
             " widthPx=$widthPx strokePx=$strokePx blurPx=$blurPx" +
             " alpha=$rimAlpha angle=${rimAngleDeg} falloff=$rimFalloff" +
             " kyant0=$useKyant0 capsule=$capsuleContinuous agsl=$shaderOn"
