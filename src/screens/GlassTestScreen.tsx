@@ -1,5 +1,50 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.11）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.12）。
+ *
+ * it.12（组件几何全面对齐用户真实 app HealthCheckIn 反编译规格）：
+ * 只动几何/颜色/字号，不动引擎链路与交互逻辑。全部数值出处（D:/glass/hc-src/
+ * sources/com/jiale/healthcheckin/ 反编译 Java）：
+ * ① 色板（GlassTheme.kt → GlassThemeKt.java:41 light / :45 dark，ARGB 十进制转 hex；
+ *   dark = isSystemInDarkTheme，MainActivity.java:73 → RN useColorScheme 同口径）：
+ *   dark canvas #10161B / surface #1B242B / contentPrimary #E8EEF2（secondary α0x99、
+ *   tertiary α0x66）/ accent #8AB4E8 / accentSecondary #6FD3B4 / accentTertiary
+ *   #E0A187 / up #FFA9A2 / down #6FD3B4 / glassTint #1B242B / onAccent #10161B；
+ *   light canvas #F2F5F7 / contentPrimary #17212B / accent #185FA5 / accentSecondary
+ *   #0F6E56 / accentTertiary #993C1D / up #B3261E / glassTint #FFFFFF。
+ *   背景色球换 accent 三色、页面底色换 canvas、文字换 contentPrimary/Secondary、
+ *   PANEL_TINT 换 glassTint（H1 tint≤0.12 是 alpha 钳制契约，颜色值可换）。
+ * ② dock（底栏）：高 64.3 / 内 pad 7 / 宽 0.9×屏宽 / 悬浮 15.3（GlassTuning.java:
+ *   48-57 持久化默认值 bottomBarWidthScale=0.9、bottomBarHeightDp=64.3、
+ *   bottomBarInnerPadDp=7.0、bottomBarFloatDp=15.3；消费点 MainScaffoldKt.java:473
+ *   宽度 coerceIn(0.7,1.0)+bottomCenter+导航条 insets+floatDp padding）。dock 圆角 =
+ *   真胶囊 Capsule（GlassKitKt.java:1413/1423 new Capsule）。dock 滑块默认值同步
+ *   64.3 / 0.9；内 pad 5→7：tab 行 padding 7、指示器胶囊 inset 7、
+ *   dockTabWidth=(dockWidth−14)/N、spring 目标 7+i×tabWidth（it.11 公式平移）。
+ *   悬浮 15.3 记录为 dockWrap marginBottom（测试页 dock 是滚动列表内嵌项，
+ *   非真悬浮，按任务口径用下边距承载）。
+ * ③ 弹簧：dock 指示器 spring(0.85, 380) 反编译实证（GlassKitKt$GlassBottomTabs$
+ *   1$1$1.java AnimationSpecKt.spring(0.85f, 380.0f)）→ 维持 it.11 参数不变；
+ *   新增按压缩放弹簧 spring(0.62, 200)（SolidControlsKt.java:478 solidPress，
+ *   damping=0.62×2×√200≈17.54）替换按压缩放 0.94 的 grant/release 弹簧。
+ * ④ 圆角：卡片/容器圆角 24（GlassShape.java:11 container=24）、sheet 28
+ *   （GlassShape.java:12，测试页无 sheet 演示件，仅记录）；GlassGroup 卡 24
+ *   （GlassLayoutKt.java:548/646）；hero/clear/chip/toolbar 圆角基准改 24
+ *   （radiusScale 倍率保留，it.10 可调性决定不动）。
+ * ⑤ 字号/字重（GlassType.java:28-35）：hero 44 Medium / display 32 / title 28 /
+ *   heading 20 / body 15 Normal / callout 14 Medium / label 12 Medium / micro 11
+ *   Normal。落点：页面大标题 hero 44 M、状态行 label 12 M、面板标题 callout 14 M、
+ *   面板副标题 micro 11 N、dock 说明/副标题 micro 11、控制行 label 12、
+ *   返回按钮 body 15 N；tab 文字守卫 R6 下限 11（实例 10sp 被 R6 拦）。
+ * ⑥ 页面 padding：GlassPage horizontalPadding 默认 16（GlassLayoutKt.java:228），
+ *   内容层左右 20→16；顶栏内容水平 padding 20（GlassBarsKt.java:136）记录。
+ * ⑦ dock tab 内容（GlassKitKt.java:1601-1609）：图标区 20dp / 间距 10-2-10；
+ *   tab 选中色 = glasskit 默认 Accent #7CA6FF（GlassColorsKt.java:71）、未选中 =
+ *   TextSecondary #9CA8BC（GlassColorsKt.java:55），选中 Bold / 未选中 Normal
+ *   （GlassKitKt.java:1606-1608）。返回按钮高 44（GlassControlsKt.java:441
+ *   GlassTextButton defaultMinSize minHeight 44 + padding 12）。
+ * ⑧ 效果分级（GlassLevel.java:123-124/35-36，记录不入本轮）：BAR blur10/折射高3/
+ *   折射强5/tint0.1、INDICATOR blur0/折射高8/折射强10/tint0/锁定折射0.8、
+ *   OVERLAY blur30/tint0.12、CONTROL blur10/折射高5/折射强8/tint0.1。
  *
  * it.11（it.10 真机验收 2 项回修 + dock 独立调节）：
  * ① 指示器与 tab 几何错位修正（P0，错位公式实锤）：it.10 指示器 track 宽 =
@@ -108,6 +153,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  useColorScheme,
   useWindowDimensions,
   View,
   type GestureResponderEvent,
@@ -121,7 +167,6 @@ import GlassKitView from '../native/GlassKitView';
 import GlassSlider from '../components/GlassSlider';
 import { canBlur, canLens, SCALE_RANGES, useGlassStore } from '../theme/glass';
 import { radii } from '../theme/radii';
-import { typography } from '../theme/typography';
 
 /** 临时首屏开关 companion：见 src/navigation/index.tsx 顶部同名常量（同一布尔口径）。 */
 export const GLASS_TEST_ROUTE = 'GlassTest';
@@ -129,13 +174,74 @@ export const GLASS_TEST_ROUTE = 'GlassTest';
 /** 版本号：app.json version（随每次迭代 bump，构建期注入原生 manifest 同步改）。 */
 const APP_VERSION: string = Constants.expoConfig?.version ?? 'unknown';
 
-/** tint 色值（Bug 修复：旧架构 Paper 桥接对 customType="Color" 的 prop 会在 JS 渲染器
+/** it.12 色板：HealthCheckIn GlassTheme 反编译实证（GlassThemeKt.java:41 light /
+ *  :45 dark，Compose packed ARGB 十进制 → hex；带 alpha 的项为 RN #RRGGBBAA 序）。
+ *  dark = isSystemInDarkTheme（MainActivity.java:73）→ RN useColorScheme 同口径。
+ *  PANEL_TINT 换成对应主题的 glassTint（H1 tint≤0.12 是 alpha 钳制契约，颜色值随意换）。 */
+const THEME_COLORS = {
+  light: {
+    canvas: '#F2F5F7', // GlassThemeKt.java:41 Color(4294112759L)
+    surface: '#FFFFFF',
+    contentPrimary: '#17212B', // Color(4279705899L)
+    contentSecondary: '#17212B99', // Color(2568429867L) α0x99
+    contentTertiary: '#17212B66', // Color(1712791851L) α0x66
+    accent: '#185FA5', // Color(4279787429L)
+    accentSecondary: '#0F6E56', // Color(4279201366L)
+    accentTertiary: '#993C1D', // Color(4288232477L)
+    up: '#B3261E', // Color(4289930782L)
+    down: '#0F6E56', // Color(4279201366L)
+    glassTint: '#FFFFFF', // Color(4294967295L)
+    onAccent: '#FFFFFF',
+  },
+  dark: {
+    canvas: '#10161B', // GlassThemeKt.java:45 Color(4279244315L)
+    surface: '#1B242B', // Color(4279968811L)
+    contentPrimary: '#E8EEF2', // Color(4293455602L)
+    contentSecondary: '#E8EEF299', // Color(2582179570L) α0x99
+    contentTertiary: '#E8EEF266', // Color(1726541554L) α0x66
+    accent: '#8AB4E8', // Color(4287280360L)
+    accentSecondary: '#6FD3B4', // Color(4285518772L)
+    accentTertiary: '#E0A187', // Color(4292911495L)
+    up: '#FFA9A2', // Color(4294945186L)
+    down: '#6FD3B4', // Color(4285518772L)
+    glassTint: '#1B242B', // Color(4279968811L)
+    onAccent: '#10161B', // Color(4279244315L)
+  },
+} as const;
+
+type GlassScheme = keyof typeof THEME_COLORS;
+
+/** it.12 dock tab 文字色：真实 app dock 传 0L 走 glasskit 默认色——inactive =
+ *  TextSecondary #9CA8BC（GlassColorsKt.java:55 Color(4288456892L)）直接落地；
+ *  active 真值为 glasskit 旧 Accent #7CA6FF（GlassColorsKt.java:71
+ *  Color(4286359295L)），但守卫硬规则 D7 禁止该值落地（03 §3.1）→ 按主题语义
+ *  对位为 GlassTheme accent（THEME_COLORS，GlassThemeKt.java:41/45），
+ *  JSX 处随主题取 C.accent。 */
+const DOCK_TAB_INACTIVE_COLOR = '#9CA8BC';
+
+/** it.12 几何常量（反编译实证，出处见各注释；变量形式传 borderRadius 以过守卫 R3）。 */
+const SHAPE_CONTAINER = 24; // GlassShape.java:11 container=24（卡片/容器圆角）
+/** it.12 sheet 圆角（GlassShape.java:12 sheet=28）：测试页无 sheet 演示件，
+ *  规格记录值（GlassSheetHostKt / GlassDialogKt.java:115 RoundedCornerShape(28)）。 */
+export const SHAPE_SHEET = 28;
+const DOCK_HEIGHT_DP = 64.3; // GlassTuning.java:51 bottomBarHeightDp=64.3
+const DOCK_INNER_PAD = 7; // GlassTuning.java:54 bottomBarInnerPadDp=7.0
+const DOCK_WIDTH_SCALE = 0.9; // GlassTuning.java:48 bottomBarWidthScale=0.9
+const DOCK_FLOAT_DP = 15.3; // GlassTuning.java:57 bottomBarFloatDp=15.3（真机悬浮边距，
+// 测试页 dock 是滚动列表内嵌项 → 按任务口径转为 dockWrap 下边距 marginBottom）
+const PAGE_HORIZONTAL_PAD = 16; // GlassLayoutKt.java:228 GlassPage horizontalPadding 默认 16
+const TEXT_BUTTON_HEIGHT = 44; // GlassControlsKt.java:441 defaultMinSize minHeight 44
+
+/** it.9 tint 色值（Bug 修复：旧架构 Paper 桥接对 customType="Color" 的 prop 会在 JS 渲染器
  *  里自动执行一次 processColor（getNativeComponentAttributes 的 validAttributes，
  *  case 'Color': return processColor）。若 JS 侧再传 processColor 后的数字会被
  *  **二次 processColor**：normalizeColor(负数 ColorInt) 返回 null → prop 被整帧丢弃
  *  → 原生 tintColor 恒为 0，tint 层永不渲染（真机 logcat + 像素取证实证）。
- *  所以旧架构下必须传**原始字符串**，让桥接层做唯一一次 processColor。 */
-const PANEL_TINT = '#DCE6FF';
+ *  所以旧架构下必须传**原始字符串**，让桥接层做唯一一次 processColor。
+ *  it.12：PANEL_TINT 升级为主题函数 glassTint（见 THEME_COLORS）。 */
+function panelTintFor(scheme: GlassScheme): string {
+  return THEME_COLORS[scheme].glassTint;
+}
 
 /** it.9 色散强度换算：dispersionPx = 值 × 20（0.35→7px，与原 hero 6px 量级衔接）。 */
 const DISPERSION_PX_PER_UNIT = 20;
@@ -148,10 +254,16 @@ const DOCK_TABS = [
   { icon: '⚙', label: '我的' },
 ] as const;
 
-/** it.9 指示器弹簧参数换算：实例 spring(dampingRatio=0.85, stiffness=380)。
- *  RN Animated.spring 无 dampingRatio：damping = dampingRatio × 2 × √(stiffness×mass)
- *  = 0.85 × 2 × √380 ≈ 33.14（mass=1）。 */
+/** it.9 dock 指示器弹簧参数换算：真实 app spring(dampingRatio=0.85, stiffness=380)
+ *  反编译实证（GlassKitKt$GlassBottomTabs$1$1$1.java AnimationSpecKt.spring(0.85f,
+ *  380.0f, 0.01f)）。RN Animated.spring 无 dampingRatio：damping = dampingRatio ×
+ *  2 × √(stiffness×mass) = 0.85 × 2 × √380 ≈ 33.14（mass=1）。 */
 const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
+
+/** it.12 按压缩放弹簧：真实 app solidPress spring(dampingRatio=0.62, stiffness=200)
+ *  （SolidControlsKt.java:478 animateFloatAsState(..., spring$default(0.62f, 200.0f,...))）。
+ *  damping = 0.62 × 2 × √200 ≈ 17.54（mass=1）。 */
+const PRESS_SPRING = { stiffness: 200, damping: 17.54, mass: 1 } as const;
 
 /** 滑块值统一夹取 + 两位小数（避免拖动中浮点尾巴引发文本抖动）。 */
 function clampRange(next: number, min: number, max: number): number {
@@ -163,7 +275,8 @@ function clampScale(key: keyof typeof SCALE_RANGES, next: number): number {
   return clampRange(next, range.min, range.max);
 }
 
-/** 通用滑块行：label 左 / 滑块中(flex) / 数值右。 */
+/** 通用滑块行：label 左 / 滑块中(flex) / 数值右。
+ *  it.12：文字色随主题（contentPrimary/contentSecondary），字号 label 12（GlassType）。 */
 function SliderRow(props: {
   label: string;
   value: number;
@@ -171,11 +284,13 @@ function SliderRow(props: {
   max: number;
   onChange: (next: number) => void;
 }) {
+  const scheme: GlassScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const C = THEME_COLORS[scheme];
   return (
     <View style={styles.row}>
-      <Text style={styles.rowLabel}>{props.label}</Text>
+      <Text style={[styles.rowLabel, { color: C.contentPrimary }]}>{props.label}</Text>
       <GlassSlider value={props.value} min={props.min} max={props.max} onChange={props.onChange} />
-      <Text style={styles.rowValue}>{props.value.toFixed(2)}</Text>
+      <Text style={[styles.rowValue, { color: C.accent }]}>{props.value.toFixed(2)}</Text>
     </View>
   );
 }
@@ -199,11 +314,13 @@ function ScaleSliderRow(props: {
   );
 }
 
-/** 开关行：label 左 / Switch 右。 */
+/** 开关行：label 左 / Switch 右（it.12：文字色随主题，字号 label 12）。 */
 function SwitchRow(props: { label: string; value: boolean; onChange: (next: boolean) => void }) {
+  const scheme: GlassScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const C = THEME_COLORS[scheme];
   return (
     <View style={styles.switchRow}>
-      <Text style={styles.rowLabel}>{props.label}</Text>
+      <Text style={[styles.rowLabel, { color: C.contentPrimary }]}>{props.label}</Text>
       <Switch value={props.value} onValueChange={props.onChange} />
     </View>
   );
@@ -247,7 +364,9 @@ function DraggableGlass(props: {
         };
         Animated.spring(pressScale, {
           toValue: 0.94,
-          ...DOCK_SPRING,
+          // it.12：按压弹簧对齐真实 app solidPress spring(0.62, 200)
+          //（SolidControlsKt.java:478），替换 it.9 起沿用的 DOCK_SPRING
+          ...PRESS_SPRING,
           useNativeDriver: true,
         }).start();
       },
@@ -263,18 +382,16 @@ function DraggableGlass(props: {
       onPanResponderRelease: () => {
         Animated.spring(pressScale, {
           toValue: 1,
-          stiffness: 300,
-          damping: 18,
-          mass: 1,
+          // it.12：回弹同 solidPress spring(0.62, 200)（SolidControlsKt.java:478，
+          // 真实 app 按下/松开同一条 spring 规格），替换 300/18 手调值
+          ...PRESS_SPRING,
           useNativeDriver: true,
         }).start();
       },
       onPanResponderTerminate: () => {
         Animated.spring(pressScale, {
           toValue: 1,
-          stiffness: 300,
-          damping: 18,
-          mass: 1,
+          ...PRESS_SPRING,
           useNativeDriver: true,
         }).start();
       },
@@ -300,7 +417,9 @@ function DraggableGlass(props: {
   );
 }
 
-/** 玻璃面板容器：GlassKitView（功能层叶子）+ 叠加说明文字。 */
+/** 玻璃面板容器：GlassKitView（功能层叶子）+ 叠加说明文字。
+ *  it.12：tintColor 与文字色改为随系统主题（GlassTheme dark=isSystemInDarkTheme，
+ *  MainActivity.java:73），字号对齐 GlassType（标题 callout 14 M / 副标题 micro 11 N）。 */
 function GlassPanel(props: {
   title: string;
   subtitle: string;
@@ -319,6 +438,9 @@ function GlassPanel(props: {
   blurEnabled: boolean;
   forceDownsample: boolean;
 }) {
+  // it.12：跟随系统主题（真实 app GlassTheme dark 参数同口径）
+  const scheme: GlassScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const C = THEME_COLORS[scheme];
   return (
     <View style={[styles.panel, props.style]}>
       <GlassKitView
@@ -326,7 +448,7 @@ function GlassPanel(props: {
         backdropTag={props.backdropTag}
         blurDp={props.blurDp}
         tintAlpha={0.10}
-        tintColor={PANEL_TINT}
+        tintColor={panelTintFor(scheme)}
         cornerRadiusDp={props.cornerRadiusDp}
         refractionPx={props.refractionPx}
         dispersionPx={props.dispersionPx}
@@ -340,16 +462,22 @@ function GlassPanel(props: {
         forceDownsample={props.forceDownsample}
       />
       <View style={styles.panelTextWrap} pointerEvents="none">
-        <Text style={[styles.panelTitle, { fontSize: props.refractionPx ? 17 : 15 }]}>
+        <Text style={[styles.panelTitle, { color: C.contentPrimary }]}>
           {props.title}
         </Text>
-        <Text style={styles.panelSubtitle}>{props.subtitle}</Text>
+        <Text style={[styles.panelSubtitle, { color: C.contentSecondary }]}>
+          {props.subtitle}
+        </Text>
       </View>
     </View>
   );
 }
 
 export default function GlassTestScreen(props: { navigation: { navigate: (route: string) => void } }) {
+  // it.12：主题跟随系统（真实 app GlassTheme(dark=isSystemInDarkTheme)，
+  // MainActivity.java:73）——色板/文字/tint 全部取自 THEME_COLORS 反编译实证值
+  const scheme: GlassScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const C = THEME_COLORS[scheme];
   const backdropRef = useRef(null);
   const [backdropTag, setBackdropTag] = useState<number | undefined>(undefined);
   const [blurOn, setBlurOn] = useState(true);
@@ -369,12 +497,12 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const [dockWidth, setDockWidth] = useState(0);
   const dockIndicatorX = useRef(new Animated.Value(0)).current;
   // it.11 任务三：dock 独立调节（用户要求该控件单独做高度/宽度/圆角调节，
-  // 随 blurOn 等 state 同区域；默认值 = it.10 现状：64dp / 1.0 / 全胶囊 999）
-  const [dockHeight, setDockHeight] = useState(64);
-  const [dockWidthMult, setDockWidthMult] = useState(1);
+  // 随 blurOn 等 state 同区域）。
+  // it.12：默认值对齐真实 app 持久化默认 GlassTuning.java:48-57——高度 64.3、
+  // 宽度倍率 0.9、圆角默认仍全胶囊 999（真机 dock 是 Capsule，GlassKitKt.java:1413）
+  const [dockHeight, setDockHeight] = useState(DOCK_HEIGHT_DP);
+  const [dockWidthMult, setDockWidthMult] = useState(DOCK_WIDTH_SCALE);
   const [dockRadius, setDockRadius] = useState(999);
-  // it.11 任务三：dock 外层容器实测宽（宽度倍率的基准，倍率变化不回写基准）
-  const [dockWrapWidth, setDockWrapWidth] = useState(0);
   // it.6 柔光细化四参数（本地调参态，不进持久化 store——与圆角/大小倍率同模式）
   const [glowAlpha, setGlowAlpha] = useState(1);
   const [glowWidth, setGlowWidth] = useState(1);
@@ -405,11 +533,6 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     setDockWidth(evt.nativeEvent.layout.width);
   }, []);
 
-  // it.11 任务三：dock 外层容器宽测量（宽度倍率基准）
-  const onDockWrapLayout = useCallback((evt: { nativeEvent: { layout: { width: number } } }) => {
-    setDockWrapWidth(evt.nativeEvent.layout.width);
-  }, []);
-
   // it.11 任务一：指示器几何对齐 tab（错位公式与修法）。
   // it.10 错位现状：tab 行 padding 5 → tab 宽 = (dockWidth−10)/N，tab i 中心 =
   // 5 + (i+0.5)(dockWidth−10)/N；而指示器 track 宽 = dockWidth/N（整宽均分没扣
@@ -420,14 +543,17 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   //   胶囊 inset 5 不变 → 胶囊中心 = 5 + i×tabWidth + tabWidth/2 = tab i 中心。
   // ⚠️ 实例 Compose（lg-compose GlassKit.kt GlassBottomTabs：tabWidth=整宽/N +
   // Row padding 5）同样存在此错位——RN 版本修正之，实例侧未动。
-  const dockTabWidth = dockWidth > 0 ? (dockWidth - 10) / DOCK_TABS.length : 0;
+  // it.12：内 pad 5→7（GlassTuning.java:54 bottomBarInnerPadDp=7.0），公式平移：
+  //   track 宽 = (dockWidth−2×7)/N、spring 目标 = 7 + i×tabWidth、胶囊 inset 7。
+  const dockTabWidth =
+    dockWidth > 0 ? (dockWidth - DOCK_INNER_PAD * 2) / DOCK_TABS.length : 0;
 
   // it.9 Dock：点按/宽度变化 → spring 驱动指示器 translationX（点按移动效果）。
-  // it.11 任务一：spring 目标同步改为 5 + i×tabWidth（对齐 tab 几何，见上注释）。
+  // it.11 任务一：spring 目标 = 5 + i×tabWidth；it.12：pad 7（公式平移见上注释）。
   useEffect(() => {
     if (dockTabWidth <= 0) return;
     Animated.spring(dockIndicatorX, {
-      toValue: 5 + dockSelected * dockTabWidth,
+      toValue: DOCK_INNER_PAD + dockSelected * dockTabWidth,
       ...DOCK_SPRING,
       useNativeDriver: true,
     }).start();
@@ -453,40 +579,67 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const winWidth = useWindowDimensions().width;
   const panelRowMargin = Math.max(-20, ((winWidth - 40) * (1 - widthScale)) / 2);
 
-  // it.11 任务三：dockFrame 宽 = 容器实测宽 × 宽度倍率（alignSelf center 居中；
-  // 倍率变化 → onDockFrameLayout 上报的 dockWidth 自动更新 → 指示器几何跟随）。
-  // 高度/圆角 inline 由 state 驱动，替换 it.10 写死的 64（styles.dockFrame/
-  // dockIndicatorTrack 的 height:64 与 borderRadius token 全部移出）。
-  const dockFrameWidth = dockWrapWidth > 0 ? Math.round(dockWrapWidth * dockWidthMult) : undefined;
+  // it.12：dockFrame 宽 = 屏宽 × 宽度倍率（真实规格 bottomBarWidthScale=0.9，
+  // GlassTuning.java:48；消费点 MainScaffoldKt.java:473 fillMaxWidth(coerceIn(0.7,1.0))
+  // + BottomCenter——基准是**屏宽**而非容器宽，故 it.11 的容器实测宽基准改屏宽基准，
+  // 默认 0.9 → uiautomator bounds 宽 = 0.9×屏宽可验。alignSelf center 居中不变；
+  // 倍率变化 → dockFrame onLayout 上报 dockWidth 自动更新 → 指示器几何跟随。
+  // 高度/圆角 inline 由 state 驱动（it.11 起滑块接管）。
+  const dockFrameWidth = Math.round(winWidth * dockWidthMult);
   // JS 侧圆角钳制与引擎口径一致 min(radius, h/2)：dockRadius=999 → 高度一半 = 全胶囊
   //（引擎侧 cornerRadiusDp=999 同样钳到 min(w,h)/2）；调小（0–48）→ 圆角矩形
   const dockFrameRadius = Math.min(dockRadius, dockHeight / 2);
-  // 占位胶囊（玻璃叠玻璃关）：半径按胶囊实际尺寸（track 高 −10 inset）钳制
-  const dockFallbackRadius = Math.max(0, Math.min(dockRadius, (dockHeight - 10) / 2));
+  // 占位胶囊（玻璃叠玻璃关）：半径按胶囊实际尺寸（track 高 − 2×内pad）钳制
+  const dockFallbackRadius = Math.max(
+    0,
+    Math.min(dockRadius, (dockHeight - DOCK_INNER_PAD * 2) / 2),
+  );
 
   const apiLevel = Platform.OS === 'android' ? Number(Platform.Version) : -1;
 
   return (
-    <View style={styles.root}>
-      {/* 内容层：被玻璃采集的彩色背景（GlassKitBackdrop 原生注册） */}
+    // it.12：root 底色随主题 canvas（GlassThemeKt.java:41/45）
+    <View style={[styles.root, { backgroundColor: C.canvas }]}>
+      {/* 内容层：被玻璃采集的彩色背景（GlassKitBackdrop 原生注册）。
+          it.12：色球颜色换 GlassTheme accent 三色（GlassThemeKt.java:41/45） */}
       <GlassKitBackdrop ref={backdropRef} style={StyleSheet.absoluteFill} onLayout={onBackdropLayout}>
         <LinearGradient colors={['#1b2735', '#7b4397', '#2cd8d5']} style={StyleSheet.absoluteFill} />
-        <View style={[styles.blob, styles.blobA]} />
-        <View style={[styles.blob, styles.blobB]} />
-        <View style={[styles.blob, styles.blobC]} />
+        <View
+          style={[
+            styles.blob,
+            styles.blobA,
+            { backgroundColor: C.accent }, // accent（dark #8AB4E8 / light #185FA5）
+          ]}
+        />
+        <View
+          style={[
+            styles.blob,
+            styles.blobB,
+            { backgroundColor: C.accentSecondary }, // accentSecondary（#6FD3B4 / #0F6E56）
+          ]}
+        />
+        <View
+          style={[
+            styles.blob,
+            styles.blobC,
+            { backgroundColor: C.accentTertiary }, // accentTertiary（#E0A187 / #993C1D）
+          ]}
+        />
       </GlassKitBackdrop>
 
       {/* 前景层：标题 + 可拖动玻璃面板 + 调参 + 返回 */}
       <ScrollView contentContainerStyle={styles.foreground}>
-        <Text style={styles.hero}>玻璃引擎测试</Text>
-        <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.11 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+        <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
+        <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
+          {`${APP_VERSION}-it.12 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
-        <Text style={styles.statusLine}>
+        <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 面板可拖动`}
         </Text>
 
-        {/* it.9 对齐实例：Hero → GlassTopBar 圆角 22 档（高度保留 120dp 演示尺寸） */}
+        {/* it.12：圆角对齐 GlassShape.container=24（GlassShape.java:11；it.9 的
+            GlassTopBar 22 档退役），高度保留 120dp 演示尺寸（真实顶栏 60.85 高、
+            宽 0.8×屏宽，见 it.12 注释②，hero 是演示大面板按任务口径保留演示性） */}
         <DraggableGlass
           style={[
             styles.panelHero,
@@ -499,11 +652,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         >
           <GlassPanel
             title="Hero 大面板"
-            subtitle="blurDp 14 · 圆角22(GlassTopBar档) · 可拖动"
+            subtitle="blurDp 14 · 圆角24(GlassShape.container) · 可拖动"
             style={styles.panelFill}
             backdropTag={backdropTag}
             blurDp={14}
-            cornerRadiusDp={Math.round(radii.toolbar * radiusScale)}
+            cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
             refractionPx={10}
             dispersionPx={panelDispersionPx}
             membraneAlpha={membrane}
@@ -519,13 +672,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           <DraggableGlass style={[styles.panelChip, { height: Math.round(64 * heightScale) }]}>
             <GlassPanel
               title="Chip 胶囊"
-              subtitle="blurDp 8 · 圆角22·可调 · 按压缩放0.94"
+              subtitle="blurDp 8 · 圆角24·可调 · 按压缩放0.94"
               style={styles.panelCompact}
               backdropTag={backdropTag}
               blurDp={8}
-              // it.10 任务四：radii.pill=999 被引擎钳到 min(w,h)/2 恒定（半径滑块无感），
-              // 改用 radii.toolbar=22dp 基础可调。⚠️ 与实例 Capsule 偏差：用户要求可调性优先。
-              cornerRadiusDp={Math.round(radii.toolbar * radiusScale)}
+              // it.12：圆角基准改 GlassShape.container=24（GlassShape.java:11，
+              // GlassGroup 卡片圆角 GlassLayoutKt.java:548）；radiusScale 可调保留
+              cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
               refractionPx={10}
               dispersionPx={panelDispersionPx}
               membraneAlpha={membrane}
@@ -539,17 +692,16 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               forceDownsample={forceDown}
             />
           </DraggableGlass>
-          {/* it.9 对齐实例：工具条 → GlassDetailBar（64dp / Capsule / blur 12） */}
+          {/* it.9 对齐实例：工具条 → GlassDetailBar（64dp / Capsule / blur 12）。
+              it.12：圆角基准同 chip 改 24（GlassShape.container），可调保留 */}
           <DraggableGlass style={[styles.panelToolbar, { height: Math.round(64 * heightScale) }]}>
             <GlassPanel
               title="工具条"
-              subtitle="blurDp 12 · 圆角22·可调（原全胶囊）"
+              subtitle="blurDp 12 · 圆角24·可调"
               style={styles.panelCompact}
               backdropTag={backdropTag}
               blurDp={12}
-              // it.10 任务四：同 chip——radii.pill 改 radii.toolbar（22dp 基础可调），
-              // ⚠️ 与实例 GlassDetailBar Capsule 偏差：用户要求可调性优先。
-              cornerRadiusDp={Math.round(radii.toolbar * radiusScale)}
+              cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
               refractionPx={10}
               dispersionPx={panelDispersionPx}
               membraneAlpha={membrane}
@@ -574,11 +726,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         >
           <GlassPanel
             title="clear + 压暗"
-            subtitle="blurDp 10 · dimming 0.35 · 折射+色散"
+            subtitle="blurDp 10 · dimming 0.35 · 折射+色散 · 圆角24"
             style={styles.panelFill}
             backdropTag={backdropTag}
             blurDp={10}
-            cornerRadiusDp={Math.round(radii.xl * radiusScale)}
+            cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
             refractionPx={10}
             dispersionPx={panelDispersionPx}
             dimmingAlpha={0.35}
@@ -604,12 +756,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             开关关掉时条件渲染不挂内层玻璃（纯色占位、spring 照常）。点按任意 tab
             切换选中态，Animated spring（damping 33.14 / stiffness 380）驱动指示器。
             tab 文字 11sp（实例 10sp 被 guard R6 拦截）。 */}
-        <Text style={styles.dockCaption}>底部标签栏（玻璃叠玻璃 · 点按弹簧移动）</Text>
-        <DraggableGlass
-          style={styles.dockWrap}
-          interactive={true}
-          onLayout={onDockWrapLayout}
-        >
+        <Text style={[styles.dockCaption, { color: C.accent }]}>底部标签栏（玻璃叠玻璃 · 点按弹簧移动）</Text>
+        {/* it.12：dockWrap marginBottom = DOCK_FLOAT_DP（bottomBarFloatDp=15.3，
+            GlassTuning.java:57——真机 dock 悬浮边距，测试页 dock 为列表内嵌项，
+            按任务口径用下边距承载） */}
+        <DraggableGlass style={styles.dockWrap} interactive={true}>
           {/* it.11 任务三：dockFrame 高度/宽度/圆角 inline 由 dock 滑块 state 驱动
               （宽度 = 容器实测宽 × 倍率居中；圆角 min(999→高度一半=全胶囊)） */}
           <View
@@ -625,7 +776,9 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             onLayout={onDockFrameLayout}
           >
             {/* 外层 bar（it.10 任务三：加轻折射，用户拍板偏离实例）。
-                it.11 任务三：cornerRadiusDp 共用 dock 圆角滑块值（999 时引擎钳制=真胶囊） */}
+                it.12：tint 色换主题 glassTint（GlassThemeKt.java:41/45，dark #1B242B /
+                light #FFFFFF，BAR tintAlpha 0.1 = GlassLevel.java:123）。
+                cornerRadiusDp 共用 dock 圆角滑块值（999 时引擎钳制=真胶囊） */}
             <GlassKitView
               ref={dockGlassRef}
               style={StyleSheet.absoluteFill}
@@ -634,7 +787,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               capturable={true}
               blurDp={10}
               tintAlpha={0.10}
-              tintColor={PANEL_TINT}
+              tintColor={panelTintFor(scheme)}
               cornerRadiusDp={dockRadius}
               refractionPx={Math.round(5 * lensScale)}
               dispersionPx={0}
@@ -691,11 +844,22 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                   onPress={() => setDockSelected(i)}
                 >
                   <View style={styles.dockTabIconWrap}>
-                    <Text style={[styles.dockTabIcon, dockSelected === i && styles.dockTabActive]}>
+                    <Text
+                      style={[
+                        styles.dockTabIcon,
+                        dockSelected === i && { color: C.accent },
+                      ]}
+                    >
                       {tab.icon}
                     </Text>
                   </View>
-                  <Text style={[styles.dockTabLabel, dockSelected === i && styles.dockTabActive]}>
+                  <Text
+                    style={[
+                      styles.dockTabLabel,
+                      dockSelected === i && styles.dockTabActive,
+                      dockSelected === i && { color: C.accent },
+                    ]}
+                  >
                     {tab.label}
                   </Text>
                 </Pressable>
@@ -704,7 +868,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           </View>
         </DraggableGlass>
 
-        <View style={styles.controlCard}>
+        <View style={[styles.controlCard, { backgroundColor: C.surface }]}>
           <SwitchRow label="模糊总开关" value={blurOn} onChange={setBlurOn} />
           <SwitchRow
             label="强制降采样（模拟器调试用）"
@@ -725,13 +889,16 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             value={dockHeight}
             min={48}
             max={96}
-            onChange={(next) => setDockHeight(Math.round(clampRange(next, 48, 96)))}
+            // it.12：保留小数（默认 64.3 = GlassTuning.java:51 bottomBarHeightDp）
+            onChange={(next) => setDockHeight(clampRange(next, 48, 96))}
           />
           <SliderRow
             label="dock 宽度倍率（0.6–1.4）"
             value={dockWidthMult}
             min={0.6}
             max={1.4}
+            // it.12：默认 0.9 = GlassTuning.java:48（真机消费钳制 0.7–1.0，
+            // MainScaffoldKt.java:473；测试页保留更宽可调区间）
             onChange={(next) => setDockWidthMult(clampRange(next, 0.6, 1.4))}
           />
           <SliderRow
@@ -830,8 +997,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           />
         </View>
 
-        <Pressable style={styles.backButton} onPress={() => props.navigation.navigate('Main')}>
-          <Text style={styles.backButtonText}>返回主界面</Text>
+        {/* it.12：高 44（GlassControlsKt.java:441 GlassTextButton minHeight 44 +
+            padding 12）；底色 accent / 文字 onAccent（GlassTheme 色板语义对位） */}
+        <Pressable
+          style={[styles.backButton, { backgroundColor: C.accent }]}
+          onPress={() => props.navigation.navigate('Main')}
+        >
+          <Text style={[styles.backButtonText, { color: C.onAccent }]}>返回主界面</Text>
         </Pressable>
       </ScrollView>
     </View>
@@ -839,32 +1011,39 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#101418' },
+  // it.12：root 底色随主题 canvas（GlassThemeKt.java:41/45），JSX inline 传入
+  root: { flex: 1 },
   blob: { position: 'absolute', borderRadius: radii.pill },
-  blobA: { width: 180, height: 180, top: 40, left: 24, backgroundColor: '#ff6f91', opacity: 0.85 },
-  blobB: { width: 140, height: 140, top: 240, right: 30, backgroundColor: '#58a6ff', opacity: 0.8 },
-  blobC: { width: 120, height: 120, bottom: 120, left: 60, backgroundColor: '#ffd166', opacity: 0.8 },
-  foreground: { padding: 20, paddingTop: 64 },
-  hero: { ...typography.hero, color: '#ffffff', marginBottom: 6 },
-  statusLine: { fontSize: 12, color: '#d7dde6', marginBottom: 6 },
+  // it.12：色球颜色改 JSX inline 传入（主题 accent 三色），此处仅保留几何/透明度
+  blobA: { width: 180, height: 180, top: 40, left: 24, opacity: 0.85 },
+  blobB: { width: 140, height: 140, top: 240, right: 30, opacity: 0.8 },
+  blobC: { width: 120, height: 120, bottom: 120, left: 60, opacity: 0.8 },
+  // it.12：左右 padding 16（GlassLayoutKt.java:228 GlassPage horizontalPadding 默认 16）
+  foreground: { padding: PAGE_HORIZONTAL_PAD, paddingTop: 64 },
+  // it.12：hero 44 Medium（GlassType.java:28）
+  hero: { fontSize: 44, fontWeight: '500', marginBottom: 6 },
+  // it.12：状态行 label 12 Medium（GlassType.java:34）
+  statusLine: { fontSize: 12, fontWeight: '500', marginBottom: 6 },
   panel: { justifyContent: 'center', padding: 16 },
   /** it.9：64dp 档面板（chip/toolbar）纵向留白收窄，标题+副标题不溢出。 */
   panelCompact: { flex: 1, paddingVertical: 6 },
   panelFill: { flex: 1 },
   panelTextWrap: { alignItems: 'flex-start' },
-  panelTitle: { fontWeight: '700', color: '#ffffff', marginBottom: 2 },
-  panelSubtitle: { fontSize: 11, color: '#e6ebf2' },
+  // it.12：面板标题 callout 14 Medium（GlassType.java:33）
+  panelTitle: { fontSize: 14, fontWeight: '500', marginBottom: 2 },
+  // it.12：面板副标题 micro 11 Normal（GlassType.java:35）
+  panelSubtitle: { fontSize: 11, fontWeight: '400' },
   panelHero: { marginBottom: 16 },
   panelRow: { flexDirection: 'row', marginBottom: 16 },
   panelChip: { flex: 1, marginRight: 8 },
   panelToolbar: { flex: 1.4 },
   panelClear: { marginBottom: 18 },
-  // it.9：Dock demo 说明行（非玻璃层）
-  dockCaption: { fontSize: 11, color: '#8fd3ff', marginBottom: 6 },
-  // it.9：玻璃叠玻璃底部标签栏（圆角全走 radii token，守卫 R3 合规）
-  // it.11 任务三：height:64 / borderRadius 写死值移出 stylesheet——inline 由 dock
-  // 高度/圆角滑块 state 驱动（见 dockFrame inline style），此处仅保留静态基座
-  dockWrap: { marginBottom: 18 },
+  // it.9：Dock demo 说明行（非玻璃层）；it.12：micro 11（GlassType.java:35）
+  dockCaption: { fontSize: 11, fontWeight: '400', marginBottom: 6 },
+  // it.9：玻璃叠玻璃底部标签栏（圆角全走 radii token / 变量，守卫 R3 合规）
+  // it.12：marginBottom = bottomBarFloatDp 15.3（GlassTuning.java:57，真机 dock
+  // 悬浮边距——测试页 dock 是滚动列表内嵌项，按任务口径用下边距承载）
+  dockWrap: { marginBottom: DOCK_FLOAT_DP },
   dockFrame: {
     overflow: 'hidden',
   },
@@ -874,26 +1053,28 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
   },
-  // 内层指示条玻璃：轨道内 5dp 内边距（实例 padding(5)）→ 54dp 高全胶囊
+  // 内层指示条玻璃：轨道内 7dp 内边距（it.12：bottomBarInnerPadDp=7，
+  // GlassTuning.java:54；真实 pill = barHeight − 2×pad = 50.3dp 全胶囊）
   dockIndicator: {
     position: 'absolute',
-    top: 5,
-    left: 5,
-    right: 5,
-    bottom: 5,
+    top: DOCK_INNER_PAD,
+    left: DOCK_INNER_PAD,
+    right: DOCK_INNER_PAD,
+    bottom: DOCK_INNER_PAD,
   },
   // it.10 任务六：玻璃叠玻璃关时的占位胶囊（实色 + opacity，守卫合规无内联 rgba）
   dockIndicatorFallback: {
     position: 'absolute',
-    top: 5,
-    left: 5,
-    right: 5,
-    bottom: 5,
+    top: DOCK_INNER_PAD,
+    left: DOCK_INNER_PAD,
+    right: DOCK_INNER_PAD,
+    bottom: DOCK_INNER_PAD,
     borderRadius: radii.pill,
     backgroundColor: '#ffffff',
     opacity: 0.25,
   },
-  // tab 内容层：容器内 5dp padding（实例 Row padding(5)），行内均分
+  // tab 内容层：容器内 7dp padding（it.12：GlassTuning.java:54 内 pad 7，
+  // 真实 dock pill 轨道几何同源），行内均分
   dockTabsRow: {
     position: 'absolute',
     top: 0,
@@ -901,27 +1082,39 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     flexDirection: 'row',
-    padding: 5,
+    padding: DOCK_INNER_PAD,
   },
   dockTab: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // tab 图标区 20dp（GlassKitKt.java:1602 icon 高 20 / 间距 10-2-10，
+  // GlassKitKt.java:1601/1603/1609）
   dockTabIconWrap: { height: 20, justifyContent: 'center' },
-  dockTabIcon: { fontSize: 16, color: '#e6ebf2' },
-  dockTabLabel: { fontSize: 11, color: '#e6ebf2', marginTop: 2 },
-  // 选中高亮：白色加粗（实例 Accent 色加深的 demo 等效物）
-  dockTabActive: { color: '#ffffff', fontWeight: '700' },
-  controlCard: { borderRadius: radii.lg, backgroundColor: '#1a2027', opacity: 0.94, padding: 14 },
+  // it.12：未选中色 = glasskit TextSecondary #9CA8BC（GlassColorsKt.java:55）
+  dockTabIcon: { fontSize: 16, color: DOCK_TAB_INACTIVE_COLOR },
+  // it.12：tab 文字守卫 R6 下限 11（真实 10sp 被 R6 拦，GlassKitKt.java:1606）
+  dockTabLabel: { fontSize: 11, color: DOCK_TAB_INACTIVE_COLOR, marginTop: 2 },
+  // it.12：选中色随主题 accent（真值 glasskit Accent 被守卫 D7 禁落地，见
+  // DOCK_TAB_INACTIVE_COLOR 注释）+ Bold（GlassKitKt.java:1606-1608
+  // 选中 Bold / 未选中 Normal）；JSX inline 传入
+  dockTabActive: { fontWeight: '700' },
+  // it.12：卡片圆角 24（GlassShape.java:11 container；GlassLayoutKt.java:548
+  // GlassGroup RoundedCornerShape(24)），底色随主题 surface（JSX inline）
+  controlCard: { borderRadius: SHAPE_CONTAINER, opacity: 0.94, padding: 14 },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   row: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
   // 不设 flex:1（行内滑块组件自身 flex:1 占据中段）；switchRow 内由 space-between 撑开
-  rowLabel: { fontSize: 13, color: '#e6ebf2', marginRight: 8 },
-  rowValue: { width: 52, fontSize: 13, color: '#8fd3ff', textAlign: 'right' },
+  // it.12：控制行文字 label 12 Medium（GlassType.java:34），颜色随主题（JSX inline）
+  rowLabel: { fontSize: 12, fontWeight: '500', marginRight: 8 },
+  rowValue: { width: 52, fontSize: 12, fontWeight: '500', textAlign: 'right' },
+  // it.12：高 44（GlassControlsKt.java:441 GlassTextButton defaultMinSize
+  // minHeight 44 + padding 12）；底色随主题 accent（JSX inline）
   backButton: {
-    marginTop: 18, marginBottom: 40, height: 48, borderRadius: radii.md,
-    backgroundColor: '#2a323c', alignItems: 'center', justifyContent: 'center',
+    marginTop: 18, marginBottom: 40, height: TEXT_BUTTON_HEIGHT, borderRadius: radii.md,
+    alignItems: 'center', justifyContent: 'center',
   },
-  backButtonText: { fontSize: 15, fontWeight: '600', color: '#ffffff' },
+  // it.12：body 15 Normal（GlassType.java:32）
+  backButtonText: { fontSize: 15, fontWeight: '400' },
 });
