@@ -138,6 +138,16 @@ class GlassKitView(context: Context) : View(context) {
         /** 边缘高光 alpha ——glass.ts EDGE_HIGHLIGHT.alpha 0.14。 */
         const val EDGE_HIGHLIGHT_ALPHA: Float = 0.14f
         /**
+         * it.14 Continuous Capsule 超椭圆指数：2（圆弧）< 3 < 4（Apple squircle），
+         * 取保守中值，避免 n=4 端帽过方（it14-spec 附录 B 有意偏离 #2）。仅在
+         * capsuleContinuous=true 且 cornerRadiusPx 已钳到半短边（真胶囊）时覆盖
+         * 本帧 cornerExponentN；同一标量同时喂 clipPath 与 AGSL uCornerExponent，
+         * Path 参数方程 |x|^n+|y|^n=r^n 与 SDF 零点严格重合。
+         * ⚠️ 不改 ContinuousRoundRect.kt 的 N_MIN/N_MAX、blend 曲线、胶囊硬守卫，
+         *    不改 GlassLensShader.kt，不改 GPU 全分辨率模糊链。
+         */
+        const val CAPSULE_CONTINUOUS_N: Float = 3.0f
+        /**
          * 近似模糊降采样档（清单 §二.2 原 1/4；实测上调 1/6）：
          * 1/4 + 双线性放大的 10%-90% 边缘过渡宽度实测仅 ~6px（真机像素脚本），
          * 不满足「面板内 ≥8px」验收线；1/6 实测 ~9px 达标。透镜输入同步受益
@@ -344,6 +354,20 @@ class GlassKitView(context: Context) : View(context) {
             markPropChanged()
         }
 
+    /**
+     * it.14 Continuous Capsule 开关（默认 **false** ⇒ 零回归）。
+     * 仅 dock bar / dock 指示器 / 顶栏演示件显式传 true；开启且半径已钳到
+     * 半短边（真胶囊）时，本帧 cornerExponentN 局部覆盖为 CAPSULE_CONTINUOUS_N，
+     * Path 与 AGSL SDF 同走连续曲率端帽；hero / chip / 工具条 / clear 不开启。
+     * 走 markPropChanged()（it.9 静止期零重绘契约）。
+     */
+    var capsuleContinuous: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            markPropChanged()
+        }
+
     /** 压暗层 alpha（#000，独立于 tint）。 */
     var dimmingAlpha: Float = 0f
         set(value) {
@@ -461,6 +485,24 @@ class GlassKitView(context: Context) : View(context) {
         }
 
     /**
+     * it.14 指示器专属提亮 alpha（默认 **0f**，仅 dock 指示器传 0.05）。
+     * 出处 Kotlin GlassKitKt.java:1434-1435,1451（Color.White.copy(alpha=0.05f)
+     * 作为 GlassSurface 第 5 参 tint）→ GlassSurfaceKt.java:704-708 的第二笔
+     * drawRect($tint)。Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）
+     * ⇒ 硬编码常量，native 也不加滑块 / 开关。
+     * 上界复用 H1 的 DEFAULT_TINT_ALPHA_MAX=0.12f，不进 finalTintAlpha 公式、
+     * 不乘 tintScale、不进 glass.ts resolveTintAlpha（单层最大 0.05 < 0.12）。
+     * NaN/Inf 回退 0（同 :341/:351/:396 口径）；走 markPropChanged()。
+     */
+    var indicatorBoostAlpha: Float = 0f
+        set(value) {
+            val v = if (value.isFinite()) value.coerceIn(0f, DEFAULT_TINT_ALPHA_MAX) else 0f
+            if (field == v) return
+            field = v
+            markPropChanged()
+        }
+
+    /**
      * it.13 顶缘高光倍率（0–1，默认 0.2f；GlassTuning.java:30）。
      * ⑥.0 阶段按 0.22×本值 画 18dp 竖向渐变（GlassSurfaceKt.java:710-713）。
      */
@@ -566,6 +608,8 @@ class GlassKitView(context: Context) : View(context) {
     private val tintPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     /** it.9 膜层专用 Paint（WHITE，alpha 每次 draw 重设）。 */
     private val membranePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    /** it.14 指示器专属提亮专用 Paint（与 membranePaint 同构，实例复用零每帧分配）。 */
+    private val indicatorBoostPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val dimmingPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val strokePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -1166,6 +1210,7 @@ class GlassKitView(context: Context) : View(context) {
                     " cornerRadiusDp=$cornerRadiusDp dimmingAlpha=$dimmingAlpha" +
                     " membraneAlpha=$membraneAlpha highlightScale=$highlightScale" +
                     " chromatic=$chromaticEnabled depth=$depthEffect vibrancy=$vibrancyEnabled" +
+                    " capsuleContinuous=$capsuleContinuous indicatorBoostAlpha=$indicatorBoostAlpha" +
                     " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height",
             )
         }
@@ -1187,9 +1232,26 @@ class GlassKitView(context: Context) : View(context) {
         // it.13：本帧统一超椭圆指数（Path 与 AGSL SDF 共用，一次计算全帧复用）。
         // 胶囊 / 正方形命中 cornerExponent 的 n=2 硬守卫 → 严格圆弧，it.12 零回归；
         // 容器面板 r=24（GlassShape.container）→ n≈4，G2 连续曲率。
-        val cornerExponentN = ContinuousRoundRect.cornerExponent(
-            w.toFloat(), h.toFloat(), cornerRadiusPx,
-        )
+        // it.14 Continuous Capsule：dock bar / 指示器 / 顶栏演示件显式开启
+        // capsuleContinuous，且半径已钳到半短边（真胶囊，999→h/2）时，把本帧
+        // n 局部覆盖为 CAPSULE_CONTINUOUS_N=3.0f，让角部走 G2 连续曲率端帽；
+        // r 与视图矩形边界一字不动（仍是真胶囊、端帽 x 极值不变）。
+        // ⚠️ 仅删 ContinuousRoundRect.kt:82 守卫无效——:80-81 的 blend 在 t=1
+        //    已独立把 n 压回 2（双重保险），故必须在调用侧覆盖，且只覆盖本帧局部变量。
+        // 其余情况（hero/chip/工具条/clear 的 r=24、未开启的胶囊、正方形）一律保持
+        // 原 cornerExponent() 结果，逐位零回归。
+        // 0.5f 与 ContinuousRoundRect.kt:67 的胶囊守卫容差同源（本类不新增常量）。
+        // 覆盖后的 n 走完整链路：:1194 clipPath → :1245 drawLensLayer →
+        // :1489 obtainLensShader → :2134 setFloatUniform("uCornerExponent", n)，
+        // 硬件帧 Path 与 AGSL SDF 同 n=3.0；回录帧不创建 RuntimeShader，
+        // clipPath 仍用同一 n，与 it.13 现状一致、不新增差异。
+        val halfMin = minOf(w, h) / 2f
+        val isCapsule = cornerRadiusPx >= halfMin - 0.5f
+        val cornerExponentN = if (capsuleContinuous && isCapsule) {
+            CAPSULE_CONTINUOUS_N
+        } else {
+            ContinuousRoundRect.cornerExponent(w.toFloat(), h.toFloat(), cornerRadiusPx)
+        }
         if (cornerRadiusPx > 0f) {
             ContinuousRoundRect.buildContinuousRoundRect(
                 clipPath, w.toFloat(), h.toFloat(), cornerRadiusPx, cornerExponentN,
@@ -1263,6 +1325,24 @@ class GlassKitView(context: Context) : View(context) {
             // floor=30 → 30/255≈0.1176 ≤ 0.12，H1 契约恒不超出）
             tintPaint.alpha = floor(finalTintAlpha * 255f).toInt()
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), tintPaint)
+        }
+
+        // ③′ it.14 指示器专属提亮（③tint 阶段的第二笔 rect，不新增阶段编号）：
+        // Kotlin 出处 GlassKitKt.java:1434-1435,1451 —— Color.White.copy(alpha=0.05f)
+        // 作为 GlassSurface 第 5 参 tint 传入 → GlassSurfaceKt.java:704-708 的
+        // drawRect($tint)；第 1 笔 level tint（:703）因 INDICATOR tintAlpha=0 全透明，
+        // 全量核查只有 INDICATOR 传非 Unspecified tint（其余面板传 0L）。
+        // Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）⇒ 硬编码常量，
+        // native 也不加滑块 / 不加开关 / 不内联 rgba / fallback 分支不加。
+        // 叠加顺序：③tint → ③′boost → ④.5 膜层 → ⑤压暗 → ⑥.0 18dp 顶缘 → ⑥ 高光，
+        // 与 Kotlin :703→:708→:710-713 一一对应；不重排任何既有绘制阶段。
+        // H1：不进 finalTintAlpha 公式、不乘 tintScale、不进 glass.ts resolveTintAlpha；
+        // setter 已 coerceIn(0f, DEFAULT_TINT_ALPHA_MAX=0.12f)，单层 ≤0.05，
+        // floor 取整口径同 :1264 / :1291 / :1333。默认 0 ⇒ 其它面板逐位等价 it.13。
+        if (indicatorBoostAlpha > 0f) {
+            indicatorBoostPaint.color = Color.WHITE
+            indicatorBoostPaint.alpha = floor(indicatorBoostAlpha * 255f).toInt()
+            canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), indicatorBoostPaint)
         }
 
         // ④.5 膜层（it.9）：WHITE @ membraneAlpha——实例库「膜层」的等效物
@@ -1495,8 +1575,11 @@ class GlassKitView(context: Context) : View(context) {
         shader.setFloatUniform("uRefractionPx", refraction)
         shader.setFloatUniform("uDispersionPx", dispersion)
         // it.13 效果开关 A/B 取证（仅硬件路径，切换/首帧各一条，防刷屏）
+        // it.14 取证：追加 capsule / boost 标记，logcat 可直接核对
+        // 「n=3.0 capsule=true boost=0.05」（dock / 指示器 / 顶栏演示件帧）。
         val flags = "chromatic=$chromaticEnabled depth=$depthEffect" +
-            " vibrancy=$vibrancyEnabled n=$cornerExponentN"
+            " vibrancy=$vibrancyEnabled n=$cornerExponentN" +
+            " capsule=$capsuleContinuous boost=$indicatorBoostAlpha"
         if (loggedEffectFlags != flags) {
             loggedEffectFlags = flags
             Log.i(logTag, "lens effect flags: view=$id $flags")

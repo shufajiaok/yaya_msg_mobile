@@ -13,7 +13,8 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * blurDp / tintAlpha / tintColor / refractionPx / dispersionPx / cornerRadiusDp /
  * dimmingAlpha / backdropTag / blurScale / tintScale / lensScale / blurEnabled /
  * glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
- * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled。
+ * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled /
+ * capsuleContinuous / indicatorBoostAlpha。
  * 所有 setter 对 JS 空值做兜底（default* 注解 + null 合并），倍率默认 1f，
  * blurEnabled 默认 true（H2 语义：能力门控在 JS 侧 canBlur/canLens 收口）。
  *
@@ -76,6 +77,16 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "cornerRadiusDp", defaultFloat = 0f)
     fun setCornerRadiusDp(view: GlassKitView, value: Float) {
         view.cornerRadiusDp = value
+    }
+
+    /**
+     * it.14 Continuous Capsule 开关（默认 **false**）。仅 dock bar / dock 指示器 /
+     * 顶栏演示件显式开启：真胶囊 r=min(w,h)/2 不变，本帧 n 覆盖为 3.0f。
+     * 视图侧 setter 走 markPropChanged()（it.9 闪烁契约）。
+     */
+    @ReactProp(name = "capsuleContinuous", defaultBoolean = false)
+    fun setCapsuleContinuous(view: GlassKitView, value: Boolean) {
+        view.capsuleContinuous = value
     }
 
     /** 压暗层 alpha（#000）。 */
@@ -164,6 +175,17 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "membraneAlpha", defaultFloat = 0f)
     fun setMembraneAlpha(view: GlassKitView, value: Float) {
         view.membraneAlpha = value
+    }
+
+    /**
+     * it.14 指示器专属 White 提亮 alpha（默认 **0f**，仅 dock 指示器传 0.05）。
+     * 出处 Kotlin GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708；
+     * Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）⇒ 硬编码常量、不加滑块。
+     * 视图侧 setter 已按 H1 上界 0.12f 钳制并走 markPropChanged()。
+     */
+    @ReactProp(name = "indicatorBoostAlpha", defaultFloat = 0f)
+    fun setIndicatorBoostAlpha(view: GlassKitView, value: Float) {
+        view.indicatorBoostAlpha = value
     }
 
     /** it.13 顶缘高光倍率（0–1，默认 0.2f；GlassTuning.java:30 / GlassSurfaceKt.java:710-713）。 */

@@ -28,6 +28,10 @@
  * - vibrancyEnabled 鲜活度开关（默认 true；saturation=1.5，默认走风险最低的
  *   GlassLensShader 末矩阵，仅 API33+ 硬件透镜帧生效；GPU RenderEffect
  *   ColorFilter 路径保留为引擎侧编译期开关 VIBRANCY_SHADER_FALLBACK=false）
+ * - capsuleContinuous it.14 胶囊连续曲率开关（默认 false；仅 dock bar / dock
+ *   指示器 / 顶栏演示件开启，真胶囊 r=min(w,h)/2 不变、角部改走 n=3 超椭圆）
+ * - indicatorBoostAlpha it.14 指示器专属 White 提亮 alpha（默认 0；仅指示器
+ *   硬编码 0.05，Kotlin GlassKitKt.java:1434-1435,1451 无对应滑块）
  *
  * H2 双档门控（glass.ts canBlur / canLens，非 Android 视作全支持）：
  * - canBlur() false  → blurDp 传 0（原生跳过模糊，只剩 tint/压暗/描边）；
@@ -69,6 +73,12 @@ export interface GlassKitViewProps extends ViewProps {
   dispersionPx?: number;
   /** 圆角半径（dp）。it.13：引擎按连续曲率超椭圆（n 由尺寸/半径自动计算）裁剪。 */
   cornerRadiusDp?: number;
+  /**
+   * it.14 胶囊连续曲率开关（默认 false）。仅 dock bar / dock 指示器 / 顶栏演示件
+   * 显式开启：真胶囊 r=min(w,h)/2 一字不动，角部由圆弧 n=2 改为 n=3 超椭圆，
+   * clipPath 与 AGSL uCornerExponent 同 n；hero/chip/工具条/clear 不开启（零回归）。
+   */
+  capsuleContinuous?: boolean;
   /** 压暗层 alpha（#000 @0.35 语义见 glass.ts GLASS_DIMMING）。 */
   dimmingAlpha?: number;
   /** 背景容器原生 tag（findNodeHandle(GlassKitBackdrop ref)）。 */
@@ -102,6 +112,13 @@ export interface GlassKitViewProps extends ViewProps {
    * 压暗之前，原生侧绘制，不产生 JS 内联 rgba。
    */
   membraneAlpha?: number;
+  /**
+   * it.14 指示器专属 White@0.05 提亮 alpha（默认 0，上界复用 H1 的 0.12）。
+   * 出处 Kotlin GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708
+   * 的第二笔 drawRect($tint)；SettingsScreenKt.java:1898-2128 无对应滑块，
+   * 故为硬编码常量，仅 dock 指示器传 0.05，不加滑块 / 开关。
+   */
+  indicatorBoostAlpha?: number;
   /**
    * it.13 顶缘高光倍率（0–1，默认 0.2）。
    * 对齐 GlassTuning.java:30 / GlassSurfaceKt.java:710-713：highlightScale>0.01
@@ -199,6 +216,8 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         forceDownsample={props.forceDownsample ?? false}
         capturable={props.capturable ?? false}
         membraneAlpha={props.membraneAlpha ?? 0}
+        capsuleContinuous={props.capsuleContinuous ?? false}
+        indicatorBoostAlpha={props.indicatorBoostAlpha ?? 0}
         highlightScale={props.highlightScale ?? 0.2}
         chromaticEnabled={props.chromaticEnabled ?? true}
         depthEffect={props.depthEffect ?? true}
