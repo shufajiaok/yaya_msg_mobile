@@ -839,7 +839,9 @@ class GlassKitView(context: Context) : View(context) {
             val blurRadiusPx = blurDp * blurScale * density
             val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
-            if (lensActive) {
+            // 软件画布不支持 RuntimeShader（快照回录用 Bitmap 软画布，it.8 真机崩溃实证），
+            // 回录帧透镜降级为模糊/清晰层；屏幕硬件加速路径不受影响
+            if (lensActive && canvas.isHardwareAccelerated) {
                 // it.4-R2：透镜输入真模糊化——固定 1/4 降采样 + 小图 CPU box blur ×3
                 //（it.3 的自适应降采样近似已废弃为锯齿源，见类头注释）
                 drawLensLayer(canvas, capture, w, h, cornerRadiusPx, blurRadiusPx)
