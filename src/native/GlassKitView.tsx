@@ -106,6 +106,14 @@ export interface GlassKitViewProps extends ViewProps {
    *  即可采集本视图的合成帧——内层再叠一层透镜 = 双重透镜。默认 false。 */
   capturable?: boolean;
   /**
+   * it.18 实时背景透射（默认 false）。
+   *
+   * 仅用于「位置固定、背景内容在其下方持续滚动」的玻璃（dock bar）。引擎按需重绘
+   * 语义依赖「背景源 drawGeneration 变化」，而 App 级 backdrop 在滚动时未必产生
+   * traversal ⇒ 玻璃会永久停在首次捕获的静止帧。开启后每帧节流重绘，始终采当前背景。
+   */
+  liveBackdrop?: boolean;
+  /**
    * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。
    * 「膜层」滑块语义改绑 tintScale（SettingsScreenKt.java:1946-1961），
    * 白膜层引擎代码保留但默认不画；显式传值仍可做 A/B。绘制顺序在 tint 之后、
@@ -215,6 +223,7 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         glowBottomScale={props.glowBottomScale ?? 1}
         forceDownsample={props.forceDownsample ?? false}
         capturable={props.capturable ?? false}
+        liveBackdrop={props.liveBackdrop ?? false}
         membraneAlpha={props.membraneAlpha ?? 0}
         capsuleContinuous={props.capsuleContinuous ?? false}
         indicatorBoostAlpha={props.indicatorBoostAlpha ?? 0}

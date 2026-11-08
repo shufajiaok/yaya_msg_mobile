@@ -168,6 +168,16 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     }
 
     /**
+     * it.18 实时背景透射：仅在「背景内容滚动、但本视图固定悬浮」的玻璃上开启
+     * （dock bar）。开启后 PreDraw 每帧节流重绘，避免停在首次捕获的静止帧。
+     */
+    @ReactProp(name = "liveBackdrop", defaultBoolean = false)
+    fun setLiveBackdrop(view: GlassKitView, value: Boolean) {
+        view.liveBackdrop = value
+        view.invalidate()
+    }
+
+    /**
      * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。
      * 「膜层」滑块语义已改绑 tintScale（SettingsScreenKt.java:1946-1961），
      * 白膜层引擎代码保留但默认不画；仍允许显式传值做 A/B（绘制顺序：tint 后、压暗前）。

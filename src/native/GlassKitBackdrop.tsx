@@ -16,6 +16,16 @@ import { HostComponent, NativeMethods, Platform, requireNativeComponent, type Vi
 export interface GlassKitBackdropProps extends ViewProps {
   /** 被采集的背景内容（背景图 / 渐变层）。 */
   children?: ViewProps['children'];
+  /**
+   * it.18 采集排除子树（默认 false）。
+   *
+   * true ⇒ 当**外部**玻璃（祖先采集源，如 App 级 backdrop）采集背景时，本容器
+   * 整棵子树不参与绘制 ⇒ 采到的是本容器**下方**的真实内容。
+   * 仅用于「自身是浮层、不该被自己的透镜折射」的玻璃容器（App 底栏 dock）：
+   * 否则 bar 采集 App backdrop 会把自己的图标与上一帧玻璃烘进纹理，图标被折射。
+   * 本容器后代作为采集目标的场景（指示器采集 bar）不受影响。
+   */
+  excludeFromCapture?: boolean;
 }
 
 const NATIVE_BACKDROP_NAME = 'GlassKitBackdrop';

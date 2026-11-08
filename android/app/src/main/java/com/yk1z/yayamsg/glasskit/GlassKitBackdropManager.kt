@@ -2,9 +2,11 @@ package com.yk1z.yayamsg.glasskit
 
 import android.content.Context
 import android.graphics.Canvas
+import android.view.View
 import android.view.ViewGroup
 import com.facebook.react.uimanager.ThemedReactContext
 import com.facebook.react.uimanager.ViewGroupManager
+import com.facebook.react.uimanager.annotations.ReactProp
 
 /**
  * 背景容器原生视图：最小 ViewGroup 子类。
@@ -41,9 +43,41 @@ class GlassKitBackdropView(context: Context) : ViewGroup(context) {
     var drawGeneration: Long = 0L
         private set
 
+    /**
+     * it.18 采集排除容器（默认 false）。
+     *
+     * true ⇒ 本容器被当作「不该进入背景纹理的浮层子树」：当**外部**（祖先，通常
+     * 是 App 级 backdrop）正在被采集时，本容器 dispatchDraw 直接返回，整棵子树
+     * （玻璃 + 图标 + 指示器）都不参与那次采集。
+     *
+     * 用途 = App 底栏 dock：dock 在 App 级 `GlassKitBackdrop` 子树内，bar 采集
+     * App backdrop 时会把**自己的图标 + 自己上一帧玻璃**烘进纹理，透镜再按
+     * refractionPx 偏移采样 ⇒ 图标被折射变形 / 自采样回授。排除后采到的是 dock
+     * 下方真实内容（与实验页「dock 在 backdrop 之外的兄弟节点」同一语义）。
+     *
+     * ⚠️ 只排除「采集目标在本容器之外」的采集：指示器采集 bar（目标 = 本容器
+     * 后代）时照常绘制，玻璃叠玻璃链路不受影响（见 [containsCaptureTarget]）。
+     */
+    var excludeFromCapture: Boolean = false
+
     override fun dispatchDraw(canvas: Canvas) {
+        if (excludeFromCapture && GlassCaptureEngine.isCapturing && !containsCaptureTarget()) {
+            // 祖先采集期：整棵子树跳过（不递增 drawGeneration——本帧是采集，
+            // 不是内容变化，与 GlassKitBackdrop 的代数语义一致）
+            return
+        }
         if (canvas.isHardwareAccelerated) drawGeneration++
         super.dispatchDraw(canvas)
+    }
+
+    /** 当前采集目标是否落在本容器子树内（含自身）。UI 线程专用，路径极短。 */
+    private fun containsCaptureTarget(): Boolean {
+        var node: View? = GlassCaptureEngine.captureTarget ?: return false
+        while (node != null) {
+            if (node === this) return true
+            node = node.parent as? View
+        }
+        return false
     }
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
@@ -87,6 +121,12 @@ class GlassKitBackdropManager : ViewGroupManager<GlassKitBackdropView>() {
 
     override fun createViewInstance(reactContext: ThemedReactContext): GlassKitBackdropView =
         GlassKitBackdropView(reactContext)
+
+    /** it.18：声明本容器为「采集排除子树」（App 底栏 dock 用，语义见 View 侧注释）。 */
+    @ReactProp(name = "excludeFromCapture", defaultBoolean = false)
+    fun setExcludeFromCapture(view: GlassKitBackdropView, value: Boolean) {
+        view.excludeFromCapture = value
+    }
 
     override fun onAfterUpdateTransaction(view: GlassKitBackdropView) {
         super.onAfterUpdateTransaction(view)

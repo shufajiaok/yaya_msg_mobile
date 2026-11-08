@@ -546,6 +546,15 @@ class GlassKitView(context: Context) : View(context) {
      * detach 时对称注销；默认 false，行为与 it.7 完全一致。
      */
     var capturable: Boolean = false
+
+    /**
+     * it.18 实时背景透射（默认 false，仅固定悬浮的 dock bar 启用）。
+     *
+     * true：PreDraw 每帧（33ms 节流）重绘并重满预算，始终采集当前背景 —— 用于
+     * 「背景内容在其下方滚动、但本视图位置固定」的场景。默认按需重绘语义
+     * （位移 / prop 代数 / 背景源 drawGeneration）保持不变。
+     */
+    var liveBackdrop: Boolean = false
         set(value) {
             if (field == value) return
             field = value
@@ -833,6 +842,16 @@ class GlassKitView(context: Context) : View(context) {
             // it.9：位移是真实外部刺激，重满外部重绘预算
             foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
             invalidate()
+        } else if (liveBackdrop && targetView != null) {
+            // it.18 透射类玻璃（dock bar）：背景内容在本视图下方持续变化，但 App 级
+            // backdrop 的 dispatchDraw 不保证被滚动触发（RN 滚动容器可能只重绘子区域，
+            // 父 FrameLayout 无 traversal）⇒ sourceGeneration 长期不变，加上本视图位置
+            // 固定 / prop 不变，玻璃会永久停在首次捕获那一帧（表现为「dock 背后是一张
+            // 静止截图」，真机取证：滑动两次 GlassKitFlicker 0 帧）。
+            // 修法：此类视图按帧（33ms 节流）无条件重绘，始终采当前背景；仅 dock bar
+            // 启用（liveBackdrop=true），其他玻璃保持按需重绘语义与 it.9 预算不变。
+            foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
+            scheduleThrottledInvalidate()
         } else if (selfInvalidationPending) {
             // it.4 修复（闪烁伴生）：本次 traversal 由自身 postInvalidate 触发
             // → 不再续期；it.9：自绘消费不续预算（防风暴复活）

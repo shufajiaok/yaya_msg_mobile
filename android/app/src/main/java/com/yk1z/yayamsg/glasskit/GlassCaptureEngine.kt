@@ -34,6 +34,31 @@ object GlassCaptureEngine {
     /** 降采样分支一次性日志去重（仅首次命中打一条，防随帧刷屏）。 */
     private var loggedDownscaleOnce: Boolean = false
 
+    /**
+     * it.18 采集重入深度（仅在 UI 线程读写，无需同步）。
+     *
+     * capture() 内部 `targetView.draw(canvas)` 期间 > 0。用途：「采集排除容器」
+     * （[GlassKitBackdropView.excludeFromCapture]，当前只有 App 底栏 dock 使用）
+     * 在自身 dispatchDraw 里据此跳过整棵子树，让玻璃采到 dock **下方**的真实
+     * 内容，而不是自己的图标 + 自己上一帧玻璃（自采样 → 图标被折射的根因）。
+     *
+     * ⚠️ 必须是深度计数而非 boolean：指示器采集 bar（capture ①）期间，bar 在
+     * 绘制中又会去采集 App 级 backdrop（capture ②），boolean 会被内层 finally
+     * 提前清掉，导致外层排除判定失效。
+     */
+    private var captureDepth: Int = 0
+
+    /** 当前正在被采集的视图（嵌套采集时随栈恢复；排除容器用它判断「是不是在采我」）。 */
+    private var captureTargetView: View? = null
+
+    /** 是否处于采集绘制期（排除容器在 dispatchDraw 里查询）。 */
+    val isCapturing: Boolean
+        get() = captureDepth > 0
+
+    /** 当前采集目标视图（capture 结束后恢复为外层目标，最外层为 null）。 */
+    val captureTarget: View?
+        get() = captureTargetView
+
     /** 注册背景容器（同一 tag 重复注册以后者为准，弱引用不阻止 GC）。 */
     @Synchronized
     fun register(tag: Int, view: View) {
@@ -110,6 +135,11 @@ object GlassCaptureEngine {
         outBitmap.eraseColor(Color.TRANSPARENT)
         val canvas = Canvas(outBitmap)
         canvas.save()
+        // it.18：标记采集绘制期 + 当前目标（嵌套采集按栈保存/恢复，见 captureDepth 注释）
+        val prevTarget = captureTargetView
+        val prevDepth = captureDepth
+        captureDepth = prevDepth + 1
+        captureTargetView = targetView
         try {
             // ⚠️ it.3 矩阵顺序修正：位图坐标 = scale × (背景坐标 − offset)。
             // Canvas 变换为后调用先作用（pre-concat）：先 scale 再 translate ⇒
@@ -123,6 +153,8 @@ object GlassCaptureEngine {
             canvas.clipRect(offsetX, offsetY, offsetX + glassWidth, offsetY + glassHeight)
             targetView.draw(canvas)
         } finally {
+            captureDepth = prevDepth
+            captureTargetView = prevTarget
             canvas.restore()
         }
         return true
