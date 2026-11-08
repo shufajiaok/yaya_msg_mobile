@@ -184,6 +184,14 @@ class GlassKitView(context: Context) : View(context) {
         const val SHADOW_BITMAP_SCALE: Float = 0.5f
 
         /**
+         * it.19 hotfix 2076028：`glassInsetPx` 硬上限比例（相对半短边）。
+         * inset 一旦 ≥ 半短边，本体尺寸就变 0 / 负数 ⇒ 玻璃整块不画（2076027 的
+         * 480p 级事故：dock 199px 高却传了 112px inset，bodyH = −25）。
+         * 取 0.8 留出本体最小 20% 空间，并在钳制时打 warn（不静默）。
+         */
+        const val INSET_MAX_RATIO: Float = 0.8f
+
+        /**
          * it.4 透镜输入固定降采样档（常量，不再随模糊半径变化——it.3 的
          * lensDownsampleFactor 自适应设计已废弃为锯齿源，见类头注释）。
          * ⚠️ it.9 起该档仅剩 forceDownsample（模拟器调试）回退路径使用：
@@ -451,9 +459,30 @@ class GlassKitView(context: Context) : View(context) {
     private val bodyHeightPx: Int
         get() = height - Math.round(2f * glassInsetPx)
 
-    /** 外扩内缩量（px）。 */
+    /**
+     * 外扩内缩量（px）。**所有绘制 / 采集 / 快照路径必须共用本值**（含钳制结果），
+     * 各自再算一遍 inset 会出现「本体用 112px、采集用 90px」式的错位。
+     *
+     * it.19 hotfix 2076028：超过 `min(w,h)/2 × 0.8` 时钳制并打一条 warn ——
+     * 2076027 就是因为 inset(112px) > 半高(99.5px) 导致 bodyH 负数、玻璃静默不画。
+     */
     private val glassInsetPx: Float
-        get() = glassInsetDp * resources.displayMetrics.density
+        get() {
+            val raw = glassInsetDp * resources.displayMetrics.density
+            if (raw <= 0f) return 0f
+            if (width <= 0 || height <= 0) return raw
+            val cap = minOf(width, height) / 2f * INSET_MAX_RATIO
+            if (raw <= cap) return raw
+            if (!loggedInsetClamped) {
+                loggedInsetClamped = true
+                Log.w(
+                    logTag,
+                    "glassInsetPx clamped: raw=$raw cap=$cap view=${width}x$height" +
+                        " (inset 不得 ≥ 半短边×${INSET_MAX_RATIO}，否则玻璃本体尺寸变 0/负数)",
+                )
+            }
+            return cap.coerceAtLeast(0f)
+        }
 
     /**
      * it.14 Continuous Capsule 开关（默认 **false** ⇒ 零回归）。
@@ -737,6 +766,9 @@ class GlassKitView(context: Context) : View(context) {
     private val shadowBlitPaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private var shadowCacheBitmap: Bitmap? = null
     private var shadowCacheKey: String? = null
+    /** hotfix 2076028：几何契约错误的取证日志去重标志（各打一条，不随帧刷屏）。 */
+    private var loggedBodyNonPositive: Boolean = false
+    private var loggedInsetClamped: Boolean = false
     private val tintPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
     /** it.9 膜层专用 Paint（WHITE，alpha 每次 draw 重设）。 */
     private val membranePaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1382,7 +1414,20 @@ class GlassKitView(context: Context) : View(context) {
         val insetPx = glassInsetPx
         val bodyW = width - Math.round(2f * insetPx)
         val bodyH = height - Math.round(2f * insetPx)
-        if (bodyW <= 0 || bodyH <= 0) return
+        if (bodyW <= 0 || bodyH <= 0) {
+            // it.19 hotfix 2076028：几何契约错误**不许静默 return** —— 2076027 就是
+            // 被这条早退藏住的（dock 玻璃整块不画，logcat 里一条痕迹都没有）。
+            if (!loggedBodyNonPositive) {
+                loggedBodyNonPositive = true
+                Log.e(
+                    logTag,
+                    "body non-positive: view=${width}x$height insetPx=$insetPx" +
+                        " bodyWH=${bodyW}x$bodyH — glass skipped（检查 JS 侧 glassInsetDp" +
+                        " 是否作用在**外扩后**的 view 上）",
+                )
+            }
+            return
+        }
         if (insetPx <= 0f) {
             drawGlassBody(canvas, bodyW, bodyH)
             return

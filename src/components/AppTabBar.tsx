@@ -290,6 +290,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
       style={[styles.outer, { paddingBottom: Math.max(0, dockFloatDp - dockInsetDp) }]}
     >
       <View
+        pointerEvents="box-none"
         style={[
           styles.frame,
           {
@@ -307,26 +308,10 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             bar 采 App backdrop 时把自己的图标与上一帧玻璃烘进纹理）。
             注意：指示器采集 bar（目标在本容器内）时照常绘制，玻璃叠玻璃不受影响。 */}
         <GlassKitBackdrop excludeFromCapture style={StyleSheet.absoluteFill} pointerEvents="box-none">
-        {/* it.19 P0-2 内容层：绝对定位内缩 inset ⇒ 尺寸/位置与 it.18 的 frame 完全一致
-            （dockWidth 在这里量、指示器 track 与 tabsRow 仍按这个矩形布局）。 */}
-        <View
-          style={[
-            styles.dockBody,
-            {
-              left: dockInsetDp,
-              top: dockInsetDp,
-              right: dockInsetDp,
-              bottom: dockInsetDp,
-              borderRadius: frameRadius,
-              backgroundColor: degraded
-                ? isDark
-                  ? GLASS_BAR_FALLBACK.dark
-                  : GLASS_BAR_FALLBACK.light
-                : 'transparent',
-            },
-          ]}
-          onLayout={onFrameLayout}
-        >
+        {/* it.19 P0-2 几何契约（唯一权威，hotfix 2076028）：
+            GlassKitView 铺满**外扩后的 frame**（视觉 + 2×inset），native 负责把玻璃
+            本体画在 inset 环带以内。**绝不能再在外面套一层内缩容器** —— 那样 view
+            拿到的是视觉尺寸、native 再减 2×inset ⇒ bodyH 变负数、玻璃静默不画。 */}
         {!degraded && (
           <GlassKitView
             ref={attachBarGlass}
@@ -359,6 +344,26 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
           />
         )}
 
+        {/* it.19 P0-2 内容层：四边内缩 inset ⇒ 尺寸 = 视觉尺寸（dockWidth 在这里量，
+            指示器 track / tabsRow 仍按这个矩形布局，与 it.18 逐位一致）。 */}
+        <View
+          style={[
+            styles.dockBody,
+            {
+              left: dockInsetDp,
+              top: dockInsetDp,
+              right: dockInsetDp,
+              bottom: dockInsetDp,
+              borderRadius: frameRadius,
+              backgroundColor: degraded
+                ? isDark
+                  ? GLASS_BAR_FALLBACK.dark
+                  : GLASS_BAR_FALLBACK.light
+                : 'transparent',
+            },
+          ]}
+          onLayout={onFrameLayout}
+        >
         {/* 指示器：track 宽 = (dockWidth − 2×内缩)/N，弹簧平移目标绝对定位 */}
         {dockWidth > 0 && (
           <Animated.View
