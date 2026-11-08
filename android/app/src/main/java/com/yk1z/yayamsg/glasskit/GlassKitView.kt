@@ -1361,23 +1361,26 @@ class GlassKitView(context: Context) : View(context) {
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), dimmingPaint)
         }
 
-        // ⑥.0 it.13 顶缘高光 18dp 渐变（HealthCheckIn GlassSurfaceKt.java:710-713）：
+        // ⑥.0 it.14-fix1 底缘高光 18dp 渐变（参数同 it.13，仅位置由顶缘改到底缘）：
         // highlightScale>0.01 时画竖向 [White@(0.22×scale), Transparent]，
-        // endY = 18dp×density，仅顶缘（底缘不画）。默认 0.2 ⇒ 起始 alpha 0.044。
+        // 从 y=h 向 y=h-18dp×density 衰减，仅底缘（顶缘不画）。默认 0.2 ⇒ 起始 alpha 0.044。
+        // 变量名 topAlpha / topColor / topHighlightPaint 沿用 it.13 不做重命名，diff 最小。
         // 原有 glow 顶/底双带 + 发丝线（⑥）保留但降为「扩展调试」语义，引擎代码不删。
         if (highlightScale > 0.01f) {
             val topAlpha = (TOP_HIGHLIGHT_ALPHA * highlightScale).coerceIn(0f, 1f)
             // floor 取整：保证 alpha 严格不超过契约值（同 tint / 描边 S1 口径）
             val topColor = (floor(topAlpha * 255f).toInt() shl 24) or 0x00FFFFFF
             val gradientEndY = TOP_HIGHLIGHT_DP * density
+            val hF = h.toFloat()
+            val bandTop = hF - minOf(gradientEndY, hF)
             topHighlightPaint.shader = LinearGradient(
-                0f, 0f, 0f, gradientEndY,
+                0f, hF, 0f, bandTop,
                 intArrayOf(topColor, Color.TRANSPARENT),
                 floatArrayOf(0f, 1f),
                 Shader.TileMode.CLAMP,
             )
             canvas.drawRect(
-                0f, 0f, w.toFloat(), minOf(gradientEndY, h.toFloat()), topHighlightPaint,
+                0f, bandTop, w.toFloat(), hF, topHighlightPaint,
             )
             topHighlightPaint.shader = null
         }
