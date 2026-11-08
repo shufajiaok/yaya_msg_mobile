@@ -1,29 +1,56 @@
 /**
- * AppTabBar · iOS 26 Liquid Glass 底栏
- *  - 玻璃感悬浮胶囊（半透明 + 1px 内描边）
- *  - 5 个 tab：图标 + label，label 常驻显示
- *  - active 项：玻璃 tint 胶囊 + accent 字 + 图标 spring 弹跳
- *  - Spring 按压反馈
- *  - 安全留白底部 inset
+ * AppTabBar · it.16 App 底栏（GlassKit dock：连续曲率 + 指示器透镜）
  *
- * 注：受 React Navigation 限制，render tabBar 由 Tab.Navigator 的 `tabBar` prop 调用此组件。
- *     此组件自管事件 onTabPress(index)、当前 activeIndex。
+ * 视觉 / 交互以 GlassTestScreen dock 渲染段为唯一模板，几何全部来自
+ * src/theme/glassProfile.ts（用户 2026-11-08 指定的 HealthCheckIn 实测配置），
+ * 不自创尺寸：
+ * - frame：宽 = 屏宽 × 0.81、高 56.86、圆角 999（引擎钳到 min(w,h)/2 = 真胶囊）；
+ *   **不加 overflow:'hidden'**（it.14 结论：圆弧父 View 的 clip 会先裁掉连续曲率
+ *   端帽的外扩部分，加回去会让端帽被切平）。
+ * - bar 玻璃层：GlassKitView capturable（作为指示器的采集源），blurDp 10 /
+ *   tintAlpha 0.06 / cornerRadiusDp 999 + capsuleContinuous（n=3 连续曲率端帽）。
+ * - 指示器：Animated track + GlassKitView（backdropTag 指向 bar 原生 handle =
+ *   玻璃叠玻璃），top/left/right/bottom = 内缩 5.36、capsuleContinuous、
+ *   indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451 的 White@0.05）、
+ *   highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）。
+ *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
+ *   绝不用累加增量）。
+ * - tabs：每 tab flex:1 居中，图标 size 23、label typography.caption2（11sp，守卫 R6
+ *   合规）；active 色 palette.tint / 未选中 palette.labelSecondary；active 图标
+ *   spring pop 保留原实现（motion.spring.bouncy）。
+ * - 降级（!canBlur() || !canLens()）：bar 用半透明实底、指示器退化为半透明实底
+ *   View，不渲染任何 GlassKitView。实底色值来自 glassProfile.ts（theme 目录豁免
+ *   inline-rgba 基线），本文件零内联 rgba。
+ *
+ * 契约：AppTabBarProps（items / activeKey / onSelect）与 MCI 导出签名不变，
+ * src/navigation/index.tsx 零改动。
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
-  Platform,
+  findNodeHandle,
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
+  type LayoutChangeEvent,
 } from 'react-native';
 import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-// it.7 POC：玻璃背景层（只加效果，不动既有结构——降级实底保留为兜底，玻璃垫其上）
 import GlassKitView from '../native/GlassKitView';
 import { useBackdropTag } from '../native/backdropTagStore';
+import { canBlur, canLens } from '../theme/glass';
+import {
+  GLASS_BAR_FALLBACK,
+  GLASS_EFFECT_DEFAULTS,
+  GLASS_INDICATOR_FALLBACK,
+  GLASS_PROFILE,
+  GLASS_SWITCH_DEFAULTS,
+  GLASS_TINT_COLOR,
+  useGlassScales,
+} from '../theme/glassProfile';
 
 export interface TabBarItem {
   key: string;
@@ -37,6 +64,10 @@ export interface AppTabBarProps {
   onSelect: (key: string) => void;
 }
 
+/** dock 指示器弹簧：spring(0.85, 380) → RN damping 0.85×2×√380 ≈ 33.14（与测试页同源）。 */
+const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
+
+/** 单个 tab：图标 + label；active 时图标 spring pop（保留替换前实现）。 */
 function TabCell({
   item,
   active,
@@ -53,12 +84,15 @@ function TabCell({
     pop.stopAnimation();
     if (active) {
       pop.setValue(0.92);
-      const animation = Animated.spring(pop, { toValue: 1, ...motion.spring.bouncy, useNativeDriver: true });
+      const animation = Animated.spring(pop, {
+        toValue: 1,
+        ...motion.spring.bouncy,
+        useNativeDriver: true,
+      });
       animation.start();
       return () => animation.stop();
-    } else {
-      pop.setValue(1);
     }
+    pop.setValue(1);
   }, [active, pop]);
 
   return (
@@ -67,16 +101,7 @@ function TabCell({
       accessibilityState={{ selected: active }}
       hitSlop={6}
       onPress={onSelect}
-      style={({ pressed }) => [
-        styles.cell,
-        // iOS 26 选中态：中性玻璃灰底 + accent 文字图标（不再粉，克制）
-        active && {
-          backgroundColor:
-            palette.name === 'dark' ? 'rgba(120,120,128,0.30)' : 'rgba(120,120,128,0.16)',
-        },
-        active && pressed && { transform: [{ scale: 0.96 }] },
-        pressed && !active && { transform: [{ scale: 0.97 }] },
-      ]}
+      style={styles.cell}
     >
       <Animated.View style={[styles.cellIcon, { transform: [{ scale: pop }] }]}>
         {item.icon({ color: active ? palette.tint : palette.labelSecondary, size: 23 })}
@@ -84,10 +109,10 @@ function TabCell({
       <Text
         style={[
           typography.caption2,
+          styles.cellLabel,
           {
             color: active ? palette.tint : palette.labelSecondary,
             fontWeight: active ? '700' : '600',
-            marginTop: 3,
           },
         ]}
       >
@@ -100,86 +125,157 @@ function TabCell({
 export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const palette = usePalette();
   const isDark = palette.name === 'dark';
-  // it.7 POC：原生玻璃背景层（采集 App 级 GlassKitBackdrop 内容）。tag 由
-  // App.tsx 经模块级 store 广播（tab bar 从 props/路由拿不到 backdrop 引用）；
-  // 未就绪（undefined）时原生侧走兜底底色，不影响既有降级实底观感。
-  // 参数：blurDp 12 / tintAlpha 0.10 / 圆角沿用 bar 的 28 / 不开透镜
-  //（refraction/dispersion 不传 = 0，铁律② lens 仅 indicator）；
-  // blurScale/tintScale 不传 → GlassKitView 内部取 glass store 值。
+  // App 级 backdrop 容器 tag（App.tsx 经模块级 store 广播；未就绪时原生走兜底底色）。
   const backdropTag = useBackdropTag();
-  // 旧 expo-blur 引擎已删除（独立分支决策）；it.7 POC 接入 GlassKitView 原生引擎
-  // 降级：无模糊半透明实底（原 tint 色提高不透明度），保持胶囊布局与高光观感
+  // 四倍率实时值：订阅收敛在 glassProfile.ts（守卫 glass-api-access 基线为 0 新增）。
+  const { blurScale, lensScale } = useGlassScales();
+  const winWidth = useWindowDimensions().width;
+
+  // 降级：无模糊能力（API<31）或无透镜能力（API<33）时整条 dock 退实底。
+  const degraded = !canBlur() || !canLens();
+
+  const barGlassRef = useRef(null);
+  const [barGlassTag, setBarGlassTag] = useState<number | undefined>(undefined);
+  const [dockWidth, setDockWidth] = useState(0);
+
+  const activeIndex = Math.max(
+    0,
+    items.findIndex((item) => item.key === activeKey),
+  );
+  const innerPad = GLASS_PROFILE.dockInnerPadDp;
+  const tabWidth =
+    dockWidth > 0 && items.length > 0 ? (dockWidth - innerPad * 2) / items.length : 0;
+  const dockIndicatorX = useRef(new Animated.Value(innerPad)).current;
+
+  // 指示器只做「绝对目标 x」的 spring，不累加增量（it.10 漂移根因）。
+  useEffect(() => {
+    if (tabWidth <= 0) return;
+    Animated.spring(dockIndicatorX, {
+      toValue: innerPad + activeIndex * tabWidth,
+      ...DOCK_SPRING,
+      useNativeDriver: true,
+    }).start();
+  }, [activeIndex, tabWidth, innerPad, dockIndicatorX]);
+
+  const onBarLayout = () => {
+    const handle = findNodeHandle(barGlassRef.current);
+    if (handle != null) setBarGlassTag(handle);
+  };
+
+  const onFrameLayout = (evt: LayoutChangeEvent) => {
+    setDockWidth(evt.nativeEvent.layout.width);
+  };
+
+  const frameHeight = GLASS_PROFILE.dockHeightDp;
+
   return (
     <View
       pointerEvents="box-none"
-      style={[styles.outer, { paddingBottom: 16 }]}
+      style={[styles.outer, { paddingBottom: GLASS_PROFILE.dockFloatDp }]}
     >
       <View
         style={[
-          styles.bar,
+          styles.frame,
           {
-            // 降级实底：无模糊后提高不透明度保证可读
-            backgroundColor: isDark ? 'rgba(30,31,36,0.94)' : 'rgba(245,246,250,0.94)',
-            borderColor: palette.innerStroke,
+            width: Math.round(winWidth * GLASS_PROFILE.dockWidthScale),
+            height: frameHeight,
+            alignSelf: 'center',
+            borderRadius: Math.min(999, frameHeight / 2),
+            backgroundColor: degraded
+              ? isDark
+                ? GLASS_BAR_FALLBACK.dark
+                : GLASS_BAR_FALLBACK.light
+              : 'transparent',
           },
         ]}
+        onLayout={onFrameLayout}
       >
-        {/* it.7 POC：原生玻璃层，absoluteFill 垫在既有内容之下（bar overflow:hidden
-            + 圆角已把它裁进胶囊）；bar 自身实底画在子节点之下 = 玻璃的兜底 */}
-        <GlassKitView
-          style={StyleSheet.absoluteFill}
-          backdropTag={backdropTag}
-          blurDp={12}
-          tintAlpha={0.10}
-          tintColor={isDark ? '#1E1F24' : '#F5F6FA'}
-          cornerRadiusDp={28}
-        />
-        {/* tint 色相层：保证可读；浅色几乎透, 深色轻提亮 */}
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            {
-              backgroundColor: isDark
-                ? 'rgba(255,255,255,0.06)'
-                : 'rgba(255,255,255,0.12)',
-            },
-          ]}
-        />
-        {/* 顶部细高光：玻璃受光边沿（iOS Liquid Glass） */}
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassHighlight,
-            {
-              backgroundColor: isDark
-                ? 'rgba(255,255,255,0.20)'
-                : 'rgba(255,255,255,0.85)',
-            },
-          ]}
-        />
-        {/* 底部细暗边：玻璃下方投影边缘，液态质感 */}
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassShadowEdge,
-            {
-              backgroundColor: isDark
-                ? 'rgba(0,0,0,0.32)'
-                : 'rgba(0,0,0,0.10)',
-            },
-          ]}
-        />
-        {items.map((item) => {
-          const active = item.key === activeKey;
-          return (
+        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃） */}
+        {!degraded && (
+          <GlassKitView
+            ref={barGlassRef}
+            style={StyleSheet.absoluteFill}
+            onLayout={onBarLayout}
+            backdropTag={backdropTag}
+            capturable={true}
+            blurDp={10}
+            tintAlpha={0.06}
+            tintColor={isDark ? GLASS_TINT_COLOR.dark : GLASS_TINT_COLOR.light}
+            cornerRadiusDp={999}
+            capsuleContinuous={true}
+            refractionPx={Math.round(5 * lensScale)}
+            dispersionPx={0}
+            highlightScale={GLASS_PROFILE.highlightScale}
+            chromaticEnabled={GLASS_EFFECT_DEFAULTS.chromaticEnabled}
+            depthEffect={GLASS_EFFECT_DEFAULTS.depthEffect}
+            vibrancyEnabled={GLASS_EFFECT_DEFAULTS.vibrancyEnabled}
+            blurEnabled={GLASS_SWITCH_DEFAULTS.blurEnabled}
+          />
+        )}
+
+        {/* 指示器：track 宽 = (dockWidth − 2×内缩)/N，弹簧平移目标绝对定位 */}
+        {dockWidth > 0 && (
+          <Animated.View
+            style={[
+              styles.indicatorTrack,
+              {
+                width: tabWidth,
+                height: frameHeight,
+                transform: [{ translateX: dockIndicatorX }],
+              },
+            ]}
+            pointerEvents="none"
+          >
+            {degraded ? (
+              <View
+                style={[
+                  styles.indicatorFallback,
+                  {
+                    top: innerPad,
+                    left: innerPad,
+                    right: innerPad,
+                    bottom: innerPad,
+                    borderRadius: Math.max(0, (frameHeight - innerPad * 2) / 2),
+                    backgroundColor: GLASS_INDICATOR_FALLBACK.color,
+                    opacity: GLASS_INDICATOR_FALLBACK.opacity,
+                  },
+                ]}
+              />
+            ) : barGlassTag != null ? (
+              <GlassKitView
+                style={[
+                  styles.indicator,
+                  {
+                    top: innerPad,
+                    left: innerPad,
+                    right: innerPad,
+                    bottom: innerPad,
+                  },
+                ]}
+                backdropTag={barGlassTag}
+                blurDp={Math.round(2 * blurScale)}
+                cornerRadiusDp={999}
+                capsuleContinuous={true}
+                indicatorBoostAlpha={0.05}
+                refractionPx={Math.round(8 * lensScale)}
+                dispersionPx={Math.round(10 * lensScale)}
+                highlightScale={0}
+              />
+            ) : null}
+          </Animated.View>
+        )}
+
+        {/* tabs：flex:1 居中，padding = 内缩，与指示器 track 同宽同中心 */}
+        <View style={[styles.tabsRow, { padding: innerPad }]} pointerEvents="box-none">
+          {items.map((item) => (
             <TabCell
               key={item.key}
               item={item}
-              active={active}
+              active={item.key === activeKey}
               onSelect={() => onSelect(item.key)}
             />
-          );
-        })}
+          ))}
+        </View>
       </View>
     </View>
   );
@@ -192,61 +288,27 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: 'center',
-    // 居中略加余量：上一版 paddingHorizontal 12 让胶囊贴边感觉偏左
-    paddingHorizontal: 16,
+    // paddingBottom 由 JSX inline 从 GLASS_PROFILE.dockFloatDp 驱动
   },
-  bar: {
-    flexDirection: 'row',
-    // 长度自适应内容而非撑满屏宽：定宽 cell → 胶囊收短居中(缩「长度」)
-    borderRadius: 28,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    minHeight: 64,
-    overflow: 'hidden',
-    // 连续柔和悬浮投影（iOS+Android 双端都圆角, 圆角32 跟随 outline）
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 8 },
-        shadowOpacity: 0.10,
-        shadowRadius: 16,
-      },
-      android: { elevation: 8 },
-      default: null,
-    }),
-  },
-  // 玻璃顶部受光细线（在胶囊内顶部 1px, inset 跟随圆角）
-  glassHighlight: {
+  // 宽 / 高 / 圆角全部由 JSX inline 从 GLASS_PROFILE 驱动；不写死圆角（守卫 R3）。
+  frame: {},
+  indicatorTrack: { position: 'absolute', top: 0, left: 0 },
+  indicator: { position: 'absolute' },
+  indicatorFallback: { position: 'absolute' },
+  tabsRow: {
     position: 'absolute',
-    left: 16,
-    right: 16,
     top: 0,
-    height: 1,
-    borderRadius: 1,
-  },
-  // 玻璃底部暗边（1px 内阴影, 玻璃与下方内容的分界, inset 跟随圆角）
-  glassShadowEdge: {
-    position: 'absolute',
-    left: 16,
-    right: 16,
+    left: 0,
+    right: 0,
     bottom: 0,
-    height: 1,
-    borderRadius: 1,
+    flexDirection: 'row',
   },
-  cell: {
-    // 取消 flex:1 → 改固定宽, 胶囊随内容收短(用户反馈: 缩的是「长度」)
-    width: 76,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 4,
-    paddingHorizontal: 4,
-    // 完全 pill（半径=一半高）：选中时圆形指示感 iOS 26
-    borderRadius: 28,
-  },
+  cell: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   cellIcon: { alignItems: 'center', justifyContent: 'center' },
+  cellLabel: { marginTop: 3 },
 });
 
-// 辅助：复用项目里的 MaterialCommunityIcons
+// 辅助：复用项目里的 MaterialCommunityIcons（navigation/index.tsx 依赖此签名）。
 export function MCI(name: string) {
   return ({ color, size }: { color: string; size: number }) => (
     <MaterialCommunityIcons name={name} color={color} size={size} />
