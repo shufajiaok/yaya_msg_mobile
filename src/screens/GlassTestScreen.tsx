@@ -1,5 +1,23 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.10）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.11）。
+ *
+ * it.11（it.10 真机验收 2 项回修 + dock 独立调节）：
+ * ① 指示器与 tab 几何错位修正（P0，错位公式实锤）：it.10 指示器 track 宽 =
+ *   dockWidth/N（整宽均分没扣 tab 行 padding 5）、translateX = i×dockWidth/N，
+ *   而 tab 宽 = (dockWidth−10)/N → 胶囊中心与 tab 中心错位 = 5 − (i+0.5)×10/N
+ *  （N=4 首端 +3.75 / 尾端 −3.75dp）。修法 = track 宽改 (dockWidth−10)/N、
+ *   spring 目标改 5 + i×tabWidth，胶囊 inset 5 不变 → 中心严格重合。⚠️ 实例
+ *   Compose（GlassKit.kt tabWidth=整宽/N + Row padding 5）同样存在此错位，RN 版修正之。
+ * ② 指示器边缘锯齿第二轮取证修复（引擎侧，见 GlassLensShader / GlassKitView it.11
+ *   注释）：真机取证（it11-before.log）实锤两条——a) dispersion=20px 时 RGB 三通道
+ *   贴边错位采样最大 36px → 曲面彩边（shader 侧色散贴边收敛）；b) 指示器透镜输入 =
+ *   dock 被采集时的软画布降级渲染（单步 1/6 降采样双线性跳采样混叠；dock 屏幕帧
+ *   走 GPU 全分辨率，故 dock 正常、指示器锯齿）→ 软画布降采样改逐级 2 倍半采样链。
+ * ③ dock 独立调节滑块（用户要求）：「dock 高度（48–96）」「dock 宽度倍率
+ *   （0.6–1.4）」「dock 圆角（0–48，999=全胶囊）」三滑块，高度/宽度/圆角全部
+ *   inline 由 state 驱动（styles 写死 64 移除）；宽度变化经 onLayout → dockWidth
+ *   自动更新 → 指示器几何按①公式自动跟随；bar 与指示器 cornerRadiusDp 共用
+ *   dock 圆角值（999 时引擎钳制 = 真胶囊，调小变圆角矩形）。
  *
  * it.10（it.9 真机验收 8 项回修）：
  * ① 指示器滑动修复（P0）：it.9 的 Animated.View style 漏挂 transform——dockIndicatorX
@@ -206,6 +224,8 @@ function DraggableGlass(props: {
   children: ReactNode;
   style?: StyleProp<ViewStyle>;
   interactive?: boolean;
+  /** it.11 任务三：外层容器宽度测量透传（dock 宽度倍率以容器实测宽为基准）。 */
+  onLayout?: (evt: { nativeEvent: { layout: { width: number; height: number } } }) => void;
 }) {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const offsetRef = useRef(offset);
@@ -272,6 +292,7 @@ function DraggableGlass(props: {
           ],
         },
       ]}
+      onLayout={props.onLayout}
       {...panResponder.panHandlers}
     >
       {props.children}
@@ -347,6 +368,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const [dockSelected, setDockSelected] = useState(0);
   const [dockWidth, setDockWidth] = useState(0);
   const dockIndicatorX = useRef(new Animated.Value(0)).current;
+  // it.11 任务三：dock 独立调节（用户要求该控件单独做高度/宽度/圆角调节，
+  // 随 blurOn 等 state 同区域；默认值 = it.10 现状：64dp / 1.0 / 全胶囊 999）
+  const [dockHeight, setDockHeight] = useState(64);
+  const [dockWidthMult, setDockWidthMult] = useState(1);
+  const [dockRadius, setDockRadius] = useState(999);
+  // it.11 任务三：dock 外层容器实测宽（宽度倍率的基准，倍率变化不回写基准）
+  const [dockWrapWidth, setDockWrapWidth] = useState(0);
   // it.6 柔光细化四参数（本地调参态，不进持久化 store——与圆角/大小倍率同模式）
   const [glowAlpha, setGlowAlpha] = useState(1);
   const [glowWidth, setGlowWidth] = useState(1);
@@ -377,15 +405,33 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     setDockWidth(evt.nativeEvent.layout.width);
   }, []);
 
-  // it.9 Dock：点按/宽度变化 → spring 驱动指示器 translationX（点按移动效果）
+  // it.11 任务三：dock 外层容器宽测量（宽度倍率基准）
+  const onDockWrapLayout = useCallback((evt: { nativeEvent: { layout: { width: number } } }) => {
+    setDockWrapWidth(evt.nativeEvent.layout.width);
+  }, []);
+
+  // it.11 任务一：指示器几何对齐 tab（错位公式与修法）。
+  // it.10 错位现状：tab 行 padding 5 → tab 宽 = (dockWidth−10)/N，tab i 中心 =
+  // 5 + (i+0.5)(dockWidth−10)/N；而指示器 track 宽 = dockWidth/N（整宽均分没扣
+  // padding）、translateX = i×dockWidth/N → 胶囊中心与 tab 中心错位 =
+  // 5 − (i+0.5)×10/N：N=4 时首端 +3.75 / 尾端 −3.75dp——用户肉眼可见
+  // 「图标不在胶囊几何中心」。修法（几何严格对齐 tab）：
+  //   track 宽 = (dockWidth−10)/N（= tab 实宽）、spring 目标 = 5 + i×tabWidth；
+  //   胶囊 inset 5 不变 → 胶囊中心 = 5 + i×tabWidth + tabWidth/2 = tab i 中心。
+  // ⚠️ 实例 Compose（lg-compose GlassKit.kt GlassBottomTabs：tabWidth=整宽/N +
+  // Row padding 5）同样存在此错位——RN 版本修正之，实例侧未动。
+  const dockTabWidth = dockWidth > 0 ? (dockWidth - 10) / DOCK_TABS.length : 0;
+
+  // it.9 Dock：点按/宽度变化 → spring 驱动指示器 translationX（点按移动效果）。
+  // it.11 任务一：spring 目标同步改为 5 + i×tabWidth（对齐 tab 几何，见上注释）。
   useEffect(() => {
-    if (dockWidth <= 0) return;
+    if (dockTabWidth <= 0) return;
     Animated.spring(dockIndicatorX, {
-      toValue: dockSelected * (dockWidth / DOCK_TABS.length),
+      toValue: 5 + dockSelected * dockTabWidth,
       ...DOCK_SPRING,
       useNativeDriver: true,
     }).start();
-  }, [dockSelected, dockWidth, dockIndicatorX]);
+  }, [dockSelected, dockTabWidth, dockIndicatorX]);
 
   // it.9：色散 px 换算（滑块值 × 20，作用于所有开透镜的面板）；指示器走实例公式
   // lens(8, 10) × lensScale、色散 10 × lensScale × (dispersionLevel / 0.35)，见 dock 段。
@@ -407,6 +453,17 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const winWidth = useWindowDimensions().width;
   const panelRowMargin = Math.max(-20, ((winWidth - 40) * (1 - widthScale)) / 2);
 
+  // it.11 任务三：dockFrame 宽 = 容器实测宽 × 宽度倍率（alignSelf center 居中；
+  // 倍率变化 → onDockFrameLayout 上报的 dockWidth 自动更新 → 指示器几何跟随）。
+  // 高度/圆角 inline 由 state 驱动，替换 it.10 写死的 64（styles.dockFrame/
+  // dockIndicatorTrack 的 height:64 与 borderRadius token 全部移出）。
+  const dockFrameWidth = dockWrapWidth > 0 ? Math.round(dockWrapWidth * dockWidthMult) : undefined;
+  // JS 侧圆角钳制与引擎口径一致 min(radius, h/2)：dockRadius=999 → 高度一半 = 全胶囊
+  //（引擎侧 cornerRadiusDp=999 同样钳到 min(w,h)/2）；调小（0–48）→ 圆角矩形
+  const dockFrameRadius = Math.min(dockRadius, dockHeight / 2);
+  // 占位胶囊（玻璃叠玻璃关）：半径按胶囊实际尺寸（track 高 −10 inset）钳制
+  const dockFallbackRadius = Math.max(0, Math.min(dockRadius, (dockHeight - 10) / 2));
+
   const apiLevel = Platform.OS === 'android' ? Number(Platform.Version) : -1;
 
   return (
@@ -423,7 +480,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.10 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.11 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 面板可拖动`}
@@ -548,9 +605,27 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             切换选中态，Animated spring（damping 33.14 / stiffness 380）驱动指示器。
             tab 文字 11sp（实例 10sp 被 guard R6 拦截）。 */}
         <Text style={styles.dockCaption}>底部标签栏（玻璃叠玻璃 · 点按弹簧移动）</Text>
-        <DraggableGlass style={styles.dockWrap} interactive={true}>
-          <View style={styles.dockFrame} onLayout={onDockFrameLayout}>
-            {/* 外层 bar（it.10 任务三：加轻折射，用户拍板偏离实例） */}
+        <DraggableGlass
+          style={styles.dockWrap}
+          interactive={true}
+          onLayout={onDockWrapLayout}
+        >
+          {/* it.11 任务三：dockFrame 高度/宽度/圆角 inline 由 dock 滑块 state 驱动
+              （宽度 = 容器实测宽 × 倍率居中；圆角 min(999→高度一半=全胶囊)） */}
+          <View
+            style={[
+              styles.dockFrame,
+              {
+                height: dockHeight,
+                width: dockFrameWidth,
+                alignSelf: 'center',
+                borderRadius: dockFrameRadius,
+              },
+            ]}
+            onLayout={onDockFrameLayout}
+          >
+            {/* 外层 bar（it.10 任务三：加轻折射，用户拍板偏离实例）。
+                it.11 任务三：cornerRadiusDp 共用 dock 圆角滑块值（999 时引擎钳制=真胶囊） */}
             <GlassKitView
               ref={dockGlassRef}
               style={StyleSheet.absoluteFill}
@@ -560,7 +635,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               blurDp={10}
               tintAlpha={0.10}
               tintColor={PANEL_TINT}
-              cornerRadiusDp={radii.pill}
+              cornerRadiusDp={dockRadius}
               refractionPx={Math.round(5 * lensScale)}
               dispersionPx={0}
               membraneAlpha={membrane}
@@ -569,13 +644,17 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             />
             {/* 选中指示器（唯一保留 lens 的地方；透镜采外层 bar 合成帧）。
                 it.10 任务一：transform translateX 挂在 Animated.View 上——GlassKitView
-                原生视图位置随位移移动，玻璃采集链经 PreDraw 位置检测自动跟随。 */}
+                原生视图位置随位移移动，玻璃采集链经 PreDraw 位置检测自动跟随。
+                it.11 任务一：track 宽 = tab 实宽 (dockWidth−10)/N、spring 目标 =
+                5 + i×tabWidth（错位公式与修法见 dockTabWidth 注释）；track 高度
+                inline 由 dock 高度滑块驱动；内层胶囊 cornerRadiusDp 共用 dock 圆角。 */}
             {dockWidth > 0 && dockGlassTag != null && (
               <Animated.View
                 style={[
                   styles.dockIndicatorTrack,
                   {
-                    width: dockWidth / DOCK_TABS.length,
+                    width: dockTabWidth,
+                    height: dockHeight,
                     transform: [{ translateX: dockIndicatorX }],
                   },
                 ]}
@@ -586,7 +665,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                     style={styles.dockIndicator}
                     backdropTag={dockGlassTag}
                     blurDp={indicatorBlurDp}
-                    cornerRadiusDp={radii.pill}
+                    cornerRadiusDp={dockRadius}
                     refractionPx={indicatorRefractionPx}
                     dispersionPx={indicatorDispersionPx}
                     membraneAlpha={0.05}
@@ -595,8 +674,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                   />
                 ) : (
                   /* it.10 任务六：玻璃叠玻璃关——不渲染内层 GlassKitView（省掉整条
-                     双重透射管线），纯色半透明胶囊占位（实色+opacity 守卫合规） */
-                  <View style={styles.dockIndicatorFallback} />
+                     双重透射管线），纯色半透明胶囊占位（实色+opacity 守卫合规）。
+                     it.11 任务三：圆角随 dock 圆角滑块（按胶囊实际尺寸钳制） */
+                  <View
+                    style={[styles.dockIndicatorFallback, { borderRadius: dockFallbackRadius }]}
+                  />
                 )}
               </Animated.View>
             )}
@@ -634,6 +716,30 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             label="玻璃叠玻璃（指示器透镜）"
             value={glassOnGlass}
             onChange={setGlassOnGlass}
+          />
+          {/* it.11 任务三：dock 独立调节滑块（用户要求 dock 控件单独做高度/宽度/圆角
+              调节；「dock」前缀防与面板大小倍率混淆。宽度变化 → dockFrame onLayout
+              上报 dockWidth 自动更新 → 指示器几何按任务一公式自动跟随） */}
+          <SliderRow
+            label="dock 高度（48–96）"
+            value={dockHeight}
+            min={48}
+            max={96}
+            onChange={(next) => setDockHeight(Math.round(clampRange(next, 48, 96)))}
+          />
+          <SliderRow
+            label="dock 宽度倍率（0.6–1.4）"
+            value={dockWidthMult}
+            min={0.6}
+            max={1.4}
+            onChange={(next) => setDockWidthMult(clampRange(next, 0.6, 1.4))}
+          />
+          <SliderRow
+            label="dock 圆角（0–48，999=全胶囊）"
+            value={dockRadius}
+            min={0}
+            max={48}
+            onChange={(next) => setDockRadius(Math.round(clampRange(next, 0, 48)))}
           />
           <ScaleSliderRow
             label="blurScale（模糊倍率）"
@@ -756,18 +862,17 @@ const styles = StyleSheet.create({
   // it.9：Dock demo 说明行（非玻璃层）
   dockCaption: { fontSize: 11, color: '#8fd3ff', marginBottom: 6 },
   // it.9：玻璃叠玻璃底部标签栏（圆角全走 radii token，守卫 R3 合规）
+  // it.11 任务三：height:64 / borderRadius 写死值移出 stylesheet——inline 由 dock
+  // 高度/圆角滑块 state 驱动（见 dockFrame inline style），此处仅保留静态基座
   dockWrap: { marginBottom: 18 },
   dockFrame: {
-    height: 64,
-    borderRadius: radii.capsule,
     overflow: 'hidden',
   },
-  // 指示器轨道：跟随 spring 平移的容器（宽 = 容器宽 / tab 数，高同 bar）
+  // 指示器轨道：跟随 spring 平移的容器（宽 = tab 实宽，高 = dock 高度滑块值）
   dockIndicatorTrack: {
     position: 'absolute',
     top: 0,
     left: 0,
-    height: 64,
   },
   // 内层指示条玻璃：轨道内 5dp 内边距（实例 padding(5)）→ 54dp 高全胶囊
   dockIndicator: {
