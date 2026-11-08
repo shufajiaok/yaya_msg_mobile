@@ -138,15 +138,15 @@ class GlassKitView(context: Context) : View(context) {
         /** 边缘高光 alpha ——glass.ts EDGE_HIGHLIGHT.alpha 0.14。 */
         const val EDGE_HIGHLIGHT_ALPHA: Float = 0.14f
         /**
-         * it.14 Continuous Capsule 超椭圆指数：2（圆弧）< 3 < 4（Apple squircle），
-         * 取保守中值，避免 n=4 端帽过方（it14-spec 附录 B 有意偏离 #2）。仅在
-         * capsuleContinuous=true 且 cornerRadiusPx 已钳到半短边（真胶囊）时覆盖
-         * 本帧 cornerExponentN；同一标量同时喂 clipPath 与 AGSL uCornerExponent，
-         * Path 参数方程 |x|^n+|y|^n=r^n 与 SDF 零点严格重合。
-         * ⚠️ 不改 ContinuousRoundRect.kt 的 N_MIN/N_MAX、blend 曲线、胶囊硬守卫，
-         *    不改 GlassLensShader.kt，不改 GPU 全分辨率模糊链。
+         * it.15 方案 A：capsuleContinuous 组件的 clipPath 改走精确 Kyant0 Bezier
+         * （ContinuousRoundRect.buildKyant0ContinuousRoundRect），AGSL 侧仍用
+         * sdContinuous，故 uCornerExponent 传 2.0（退化圆弧 SDF）。
+         * 实测（r=112.5px，tH=1/tV=0）：Kyant0 真曲线与超椭圆 n=3 零点偏差
+         * 13.77px（端帽被拉方，it.14「不够圆润」的根因），与圆弧 n=2 仅 1.84px，
+         * 落在 edgeAA(1px)/dispFade(≈10px) 安全带内。GlassLensShader.kt 零改动。
+         * ⚠️ 不改 N_MIN/N_MAX、blend 曲线、胶囊硬守卫，不改 GPU 全分辨率模糊链。
          */
-        const val CAPSULE_CONTINUOUS_N: Float = 3.0f
+        const val KYANT0_SDF_N: Float = 2.0f
         /**
          * 近似模糊降采样档（清单 §二.2 原 1/4；实测上调 1/6）：
          * 1/4 + 双线性放大的 10%-90% 边缘过渡宽度实测仅 ~6px（真机像素脚本），
@@ -357,7 +357,7 @@ class GlassKitView(context: Context) : View(context) {
     /**
      * it.14 Continuous Capsule 开关（默认 **false** ⇒ 零回归）。
      * 仅 dock bar / dock 指示器 / 顶栏演示件显式传 true；开启且半径已钳到
-     * 半短边（真胶囊）时，本帧 cornerExponentN 局部覆盖为 CAPSULE_CONTINUOUS_N，
+     * 半短边（真胶囊）时，clipPath 改走精确 Kyant0 Bezier、SDF 传 KYANT0_SDF_N=2.0，
      * Path 与 AGSL SDF 同走连续曲率端帽；hero / chip / 工具条 / clear 不开启。
      * 走 markPropChanged()（it.9 静止期零重绘契约）。
      */
@@ -1233,29 +1233,30 @@ class GlassKitView(context: Context) : View(context) {
         // 胶囊 / 正方形命中 cornerExponent 的 n=2 硬守卫 → 严格圆弧，it.12 零回归；
         // 容器面板 r=24（GlassShape.container）→ n≈4，G2 连续曲率。
         // it.14 Continuous Capsule：dock bar / 指示器 / 顶栏演示件显式开启
-        // capsuleContinuous，且半径已钳到半短边（真胶囊，999→h/2）时，把本帧
-        // n 局部覆盖为 CAPSULE_CONTINUOUS_N=3.0f，让角部走 G2 连续曲率端帽；
-        // r 与视图矩形边界一字不动（仍是真胶囊、端帽 x 极值不变）。
-        // ⚠️ 仅删 ContinuousRoundRect.kt:82 守卫无效——:80-81 的 blend 在 t=1
-        //    已独立把 n 压回 2（双重保险），故必须在调用侧覆盖，且只覆盖本帧局部变量。
-        // 其余情况（hero/chip/工具条/clear 的 r=24、未开启的胶囊、正方形）一律保持
-        // 原 cornerExponent() 结果，逐位零回归。
-        // 0.5f 与 ContinuousRoundRect.kt:67 的胶囊守卫容差同源（本类不新增常量）。
-        // 覆盖后的 n 走完整链路：:1194 clipPath → :1245 drawLensLayer →
-        // :1489 obtainLensShader → :2134 setFloatUniform("uCornerExponent", n)，
-        // 硬件帧 Path 与 AGSL SDF 同 n=3.0；回录帧不创建 RuntimeShader，
-        // clipPath 仍用同一 n，与 it.13 现状一致、不新增差异。
+        // it.15 方案 A：capsuleContinuous 且半径已钳到半短边（真胶囊，999→h/2）
+        // 时，clipPath 走精确 Kyant0 3 段 cubic Bezier Path（外形与 Kotlin 逐点
+        // 一致）；uCornerExponent 传 KYANT0_SDF_N=2.0（圆弧 SDF，shader 零改动）。
+        // 其余情况（hero/chip/工具条/clear 的 r=24、未开启的胶囊、正方形）一律
+        // 保持原 cornerExponent() + 超椭圆 Path，逐位零回归。
+        // 回录帧不创建 RuntimeShader，clipPath 与屏幕帧同形，不新增差异。
         val halfMin = minOf(w, h) / 2f
         val isCapsule = cornerRadiusPx >= halfMin - 0.5f
-        val cornerExponentN = if (capsuleContinuous && isCapsule) {
-            CAPSULE_CONTINUOUS_N
+        val useKyant0 = capsuleContinuous && isCapsule
+        val cornerExponentN = if (useKyant0) {
+            KYANT0_SDF_N
         } else {
             ContinuousRoundRect.cornerExponent(w.toFloat(), h.toFloat(), cornerRadiusPx)
         }
         if (cornerRadiusPx > 0f) {
-            ContinuousRoundRect.buildContinuousRoundRect(
-                clipPath, w.toFloat(), h.toFloat(), cornerRadiusPx, cornerExponentN,
-            )
+            if (useKyant0) {
+                ContinuousRoundRect.buildKyant0ContinuousRoundRect(
+                    clipPath, w.toFloat(), h.toFloat(), cornerRadiusPx,
+                )
+            } else {
+                ContinuousRoundRect.buildContinuousRoundRect(
+                    clipPath, w.toFloat(), h.toFloat(), cornerRadiusPx, cornerExponentN,
+                )
+            }
             canvas.clipPath(clipPath)
         }
 
@@ -1579,7 +1580,7 @@ class GlassKitView(context: Context) : View(context) {
         shader.setFloatUniform("uDispersionPx", dispersion)
         // it.13 效果开关 A/B 取证（仅硬件路径，切换/首帧各一条，防刷屏）
         // it.14 取证：追加 capsule / boost 标记，logcat 可直接核对
-        // 「n=3.0 capsule=true boost=0.05」（dock / 指示器 / 顶栏演示件帧）。
+        // 「n=2.0 capsule=true boost=0.05」（dock / 指示器 / 顶栏演示件帧）。
         val flags = "chromatic=$chromaticEnabled depth=$depthEffect" +
             " vibrancy=$vibrancyEnabled n=$cornerExponentN" +
             " capsule=$capsuleContinuous boost=$indicatorBoostAlpha"
