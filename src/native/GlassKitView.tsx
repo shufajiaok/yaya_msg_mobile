@@ -13,7 +13,7 @@
  *                 tintColor 恒为 0。真机 logcat + 像素取证实证，2026-11-07）
  * - refractionPx  折射位移基准 px（API 33+ 透镜，乘 lensScale）
  * - dispersionPx  色散位移基准 px（API 33+ 透镜，乘 lensScale）
- * - cornerRadiusDp 圆角半径 dp
+ * - cornerRadiusDp 圆角半径 dp（it.13：引擎按连续曲率超椭圆生成 clip 与 SDF）
  * - dimmingAlpha  压暗层 alpha（#000，独立于 tint）
  * - backdropTag   背景容器 tag（findNodeHandle(GlassKitBackdrop ref)）
  * - blurScale / tintScale / lensScale / glowScale  四倍率（glowScale 作用于边缘
@@ -21,6 +21,13 @@
  * - forceDownsample 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时
  *   开启；真机默认 false 走 RenderEffect 真高斯）
  * - blurEnabled   模糊总开关（原生采集+模糊链路闸门）
+ * - membraneAlpha 白色膜层 alpha（it.13 默认 0：「膜层」滑块改绑 tintScale）
+ * - highlightScale 顶缘高光倍率（0–1，默认 0.2；18dp 竖向渐变）
+ * - chromaticEnabled 色散开关（默认 true；关闭时引擎把 dispersion 置 0）
+ * - depthEffect   景深开关（默认 true；引擎下发 uDepthEffect=1/0）
+ * - vibrancyEnabled 鲜活度开关（默认 true；saturation=1.5，默认走风险最低的
+ *   GlassLensShader 末矩阵，仅 API33+ 硬件透镜帧生效；GPU RenderEffect
+ *   ColorFilter 路径保留为引擎侧编译期开关 VIBRANCY_SHADER_FALLBACK=false）
  *
  * H2 双档门控（glass.ts canBlur / canLens，非 Android 视作全支持）：
  * - canBlur() false  → blurDp 传 0（原生跳过模糊，只剩 tint/压暗/描边）；
@@ -60,7 +67,7 @@ export interface GlassKitViewProps extends ViewProps {
   refractionPx?: number;
   /** 色散位移基准（px，仅 API 33+ 生效）。 */
   dispersionPx?: number;
-  /** 圆角半径（dp）。 */
+  /** 圆角半径（dp）。it.13：引擎按连续曲率超椭圆（n 由尺寸/半径自动计算）裁剪。 */
   cornerRadiusDp?: number;
   /** 压暗层 alpha（#000 @0.35 语义见 glass.ts GLASS_DIMMING）。 */
   dimmingAlpha?: number;
@@ -68,9 +75,9 @@ export interface GlassKitViewProps extends ViewProps {
   backdropTag?: number;
   /** 模糊倍率覆盖（未传时取 glass.ts store 的 blurScale）。 */
   blurScale?: number;
-  /** tint 倍率覆盖（未传时取 store 的 tintScale）。 */
+  /** tint / 膜层倍率覆盖（未传时取 store 的 tintScale）。 */
   tintScale?: number;
-  /** 透镜倍率覆盖（未传时取 store 的 lensScale；0 = 关透镜）。 */
+  /** 透镜 / 折射倍率覆盖（未传时取 store 的 lensScale；0 = 关透镜）。 */
   lensScale?: number;
   /** 柔光倍率覆盖（未传时取 store 的 glowScale；作用于边缘高光宽/alpha）。 */
   glowScale?: number;
@@ -78,9 +85,9 @@ export interface GlassKitViewProps extends ViewProps {
   glowAlphaScale?: number;
   /** it.6 描边宽度倍率（宽 = 1dp × glowScale × 本值，clamp 0.5–8dp）。 */
   glowWidthScale?: number;
-  /** it.6 顶缘高光加强倍率（视图上半描边 alpha 再乘本值）。 */
+  /** it.6 顶缘高光加强倍率（glow 双带；it.13 起降为扩展调试项）。 */
   glowTopScale?: number;
-  /** it.6 底缘高光加强倍率（视图下半描边 alpha 再乘本值）。 */
+  /** it.6 底缘高光加强倍率（glow 双带；it.13 起降为扩展调试项）。 */
   glowBottomScale?: number;
   /** 强制降采样模糊路径（模拟器调试开关；真机默认 false 走 RenderEffect 真高斯）。 */
   forceDownsample?: boolean;
@@ -88,10 +95,31 @@ export interface GlassKitViewProps extends ViewProps {
    *  detach 自动注销），其他玻璃的 backdropTag 指向本视图 handle（findNodeHandle）
    *  即可采集本视图的合成帧——内层再叠一层透镜 = 双重透镜。默认 false。 */
   capturable?: boolean;
-  /** it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38）。绘制顺序在 tint 之后、
-   *  压暗之前——实例库「膜层」的等效物（通透度越低膜越厚）。原生侧绘制，
-   *  不产生 JS 内联 rgba。 */
+  /**
+   * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。
+   * 「膜层」滑块语义改绑 tintScale（SettingsScreenKt.java:1946-1961），
+   * 白膜层引擎代码保留但默认不画；显式传值仍可做 A/B。绘制顺序在 tint 之后、
+   * 压暗之前，原生侧绘制，不产生 JS 内联 rgba。
+   */
   membraneAlpha?: number;
+  /**
+   * it.13 顶缘高光倍率（0–1，默认 0.2）。
+   * 对齐 GlassTuning.java:30 / GlassSurfaceKt.java:710-713：highlightScale>0.01
+   * 时在顶缘画 18dp 竖向渐变 White@(0.22×scale) → Transparent，底缘不画。
+   */
+  highlightScale?: number;
+  /** it.13 色散（整层画三遍）开关，默认 true；关闭时引擎把 dispersion 置 0。 */
+  chromaticEnabled?: boolean;
+  /** it.13 景深开关，默认 true；引擎下发 uDepthEffect（法线叠加径向分量）。 */
+  depthEffect?: boolean;
+  /**
+   * it.13 鲜活度开关，默认 true；saturation=1.5 ColorMatrix
+   * （ColorFilterKt.java:16 / 75-85）。本轮跳过真机取证，默认选风险最低的
+   * GlassLensShader 末矩阵（uVibrancy，仅硬件透镜帧，不改 GPU 模糊链）；
+   * GPU 模糊链 RenderEffect.createColorFilterEffect（API31+）保留为引擎侧
+   * 编译期开关供 A/B。置 false = 运行时可关闭开关，完全关闭鲜活度。
+   */
+  vibrancyEnabled?: boolean;
   /** 模糊总开关（reduceTransparency 时本组件强制传 false）。 */
   blurEnabled?: boolean;
 }
@@ -170,7 +198,11 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         glowBottomScale={props.glowBottomScale ?? 1}
         forceDownsample={props.forceDownsample ?? false}
         capturable={props.capturable ?? false}
-        membraneAlpha={props.membraneAlpha ?? 0.38}
+        membraneAlpha={props.membraneAlpha ?? 0}
+        highlightScale={props.highlightScale ?? 0.2}
+        chromaticEnabled={props.chromaticEnabled ?? true}
+        depthEffect={props.depthEffect ?? true}
+        vibrancyEnabled={props.vibrancyEnabled ?? true}
         ref={ref as Ref<NativeViewInstance>}
       />
     );

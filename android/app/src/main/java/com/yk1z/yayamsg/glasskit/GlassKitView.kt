@@ -5,6 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ColorSpace
 import android.graphics.HardwareRenderer
 import android.media.ImageReader
@@ -84,7 +87,7 @@ import android.view.ViewTreeObserver
  * 超前 RT ≥2 帧 → 双槽采样碰撞。修复 = 真实刺激代数指纹（propGeneration /
  * 背景源 drawGeneration，重满预算）+ 无关交叉触发预算递减至静止 + 回录只在
  * 屏幕帧做 + CPU 槽位升四槽（0/1/2 轮换 + 槽 3 回录专用）；③ membraneAlpha
- * 膜层 prop（tint 后压暗前白色覆盖层，默认 0.38）。
+ * 膜层 prop（tint 后压暗前白色覆盖层，it.9 默认 0.38，it.13 起默认 0，见 ④）。
  * it.10（指示器「透明边缘锯齿」取证修复）：
  * ① 取证结论：指示器视图宽 < MAX_CAPTURE_WIDTH_PX，obtainCaptureBitmap 的超宽
  *   降采样分支天然不触发（capture scale=1 全分辨率）——「GPU 路径 capture 仍
@@ -105,6 +108,25 @@ import android.view.ViewTreeObserver
  *   snapshot（快照分辨率/格式）——与屏幕帧 lens input=gpu 交替即差异实锤。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
+ * it.13（SwiftUI 标准连续曲率圆角 + HealthCheckIn 效果开关对齐）：
+ * ① ⑦ 圆角裁剪由 Path.addRoundRect（G1 圆弧）改为 ContinuousRoundRect
+ *   .buildContinuousRoundRect（角部超椭圆 + 平直段），本帧统一指数 n 由
+ *   cornerExponent(w,h,r) 计算一次，同时喂 clipPath 与 AGSL sdContinuous
+ *   （obtainLensShader 下发 uCornerExponent）—— Path/SDF 零点严格重合。
+ *   胶囊 / 正方形命中 n=2 硬守卫 → 严格圆弧，it.12 零回归；GPU 模糊链
+ *   （HardwareRenderer / ImageReader / wrapHardwareBuffer / BitmapShader）完全不动。
+ * ② ⑥ 高光追加顶缘 18dp 竖向渐变（highlightScale>0.01，White@0.22×scale
+ *   → Transparent，仅顶缘），原有 glow 顶/底双带 + 发丝线保留但降为扩展调试。
+ * ③ 三开关最小实现：chromaticEnabled 关闭时 drawLensLayer 把 dispersion 置 0；
+ *   depthEffect 下发 uDepthEffect；vibrancyEnabled 默认走风险最低的
+ *   GlassLensShader 末 saturation=1.5 矩阵（uVibrancy=1，见
+ *   VIBRANCY_SHADER_FALLBACK 决策注释），不触碰 GPU 模糊链 / RenderEffect /
+ *   propGeneration；GPU ColorFilterEffect 路径保留为编译期开关供真机 A/B。
+ *   四新 prop 全部走 markPropChanged()，静止期零重绘契约不变。
+ * ④ 膜层语义：membraneAlpha 默认 0.38 → 0（「膜层」滑块改绑 tintScale），
+ *   白膜层绘制代码保留但默认不画；H1 tint≤0.12 钳制一行未动。
+ * ⑤ 软画布快照回录帧不创建 RuntimeShader、不下发任何新 uniform，
+ *   保持原模糊降级（it.8-fix1 教训）。
  */
 class GlassKitView(context: Context) : View(context) {
 
@@ -217,6 +239,35 @@ class GlassKitView(context: Context) : View(context) {
 
         /** it.7 轮廓发丝线 alpha 上限（调研口径：极细 1px 亮线 ≤0.18 界定边缘）。 */
         const val GLOW_HAIRLINE_ALPHA: Float = 0.18f
+
+        /** it.13 顶缘高光渐变深度（dp）：GlassSurfaceKt.java:713 verticalGradient endY=18.dp。 */
+        const val TOP_HIGHLIGHT_DP: Float = 18f
+        /** it.13 顶缘高光起始 alpha 系数：GlassSurfaceKt.java:713 的 0.22f × highlightScale。 */
+        const val TOP_HIGHLIGHT_ALPHA: Float = 0.22f
+        /**
+         * it.13 鲜活度默认路径决策（主理人新指令：跳过真机取证，遇到「必须
+         * 真机 A/B 才能二选一」的分支一律选风险最低的默认路径 + 可关闭开关）。
+         *
+         * 【所选默认路径】true = GlassLensShader 末的 saturation=1.5 矩阵
+         * （uVibrancy=1，仅 API33+ 硬件透镜帧生效）。理由：
+         *  ① 不触碰 GPU 模糊链 / RenderEffect / Effect 缓存键 / propGeneration，
+         *     GPU ColorFilterEffect 整段代码在默认配置下不执行 —— 零 it.9
+         *     纱窗感 / 闪烁回归面（原 GPU 路径的回归风险恰恰需要真机 A/B 才能排除，
+         *     本轮不做取证，故不作为默认）；
+         *  ② uniform 默认 0：软画布快照回录帧 / API<33 不下发 uVibrancy，
+         *     逐位等价 it.12、不抛异常（it.8-fix1 教训）；
+         *  ③ 运行时可关闭开关 = vibrancyEnabled prop（默认 true，三开关之一），
+         *     置 false 即完全关闭鲜活度（uVibrancy=0、ColorFilter 亦不挂）。
+         *
+         * 【保留的备选路径】改为 false = 原 GPU 模糊链 RenderEffect
+         * .createColorFilterEffect（API31+，ColorFilterKt.java 语义）。本常量即
+         * 编译期 A/B 开关，供用户真机肉眼验收 / 后续取证时切换，本轮不启用。
+         * 两路互斥，不会双重饱和。
+         *
+         * 【已知代价（非回归）】默认路径下鲜活度仅在 API33+ 硬件透镜帧生效，
+         * 软画布回录降级帧 / API31–32 无鲜活度；需要全帧鲜活度时切 false。
+         */
+        const val VIBRANCY_SHADER_FALLBACK: Boolean = true
     }
 
     /* ---------------- props（GlassKitManager @ReactProp 一一对应） ---------------- */
@@ -396,16 +447,52 @@ class GlassKitView(context: Context) : View(context) {
         }
 
     /**
-     * it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38）。绘制顺序在 ③tint 之后、
-     * ④压暗之前——实例库「膜层」的等效物（通透度越低膜越厚；参考库
-     * LiquidGlass.kt:230 tintAlpha=(1-transparency) 同构，此处按任务书口径
-     * 以独立白色层表达，不影响 H1 tint 钳制契约）。
+     * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。绘制顺序在 ③tint 之后、
+     * ④压暗之前。⚠️ 语义变更：HealthCheckIn 的「膜层」滑块字段是 tintScale
+     * （SettingsScreenKt.java:1946-1961），本白膜层 Kotlin 无对应 → 默认不画，
+     * 代码保留供 A/B。H1 tint≤0.12 契约不受影响。
      */
-    var membraneAlpha: Float = 0.38f
+    var membraneAlpha: Float = 0f
         set(value) {
-            val v = if (value.isFinite()) value.coerceIn(0f, 1f) else 0.38f
+            val v = if (value.isFinite()) value.coerceIn(0f, 1f) else 0f
             if (field == v) return
             field = v
+            markPropChanged()
+        }
+
+    /**
+     * it.13 顶缘高光倍率（0–1，默认 0.2f；GlassTuning.java:30）。
+     * ⑥.0 阶段按 0.22×本值 画 18dp 竖向渐变（GlassSurfaceKt.java:710-713）。
+     */
+    var highlightScale: Float = 0.2f
+        set(value) {
+            val v = if (value.isFinite()) value.coerceIn(0f, 1f) else 0.2f
+            if (field == v) return
+            field = v
+            markPropChanged()
+        }
+
+    /** it.13 色散（整层画三遍）开关，默认 true（GlassTuning.java:33）。 */
+    var chromaticEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            markPropChanged()
+        }
+
+    /** it.13 景深开关，默认 true（GlassTuning.java:36 / ShadersKt.java depthEffect）。 */
+    var depthEffect: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            markPropChanged()
+        }
+
+    /** it.13 鲜活度开关，默认 true（GlassTuning.java:39 / ColorFilterKt.java:16）。 */
+    var vibrancyEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
             markPropChanged()
         }
 
@@ -446,6 +533,8 @@ class GlassKitView(context: Context) : View(context) {
 
     /** 分支切换防刷屏：记录上一条日志的路径标签，同路径不重复打（RenderEffect 新建除外）。 */
     private var lastLoggedBlurPath: String? = null
+    /** it.13 三开关 + 连续曲率指数 A/B 取证日志去重键（logcat -s GlassKitBlur）。 */
+    private var loggedEffectFlags: String? = null
 
     /** 一次性 prop 快照日志：首个 onDraw 打一条，核对桥接层实际到手的 prop 值。 */
     private var loggedPropsSnapshot: Boolean = false
@@ -494,8 +583,32 @@ class GlassKitView(context: Context) : View(context) {
     private val glowPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
     }
+    /** it.13 顶缘高光渐变专用 Paint（shader 每次 draw 重设，与 glowPaint 隔离）。 */
+    private val topHighlightPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        alpha = 255
+    }
+    /**
+     * it.13 鲜活度：saturation=1.5 ColorMatrix（ColorFilterKt.java:16 / 75-85
+     * colorControls(brightness=0, contrast=1, saturation=1.5) 实算）。
+     * invSat=-0.5 ⇒ r=-0.1065 / g=-0.3575 / b=-0.036 / cs=1.5：
+     * [1.3935,-0.3575,-0.036; -0.1065,1.1425,-0.036; -0.1065,-0.3575,1.464]。
+     * 惰性构造一次，GPU 备选路径（VIBRANCY_SHADER_FALLBACK=false）的模糊链与
+     * 清晰折射帧共用（API31+ 门控）；默认 shader 矩阵路径下不触发构造。
+     */
+    private val vibrancyColorFilter: ColorFilter by lazy {
+        ColorMatrixColorFilter(
+            ColorMatrix(
+                floatArrayOf(
+                    1.3935f, -0.3575f, -0.036f, 0f, 0f,
+                    -0.1065f, 1.1425f, -0.036f, 0f, 0f,
+                    -0.1065f, -0.3575f, 1.464f, 0f, 0f,
+                    0f, 0f, 0f, 1f, 0f,
+                ),
+            ),
+        )
+    }
     private val clipPath: Path = Path()
-    private val clipRect: RectF = RectF()
 
     /** 背景目标视图（弱注册表解析结果，附 PreDraw 监听）。 */
     private var targetView: View? = null
@@ -596,11 +709,15 @@ class GlassKitView(context: Context) : View(context) {
     private var gpuReaderHeight: Int = -1
     /** 已包装硬件位图保留环（Image+Bitmap 配对，逐出即 close 归还缓冲）。 */
     private val gpuImageRing = ArrayList<Image>(GPU_IMAGE_RETAIN + 1)
-    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸不变复用）。 */
+    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸/vibrancy 不变复用）。 */
     private var gpuBlurEffect: RenderEffect? = null
     private var gpuBlurSigma: Float = -1f
     private var gpuEffectWidth: Int = -1
     private var gpuEffectHeight: Int = -1
+    /** it.13：缓存键补 vibrancy 开关（A/B 切换时强制重建 Effect）。 */
+    private var gpuBlurVibrancy: Boolean = false
+    /** it.13：清晰折射帧（blurRadiusPx<0.5）单独挂的 ColorFilterEffect 缓存。 */
+    private var gpuVibrancyOnlyEffect: RenderEffect? = null
     /** 当前帧 GPU 输出的 BitmapShader（硬件位图实例逐帧更换，随换重建）。 */
     private var gpuInputShader: BitmapShader? = null
     private var gpuInputShaderBitmap: Bitmap? = null
@@ -610,6 +727,8 @@ class GlassKitView(context: Context) : View(context) {
     private var blurEffectRadiusPx: Float = -1f
     private var blurEffectWidth: Int = -1
     private var blurEffectHeight: Int = -1
+    /** it.13：缓存键补 vibrancy 开关（A/B 切换时强制重建 Effect）。 */
+    private var blurEffectVibrancy: Boolean = false
 
     /** API 33+ 透镜 RuntimeShader 缓存（源码静态，惰性创建；uBlurred / uniform 每次 draw 重设）。 */
     private var lensRuntimeShader: RuntimeShader? = null
@@ -936,6 +1055,7 @@ class GlassKitView(context: Context) : View(context) {
         blurEffectRadiusPx = -1f
         blurEffectWidth = -1
         blurEffectHeight = -1
+        blurEffectVibrancy = false
     }
 
     /* ---------------- 渲染管线 ---------------- */
@@ -1044,6 +1164,8 @@ class GlassKitView(context: Context) : View(context) {
                     " tintColor=$tintColor tintScale=$tintScale lensScale=$lensScale" +
                     " refractionPx=$refractionPx dispersionPx=$dispersionPx" +
                     " cornerRadiusDp=$cornerRadiusDp dimmingAlpha=$dimmingAlpha" +
+                    " membraneAlpha=$membraneAlpha highlightScale=$highlightScale" +
+                    " chromatic=$chromaticEnabled depth=$depthEffect vibrancy=$vibrancyEnabled" +
                     " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height",
             )
         }
@@ -1062,10 +1184,16 @@ class GlassKitView(context: Context) : View(context) {
         //（胶囊无模糊/折射/透镜的根因）。钳到 min(w,h)/2 即标准胶囊语义，与 Skia
         // clip 路径自带的钳制行为对齐；普通面板半径小于半尺寸，钳制零影响。
         val cornerRadiusPx = minOf(cornerRadiusDp * density, minOf(w, h) / 2f)
+        // it.13：本帧统一超椭圆指数（Path 与 AGSL SDF 共用，一次计算全帧复用）。
+        // 胶囊 / 正方形命中 cornerExponent 的 n=2 硬守卫 → 严格圆弧，it.12 零回归；
+        // 容器面板 r=24（GlassShape.container）→ n≈4，G2 连续曲率。
+        val cornerExponentN = ContinuousRoundRect.cornerExponent(
+            w.toFloat(), h.toFloat(), cornerRadiusPx,
+        )
         if (cornerRadiusPx > 0f) {
-            clipRect.set(0f, 0f, w.toFloat(), h.toFloat())
-            clipPath.reset()
-            clipPath.addRoundRect(clipRect, cornerRadiusPx, cornerRadiusPx, Path.Direction.CW)
+            ContinuousRoundRect.buildContinuousRoundRect(
+                clipPath, w.toFloat(), h.toFloat(), cornerRadiusPx, cornerExponentN,
+            )
             canvas.clipPath(clipPath)
         }
 
@@ -1113,7 +1241,9 @@ class GlassKitView(context: Context) : View(context) {
             if (lensActive && canvas.isHardwareAccelerated) {
                 // it.4-R2：透镜输入真模糊化——固定 1/4 降采样 + 小图 CPU box blur ×3
                 //（it.3 的自适应降采样近似已废弃为锯齿源，见类头注释）
-                drawLensLayer(canvas, capture, w, h, cornerRadiusPx, blurRadiusPx)
+                drawLensLayer(
+                    canvas, capture, w, h, cornerRadiusPx, blurRadiusPx, cornerExponentN,
+                )
             } else if (blurRadiusPx >= 0.5f) {
                 drawBlurredLayer(canvas, capture, blurRadiusPx)
             } else {
@@ -1149,6 +1279,27 @@ class GlassKitView(context: Context) : View(context) {
             dimmingPaint.color = Color.BLACK
             dimmingPaint.alpha = Math.round(dimmingAlpha.coerceIn(0f, 1f) * 255f)
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), dimmingPaint)
+        }
+
+        // ⑥.0 it.13 顶缘高光 18dp 渐变（HealthCheckIn GlassSurfaceKt.java:710-713）：
+        // highlightScale>0.01 时画竖向 [White@(0.22×scale), Transparent]，
+        // endY = 18dp×density，仅顶缘（底缘不画）。默认 0.2 ⇒ 起始 alpha 0.044。
+        // 原有 glow 顶/底双带 + 发丝线（⑥）保留但降为「扩展调试」语义，引擎代码不删。
+        if (highlightScale > 0.01f) {
+            val topAlpha = (TOP_HIGHLIGHT_ALPHA * highlightScale).coerceIn(0f, 1f)
+            // floor 取整：保证 alpha 严格不超过契约值（同 tint / 描边 S1 口径）
+            val topColor = (floor(topAlpha * 255f).toInt() shl 24) or 0x00FFFFFF
+            val gradientEndY = TOP_HIGHLIGHT_DP * density
+            topHighlightPaint.shader = LinearGradient(
+                0f, 0f, 0f, gradientEndY,
+                intArrayOf(topColor, Color.TRANSPARENT),
+                floatArrayOf(0f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+            canvas.drawRect(
+                0f, 0f, w.toFloat(), minOf(gradientEndY, h.toFloat()), topHighlightPaint,
+            )
+            topHighlightPaint.shader = null
         }
 
         // ⑥ 边缘高光（it.7 重做）：调研来源——Apple Liquid Glass 边缘高光是
@@ -1332,13 +1483,24 @@ class GlassKitView(context: Context) : View(context) {
         h: Int,
         cornerRadiusPx: Float,
         blurRadiusPx: Float,
+        cornerExponentN: Float,
     ) {
         val lensShaderInput = obtainLensInputShader(w, h, capture, blurRadiusPx)
-        val shader = obtainLensShader(lensShaderInput, w, h, cornerRadiusPx) ?: return
+        val shader = obtainLensShader(lensShaderInput, w, h, cornerRadiusPx, cornerExponentN) ?: return
         val refraction = refractionPx * lensScale
-        val dispersion = dispersionPx * lensScale
+        // it.13 色散开关：关闭时置 0 → dispFade 分母 max(0,1)=1，三通道采样点
+        // 自动重合（shader 主体不动，零彩边）；lensActive 判定仍用原始 prop，
+        // 不影响采集全分辨率语义。
+        val dispersion = if (chromaticEnabled) dispersionPx * lensScale else 0f
         shader.setFloatUniform("uRefractionPx", refraction)
         shader.setFloatUniform("uDispersionPx", dispersion)
+        // it.13 效果开关 A/B 取证（仅硬件路径，切换/首帧各一条，防刷屏）
+        val flags = "chromatic=$chromaticEnabled depth=$depthEffect" +
+            " vibrancy=$vibrancyEnabled n=$cornerExponentN"
+        if (loggedEffectFlags != flags) {
+            loggedEffectFlags = flags
+            Log.i(logTag, "lens effect flags: view=$id $flags")
+        }
         lensPaint.shader = shader
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), lensPaint)
     }
@@ -1498,8 +1660,12 @@ class GlassKitView(context: Context) : View(context) {
             val sigma = (blurRadiusPx * captureScaleX).coerceAtLeast(0.5f)
             node.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
         } else {
-            // blurScale≈0（清晰折射）：不挂 Effect，仅借离屏链路产独立硬件缓冲
-            node.setRenderEffect(null)
+            // blurScale≈0（清晰折射）：不挂 BlurEffect，仅借离屏链路产独立硬件缓冲；
+            // it.13 默认 shader 矩阵路径下此处返回 null（等价 it.12 的
+            // setRenderEffect(null)），鲜活度由 drawLensLayer 的 RuntimeShader
+            // uVibrancy=1 承担；切 VIBRANCY_SHADER_FALLBACK=false 时才单独挂
+            // ColorFilterEffect（不引入任何模糊）。
+            node.setRenderEffect(obtainGpuVibrancyOnlyEffect())
         }
         val recordingCanvas = node.beginRecording()
         try {
@@ -1610,17 +1776,50 @@ class GlassKitView(context: Context) : View(context) {
         return node
     }
 
-    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸不变复用；EdgeMode=CLAMP 不引入透明衰减）。 */
+    /** GPU 高斯 RenderEffect 缓存（sigma/尺寸/vibrancy 不变复用；CLAMP 不引入透明衰减）。 */
     private fun obtainGpuBlurEffect(sigma: Float, width: Int, height: Int): RenderEffect {
         val cached = gpuBlurEffect
-        if (cached != null && gpuBlurSigma == sigma && gpuEffectWidth == width && gpuEffectHeight == height) {
+        val useVibrancy = vibrancyEnabled && !VIBRANCY_SHADER_FALLBACK
+        if (cached != null && gpuBlurSigma == sigma && gpuEffectWidth == width &&
+            gpuEffectHeight == height && gpuBlurVibrancy == useVibrancy
+        ) {
             return cached
         }
-        val effect = RenderEffect.createBlurEffect(sigma, sigma, Shader.TileMode.CLAMP)
+        val blur = RenderEffect.createBlurEffect(sigma, sigma, Shader.TileMode.CLAMP)
+        // it.13 鲜活度 GPU 备选路径（VIBRANCY_SHADER_FALLBACK=false 才生效）：
+        // 模糊链上叠 saturation=1.5 ColorFilter（API31+，挂 canBlur 门控；
+        // 矩阵出处 ColorFilterKt.java:16 / 75-85）。默认 shader 矩阵路径下
+        // useVibrancy 恒 false，此处直接返回纯 blur，GPU 模糊链逐位等价 it.12。
+        val effect = if (useVibrancy) {
+            RenderEffect.createColorFilterEffect(vibrancyColorFilter, blur)
+        } else {
+            blur
+        }
         gpuBlurEffect = effect
         gpuBlurSigma = sigma
         gpuEffectWidth = width
         gpuEffectHeight = height
+        gpuBlurVibrancy = useVibrancy
+        return effect
+    }
+
+    /**
+     * it.13 清晰折射帧（blurRadiusPx<0.5）单独施加 saturation=1.5 —— 仅
+     * VIBRANCY_SHADER_FALLBACK=false 的 GPU 备选路径使用。不挂 BlurEffect，
+     * 避免把「清晰折射」变成模糊；开关关 / 默认 shader 矩阵路径 / API<31 时
+     * 返回 null（与 it.12 的 setRenderEffect(null) 逐位等价）。
+     */
+    private fun obtainGpuVibrancyOnlyEffect(): RenderEffect? {
+        if (!vibrancyEnabled || VIBRANCY_SHADER_FALLBACK ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        ) {
+            return null
+        }
+        var effect = gpuVibrancyOnlyEffect
+        if (effect == null) {
+            effect = RenderEffect.createColorFilterEffect(vibrancyColorFilter)
+            gpuVibrancyOnlyEffect = effect
+        }
         return effect
     }
 
@@ -1640,6 +1839,8 @@ class GlassKitView(context: Context) : View(context) {
         gpuBlurSigma = -1f
         gpuEffectWidth = -1
         gpuEffectHeight = -1
+        gpuBlurVibrancy = false
+        gpuVibrancyOnlyEffect = null
         gpuNode = null
         gpuRenderer?.let { renderer ->
             try {
@@ -1875,20 +2076,31 @@ class GlassKitView(context: Context) : View(context) {
      */
     private fun obtainBlurEffect(radiusPx: Float, w: Int, h: Int): RenderEffect {
         val cached = blurEffect
+        val useVibrancy = vibrancyEnabled && !VIBRANCY_SHADER_FALLBACK
         if (cached != null &&
             blurEffectRadiusPx == radiusPx &&
             blurEffectWidth == w &&
-            blurEffectHeight == h
+            blurEffectHeight == h &&
+            blurEffectVibrancy == useVibrancy
         ) {
             return cached
         }
-        val effect = RenderEffect.createBlurEffect(radiusPx, radiusPx, Shader.TileMode.CLAMP)
+        val blur = RenderEffect.createBlurEffect(radiusPx, radiusPx, Shader.TileMode.CLAMP)
+        // it.13 鲜活度 GPU 备选路径（VIBRANCY_SHADER_FALLBACK=false 才生效）：
+        // 纯模糊路径（无透镜面板 / 软画布降级帧）同样叠 saturation=1.5；
+        // 默认 shader 矩阵路径下 useVibrancy 恒 false，保持纯 blur 逐位等价 it.12。
+        val effect = if (useVibrancy) {
+            RenderEffect.createColorFilterEffect(vibrancyColorFilter, blur)
+        } else {
+            blur
+        }
         blurEffect = effect
         blurEffectRadiusPx = radiusPx
         blurEffectWidth = w
         blurEffectHeight = h
+        blurEffectVibrancy = useVibrancy
         // 诊断日志：仅 RenderEffect 新建时打一条（缓存命中静默，防每帧刷屏）
-        Log.i(logTag, "RenderEffect created radiusPx=$radiusPx size=${w}x$h")
+        Log.i(logTag, "RenderEffect created radiusPx=$radiusPx size=${w}x$h vibrancy=$useVibrancy")
         return effect
     }
 
@@ -1903,6 +2115,7 @@ class GlassKitView(context: Context) : View(context) {
         w: Int,
         h: Int,
         cornerRadiusPx: Float,
+        cornerExponentN: Float,
     ): RuntimeShader? {
         if (bitmapShader == null) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
@@ -1914,6 +2127,18 @@ class GlassKitView(context: Context) : View(context) {
         shader.setInputShader("uBlurred", bitmapShader)
         shader.setFloatUniform("uSize", w.toFloat(), h.toFloat())
         shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)
+        // it.13：新增 uniform 只在硬件画布的 drawLensLayer 里下发。软画布快照回录
+        // 帧走 drawBlurredLayer 降级，不进本方法 —— uniform 未下发时 AGSL 内部
+        // n=max(uCornerExponent,2.0) 兜底为圆弧、uVibrancy=0 跳过矩阵分支，
+        // 逐位等价 it.12、不抛异常（it.8-fix1 教训）。
+        shader.setFloatUniform("uCornerExponent", cornerExponentN)
+        shader.setFloatUniform("uDepthEffect", if (depthEffect) 1f else 0f)
+        // 默认路径（VIBRANCY_SHADER_FALLBACK=true）：鲜活度由 shader 末矩阵承担；
+        // 运行时开关 vibrancyEnabled=false 时下发 0，完全关闭鲜活度。
+        shader.setFloatUniform(
+            "uVibrancy",
+            if (vibrancyEnabled && VIBRANCY_SHADER_FALLBACK) 1f else 0f,
+        )
         return shader
     }
 }

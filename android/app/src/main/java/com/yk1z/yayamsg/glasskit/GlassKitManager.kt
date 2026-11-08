@@ -11,9 +11,20 @@ import com.facebook.react.uimanager.annotations.ReactProp
  *
  * props 与 src/native/GlassKitView.tsx 一一对应：
  * blurDp / tintAlpha / tintColor / refractionPx / dispersionPx / cornerRadiusDp /
- * dimmingAlpha / backdropTag / blurScale / tintScale / lensScale / blurEnabled。
+ * dimmingAlpha / backdropTag / blurScale / tintScale / lensScale / blurEnabled /
+ * glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
+ * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled。
  * 所有 setter 对 JS 空值做兜底（default* 注解 + null 合并），倍率默认 1f，
  * blurEnabled 默认 true（H2 语义：能力门控在 JS 侧 canBlur/canLens 收口）。
+ *
+ * it.13 新增五个对齐项 prop（HealthCheckIn GlassTuning / SettingsScreen 规格）：
+ * - highlightScale（顶缘高光 0–1，默认 0.2f）
+ * - chromaticEnabled（色散开关，默认 true）
+ * - depthEffect（景深开关，默认 true）
+ * - vibrancyEnabled（鲜活度开关，默认 true）
+ * - membraneAlpha 默认 0.38 → 0f（「膜层」语义改绑 tintScale，白膜层引擎
+ *   代码保留但默认不画；测试页不再提供「膜层浓度」滑块）
+ * 四个新 prop 的视图侧 setter 一律走 markPropChanged()（it.9 闪烁契约）。
  */
 class GlassKitManager : SimpleViewManager<GlassKitView>() {
 
@@ -79,20 +90,20 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.backdropTag = value
     }
 
-    /** 模糊倍率（JS store 已按 0–2.5 钳制）。 */
-    @ReactProp(name = "blurScale", defaultFloat = 1f)
+    /** 模糊倍率（JS store 已按 0.2–3.0 钳制，it.13 对齐 GlassTuning.java:21）。 */
+    @ReactProp(name = "blurScale", defaultFloat = 0.2f)
     fun setBlurScale(view: GlassKitView, value: Float) {
         view.blurScale = value
     }
 
-    /** tint 倍率（JS store 已按 0–3 钳制）。 */
-    @ReactProp(name = "tintScale", defaultFloat = 1f)
+    /** tint / 膜层倍率（JS store 已按 0–2 钳制，it.13 对齐 GlassTuning.java:27）。 */
+    @ReactProp(name = "tintScale", defaultFloat = 2f)
     fun setTintScale(view: GlassKitView, value: Float) {
         view.tintScale = value
     }
 
-    /** 透镜倍率（JS store 已按 0–2 钳制；0 = 关透镜）。 */
-    @ReactProp(name = "lensScale", defaultFloat = 1f)
+    /** 透镜 / 折射倍率（JS store 已按 0–3 钳制，it.13 对齐 GlassTuning.java:24）。 */
+    @ReactProp(name = "lensScale", defaultFloat = 3f)
     fun setLensScale(view: GlassKitView, value: Float) {
         view.lensScale = value
     }
@@ -121,13 +132,13 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.glowWidthScale = value
     }
 
-    /** it.6 柔光细化：顶缘高光加强倍率。 */
+    /** it.6 柔光细化：顶缘高光加强倍率（glow 双带，it.13 起降为扩展调试项）。 */
     @ReactProp(name = "glowTopScale", defaultFloat = 1f)
     fun setGlowTopScale(view: GlassKitView, value: Float) {
         view.glowTopScale = value
     }
 
-    /** it.6 柔光细化：底缘高光加强倍率。 */
+    /** it.6 柔光细化：底缘高光加强倍率（glow 双带，it.13 起降为扩展调试项）。 */
     @ReactProp(name = "glowBottomScale", defaultFloat = 1f)
     fun setGlowBottomScale(view: GlassKitView, value: Float) {
         view.glowBottomScale = value
@@ -145,10 +156,38 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.capturable = value
     }
 
-    /** it.9 膜层：白色覆盖层 alpha（0–1，默认 0.38；tint 后压暗前）。 */
-    @ReactProp(name = "membraneAlpha", defaultFloat = 0.38f)
+    /**
+     * it.13 膜层：白色覆盖层 alpha（0–1，默认 **0**）。
+     * 「膜层」滑块语义已改绑 tintScale（SettingsScreenKt.java:1946-1961），
+     * 白膜层引擎代码保留但默认不画；仍允许显式传值做 A/B（绘制顺序：tint 后、压暗前）。
+     */
+    @ReactProp(name = "membraneAlpha", defaultFloat = 0f)
     fun setMembraneAlpha(view: GlassKitView, value: Float) {
         view.membraneAlpha = value
+    }
+
+    /** it.13 顶缘高光倍率（0–1，默认 0.2f；GlassTuning.java:30 / GlassSurfaceKt.java:710-713）。 */
+    @ReactProp(name = "highlightScale", defaultFloat = 0.2f)
+    fun setHighlightScale(view: GlassKitView, value: Float) {
+        view.highlightScale = value
+    }
+
+    /** it.13 色散（整层画三遍）开关，默认 true（GlassTuning.java:33）。 */
+    @ReactProp(name = "chromaticEnabled", defaultBoolean = true)
+    fun setChromaticEnabled(view: GlassKitView, value: Boolean) {
+        view.chromaticEnabled = value
+    }
+
+    /** it.13 景深开关，默认 true（GlassTuning.java:36 / ShadersKt.java depthEffect）。 */
+    @ReactProp(name = "depthEffect", defaultBoolean = true)
+    fun setDepthEffect(view: GlassKitView, value: Boolean) {
+        view.depthEffect = value
+    }
+
+    /** it.13 鲜活度开关，默认 true（GlassTuning.java:39 / ColorFilterKt.java:16）。 */
+    @ReactProp(name = "vibrancyEnabled", defaultBoolean = true)
+    fun setVibrancyEnabled(view: GlassKitView, value: Boolean) {
+        view.vibrancyEnabled = value
     }
 
     override fun onDropViewInstance(view: GlassKitView) {

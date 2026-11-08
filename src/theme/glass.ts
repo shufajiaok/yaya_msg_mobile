@@ -59,17 +59,27 @@ export interface ScaleRange {
 }
 
 /**
- * ② 四倍率区间（照抄 04 §2.4 GlassSettings.kt）。
- * glowScale 依据 04 §2.7 X4「滑块下限应设 >0」收口为 0.05：登记的滑块区间仍为 0–2，
- * 但可写下限 >0，避免柔光三团 alpha 全灭、背景变纯色而触发铁律③ 反例。
+ * ② 四倍率区间（04 §2.4 GlassSettings.kt；it.13 起三个对齐项改照抄用户真实 app
+ * HealthCheckIn 反编译规格）。
  *
- * it.5：default 固化为用户真机验收拍板的调参结果（仍可经滑块实时调节）：
- * blur 0.10 / tint 1.00 / lens 2.00 / glow 1.75。
+ * it.13 滑块数值完全对齐（SettingsScreenKt.java:1905-2094 / GlassTuning.java:21-30）：
+ * - blurScale「模糊」     0.2–3.0，默认 0.2  （:1906 rangeTo(0.2,3.0) / :21 0.2f）
+ * - lensScale「折射」     0–3，   默认 3.0  （:1923 rangeTo(0,3)   / :24 3.0f）
+ * - tintScale「膜层」     0–2，   默认 2.0  （:1947 rangeTo(0,2)   / :27 2.0f）
+ * ⚠️ 「膜层」标签的字段是 tintScale，不是原生 membraneAlpha（后者默认归 0）。
+ * ⚠️ H1 tint≤0.12 契约不动：Q1 修正口径，tintAlpha 基准 0.06（不再按 0.5
+ *   比例因子折算 0.05），tintScale 0–2 / 默认 2.0 ⇒ 0.06×2.0=0.12 正好用满
+ *   H1 上界；native coerceIn(0,0.12)、0.12 常量、floor 一字不动，app 侧
+ *   resolveTintAlpha 仍以 TINT_ALPHA_MAX 兜底。滑块区间本身完全对齐。
+ *   颜色继续用 panelTintFor(scheme) 亮 #FFFFFF / 暗 #1B242B。
+ * - glowScale 属「Kotlin 无对应的扩展调试项」，区间 / 默认保持 it.5 值不变
+ *   （04 §2.7 X4 下限 >0，避免柔光三团 alpha 全灭触发铁律③ 反例）。
+ * 滑块连续无 steps，数值统一显示两位小数（GlassTestScreen SliderRow toFixed(2)）。
  */
 export const SCALE_RANGES: Record<GlassScaleKey, ScaleRange> = {
-  blurScale: { min: 0, max: 2.5, default: 0.1 },
-  tintScale: { min: 0, max: 3, default: 1 },
-  lensScale: { min: 0, max: 2, default: 2 },
+  blurScale: { min: 0.2, max: 3.0, default: 0.2 },
+  tintScale: { min: 0, max: 2, default: 2.0 },
+  lensScale: { min: 0, max: 3, default: 3.0 },
   glowScale: { min: 0.05, max: 2, default: 1.75 },
 } as const;
 
@@ -110,8 +120,13 @@ export const BLUR_DP_BY_KIND: Record<GlassKind, number> = {
 
 /** H1 上界：任何 tint 计算最后一步必须过此值（03 §3.5 H1 / 04 §2.7 X2） */
 export const TINT_ALPHA_MAX = 0.12;
-/** ④ tintAlpha 基准 0.10（铁律①） */
-export const TINT_ALPHA_BASE = 0.10;
+/**
+ * ④ tintAlpha 基准（铁律①）。it.13 Q1 修正口径：0.10 → **0.06**，
+ * 使 tintScale 默认 2.0 时 0.06×2.0=0.12 正好用满 H1（未经 coerceIn 截断），
+ * 且 0–2 全区间线性有效（旧 0.10 在 tintScale≥1.2 即触顶、滑块后半段失效）。
+ * 与测试页透传给 native 的 tintAlpha={0.06} 同源，全项目单一基准。
+ */
+export const TINT_ALPHA_BASE = 0.06;
 
 /** ④ 单层 1dp / #FFF @0.14 边缘高光（04 §2.3 GlassKit L88-90；无三层渐变 / 无 12dp 白雾） */
 export interface EdgeHighlight {
@@ -265,7 +280,7 @@ export const useGlassStore = create<GlassState>()(
           lensScale: patch.lensScale === undefined ? state.lensScale : clampScale('lensScale', patch.lensScale),
           glowScale: patch.glowScale === undefined ? state.glowScale : clampScale('glowScale', patch.glowScale),
         })),
-      /** 四倍率回到默认值（it.5 固化：blur 0.10 / tint 1.00 / lens 2.00 / glow 1.75） */
+      /** 四倍率回到默认值（it.13：blur 0.20 / tint 2.00 / lens 3.00 / glow 1.75） */
       reset: () => set({ ...DEFAULT_SCALES, activeReasons: [] }),
     }),
     {
@@ -279,11 +294,13 @@ export const useGlassStore = create<GlassState>()(
         glowScale: state.glowScale,
       }),
       /**
-       * it.5：v0（无版本，default 全 1 时代的散存值）→ v1。
-       * 四倍率 default 已固化为真机验收拍板值，旧持久化值与新基线不符时
-       * 一次性覆盖为新 default（用户指令「设为默认值」），此后照常随滑块持久化。
+       * it.13：v1（it.5 基线 blur 0.10 / tint 1.00 / lens 2.00）→ v2。
+       * 三个对齐项区间 / 默认值已变为 HealthCheckIn 规格，旧持久化的 tint=1、
+       * lens=2 仍落在新区间内（clampScale 不会纠正），必须 bump 版本让 migrate
+       * 一次性覆盖为新 default；blur=0.10 也会被新 min 0.2 钳制，同样需要覆盖。
+       * 此后照常随滑块持久化（用户调过的值不再被 migrate 重置）。
        */
-      version: 1,
+      version: 2,
       migrate: () => ({ ...DEFAULT_SCALES }),
     },
   ),
@@ -301,7 +318,9 @@ export const useGlassStore = create<GlassState>()(
 
 /**
  * H1：任何 tint 计算的最后一步必须过上界 TINT_ALPHA_MAX = 0.12（等价于 Math.min(tintAlpha, 0.12)）。
- * 修 04 §2.7 X2（tintScale 上限 3 时 0.10×3=0.30 未夹上界）与 X1（选中 Chip 0.34）。
+ * 修 04 §2.7 X2（历史 tintScale 上限 3、基准 0.10 时 0.10×3=0.30 未夹上界）
+ * 与 X1（选中 Chip 0.34）；it.13 基准 0.06 × 上限 2.0 = 0.12 正好触上界，
+ * 仍由本函数 Math.min(..., TINT_ALPHA_MAX) 统一兜底。
  * 本函数是全项目唯一的 tint alpha 出口，禁止在别处再算一遍 tint。
  *
  * S1：baseAlpha 先做 Number.isFinite 兜底，非有限值（NaN / Infinity / -Infinity）回退
