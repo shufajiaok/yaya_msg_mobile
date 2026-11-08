@@ -29,9 +29,11 @@
  * onBarBaseLayout，bar 的 backdropTag 回到 `useBackdropTag()`（App 级采集源）。
  * `GLASS_BAR_SURFACE` 常量保留在 glassProfile.ts 并注明恢复方式。
  *
- * tabs：每 tab flex:1 居中，图标 size 23、label typography.caption2（11sp，守卫 R6
- * 合规）；active 色 palette.tint / 未选中 palette.labelSecondary；active 图标
- * spring pop 保留原实现（motion.spring.bouncy）。
+ * tabs：每 tab flex:1 居中。it.19 按真机库源码（GlassKitKt.java GlassBottomTabs）
+ * 精确对齐：图标 **20dp**、选中 Bold / 未选中 Normal、**删除 it.10 自创的选中
+ * spring pop**（原版零按下反馈）。标签维持 11sp（真值 10sp，但违反「最小 11sp」
+ * 硬规则 02 §4.1）；选中/未选中色维持 palette（真值 #7CA6FF/#9CA8BC，但违反
+ * 守卫 D7「禁止落地 Accent」）—— 两项差异待用户定夺。
  *
  * 降级（!canBlur() || !canLens()）：bar 用半透明实底、指示器退化为半透明实底
  * View，不渲染任何 GlassKitView。实底色值来自 glassProfile.ts（theme 目录豁免
@@ -105,22 +107,10 @@ function TabCell({
   onSelect: () => void;
 }) {
   const palette = usePalette();
-  const pop = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    pop.stopAnimation();
-    if (active) {
-      pop.setValue(0.92);
-      const animation = Animated.spring(pop, {
-        toValue: 1,
-        ...motion.spring.bouncy,
-        useNativeDriver: true,
-      });
-      animation.start();
-      return () => animation.stop();
-    }
-    pop.setValue(1);
-  }, [active, pop]);
+  // it.19：真机色值是 #7CA6FF / #9CA8BC，但守卫硬规则 D7 禁止落地 Accent 色值
+  //（03 §3.1）⇒ 仍走 palette.tint / labelSecondary，色值差异待用户定夺。
+  const activeColor = palette.tint;
+  const inactiveColor = palette.labelSecondary;
 
   return (
     <Pressable
@@ -130,16 +120,22 @@ function TabCell({
       onPress={onSelect}
       style={styles.cell}
     >
-      <Animated.View style={[styles.cellIcon, { transform: [{ scale: pop }] }]}>
-        {item.icon({ color: active ? palette.tint : palette.labelSecondary, size: 23 })}
-      </Animated.View>
+      {/*
+        it.19：删除 it.10 自创的「选中 spring pop」（0.92→1）。
+        原版 tab cell 是 clickable(indication=null)，**零按下反馈、零选中动画**——
+        图标 20dp（只限高）+ 标签 10sp，状态变化只靠颜色。
+      */}
+      <View style={styles.cellIcon}>
+        {item.icon({ color: active ? activeColor : inactiveColor, size: 20 })}
+      </View>
       <Text
         style={[
           typography.caption2,
           styles.cellLabel,
           {
-            color: active ? palette.tint : palette.labelSecondary,
-            fontWeight: active ? '700' : '600',
+            color: active ? activeColor : inactiveColor,
+            // 真值：选中 Bold(700) / 未选中 Normal(400)
+            fontWeight: active ? '700' : '400',
           },
         ]}
       >
@@ -408,7 +404,7 @@ const styles = StyleSheet.create({
   },
   cell: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   cellIcon: { alignItems: 'center', justifyContent: 'center' },
-  cellLabel: { marginTop: 3 },
+  cellLabel: { marginTop: 2 },
 });
 
 // 辅助：复用项目里的 MaterialCommunityIcons（navigation/index.tsx 依赖此签名）。
