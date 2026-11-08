@@ -90,6 +90,12 @@ import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import GlassKitView from '../native/GlassKitView';
 import GlassSlider from '../components/GlassSlider';
 import { canBlur, canLens, SCALE_RANGES, useGlassStore } from '../theme/glass';
+import {
+  GLASS_DEBUG_DEFAULTS,
+  GLASS_EFFECT_DEFAULTS,
+  GLASS_PROFILE,
+  GLASS_SWITCH_DEFAULTS,
+} from '../theme/glassProfile';
 import { radii } from '../theme/radii';
 
 /** 临时首屏开关 companion：见 src/navigation/index.tsx 顶部同名常量（同一布尔口径）。 */
@@ -154,25 +160,29 @@ const TINT_MIN = 0;
 const TINT_MAX = 2;
 const HIGHLIGHT_MIN = 0;
 const HIGHLIGHT_MAX = 1;
-const HIGHLIGHT_DEFAULT = 0.2; // GlassTuning.java:30 highlightScale=0.2f
+/**
+ * it.16：默认值全部引用 GLASS_PROFILE（用户 2026-11-08 指定的 HealthCheckIn 实测配置），
+ * 区间 MIN/MAX 保持 it.13 原值不动。
+ */
+const HIGHLIGHT_DEFAULT = GLASS_PROFILE.highlightScale; // 0.3
 const TOP_BAR_WIDTH_MIN = 0.6;
 const TOP_BAR_WIDTH_MAX = 1.0;
-const TOP_BAR_WIDTH_DEFAULT = 0.8; // GlassTuning.java:42
+const TOP_BAR_WIDTH_DEFAULT = GLASS_PROFILE.topBarWidthScale; // 0.8
 const TOP_BAR_HEIGHT_MIN = 44;
 const TOP_BAR_HEIGHT_MAX = 72;
-const TOP_BAR_HEIGHT_DEFAULT = 60.85; // GlassTuning.java:45
+const TOP_BAR_HEIGHT_DEFAULT = GLASS_PROFILE.topBarHeightDp; // 56.97
 const DOCK_WIDTH_MIN = 0.7;
 const DOCK_WIDTH_MAX = 1.0;
-const DOCK_WIDTH_DEFAULT = 0.9; // GlassTuning.java:48
+const DOCK_WIDTH_DEFAULT = GLASS_PROFILE.dockWidthScale; // 0.81
 const DOCK_HEIGHT_MIN = 56;
 const DOCK_HEIGHT_MAX = 84;
-const DOCK_HEIGHT_DEFAULT = 64.3; // GlassTuning.java:51
+const DOCK_HEIGHT_DEFAULT = GLASS_PROFILE.dockHeightDp; // 56.86
 const DOCK_INNER_PAD_MIN = 0;
 const DOCK_INNER_PAD_MAX = 20;
-const DOCK_INNER_PAD_DEFAULT = 7; // GlassTuning.java:54
+const DOCK_INNER_PAD_DEFAULT = GLASS_PROFILE.dockInnerPadDp; // 5.36
 const DOCK_FLOAT_DP_MIN = 0;
 const DOCK_FLOAT_DP_MAX = 24;
-const DOCK_FLOAT_DP_DEFAULT = 15.3; // GlassTuning.java:57
+const DOCK_FLOAT_DP_DEFAULT = GLASS_PROFILE.dockFloatDp; // 15.3
 
 /** it.9 tint 色（旧架构 Paper 桥接对 customType="Color" 自动 processColor，必须传原始
  *  字符串，禁止调用方预 processColor；真机 logcat + 像素取证实证）。 */
@@ -400,33 +410,41 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const C = THEME_COLORS[scheme];
   const backdropRef = useRef(null);
   const [backdropTag, setBackdropTag] = useState<number | undefined>(undefined);
-  // 三个原调试开关（保留原位不动）
-  const [blurOn, setBlurOn] = useState(true);
-  const [forceDown, setForceDown] = useState(false);
-  const [glassOnGlass, setGlassOnGlass] = useState(true);
+  // 三个原调试开关（it.16：默认值引用 GLASS_SWITCH_DEFAULTS；显式泛型放宽 as const 字面量）
+  const [blurOn, setBlurOn] = useState<boolean>(GLASS_SWITCH_DEFAULTS.blurEnabled);
+  const [forceDown, setForceDown] = useState<boolean>(GLASS_SWITCH_DEFAULTS.forceDownsample);
+  const [glassOnGlass, setGlassOnGlass] = useState<boolean>(
+    GLASS_SWITCH_DEFAULTS.glassOnGlass,
+  );
 
-  // it.13 对齐项 state（10 滑块 + 3 开关，默认值逐字照抄 GlassTuning）
-  const [dockHeight, setDockHeight] = useState(DOCK_HEIGHT_DEFAULT);
-  const [dockWidthMult, setDockWidthMult] = useState(DOCK_WIDTH_DEFAULT);
-  const [topBarWidthScale, setTopBarWidthScale] = useState(TOP_BAR_WIDTH_DEFAULT);
-  const [topBarHeightDp, setTopBarHeightDp] = useState(TOP_BAR_HEIGHT_DEFAULT);
-  const [dockInnerPad, setDockInnerPad] = useState(DOCK_INNER_PAD_DEFAULT);
-  const [dockFloatDp, setDockFloatDp] = useState(DOCK_FLOAT_DP_DEFAULT);
-  const [highlightScale, setHighlightScale] = useState(HIGHLIGHT_DEFAULT);
-  const [chromaticEnabled, setChromaticEnabled] = useState(true);
-  const [depthEffect, setDepthEffect] = useState(true);
-  const [vibrancyEnabled, setVibrancyEnabled] = useState(true);
+  // it.13 对齐项 state（10 滑块 + 3 开关；it.16：默认值引用 GLASS_PROFILE）
+  const [dockHeight, setDockHeight] = useState<number>(DOCK_HEIGHT_DEFAULT);
+  const [dockWidthMult, setDockWidthMult] = useState<number>(DOCK_WIDTH_DEFAULT);
+  const [topBarWidthScale, setTopBarWidthScale] = useState<number>(TOP_BAR_WIDTH_DEFAULT);
+  const [topBarHeightDp, setTopBarHeightDp] = useState<number>(TOP_BAR_HEIGHT_DEFAULT);
+  const [dockInnerPad, setDockInnerPad] = useState<number>(DOCK_INNER_PAD_DEFAULT);
+  const [dockFloatDp, setDockFloatDp] = useState<number>(DOCK_FLOAT_DP_DEFAULT);
+  const [highlightScale, setHighlightScale] = useState<number>(HIGHLIGHT_DEFAULT);
+  const [chromaticEnabled, setChromaticEnabled] = useState<boolean>(
+    GLASS_EFFECT_DEFAULTS.chromaticEnabled,
+  );
+  const [depthEffect, setDepthEffect] = useState<boolean>(GLASS_EFFECT_DEFAULTS.depthEffect);
+  const [vibrancyEnabled, setVibrancyEnabled] = useState<boolean>(
+    GLASS_EFFECT_DEFAULTS.vibrancyEnabled,
+  );
 
-  // it.13 扩展调试（Kotlin 无对应；折叠区）
+  // it.13 扩展调试（Kotlin 无对应；折叠区；it.16：默认值引用 GLASS_DEBUG_DEFAULTS）
   const [debugExpanded, setDebugExpanded] = useState(false);
-  const [dockRadius, setDockRadius] = useState(999); // 真机默认 999 = 真胶囊
-  const [glowAlpha, setGlowAlpha] = useState(1);
-  const [glowWidth, setGlowWidth] = useState(1);
-  const [glowBottom, setGlowBottom] = useState(1);
-  const [dispersionLevel, setDispersionLevel] = useState(0.35);
-  const [radiusScale, setRadiusScale] = useState(1);
-  const [widthScale, setWidthScale] = useState(1);
-  const [heightScale, setHeightScale] = useState(1);
+  const [dockRadius, setDockRadius] = useState<number>(GLASS_DEBUG_DEFAULTS.dockRadiusDp); // 999 = 真胶囊
+  const [glowAlpha, setGlowAlpha] = useState<number>(GLASS_DEBUG_DEFAULTS.glowAlpha);
+  const [glowWidth, setGlowWidth] = useState<number>(GLASS_DEBUG_DEFAULTS.glowWidth);
+  const [glowBottom, setGlowBottom] = useState<number>(GLASS_DEBUG_DEFAULTS.glowBottom);
+  const [dispersionLevel, setDispersionLevel] = useState<number>(
+    GLASS_DEBUG_DEFAULTS.dispersionLevel,
+  );
+  const [radiusScale, setRadiusScale] = useState<number>(GLASS_DEBUG_DEFAULTS.radiusScale);
+  const [widthScale, setWidthScale] = useState<number>(GLASS_DEBUG_DEFAULTS.widthScale);
+  const [heightScale, setHeightScale] = useState<number>(GLASS_DEBUG_DEFAULTS.heightScale);
 
   // it.9 Dock：选中 tab + 容器宽（指示器 translationX 由弹簧驱动）
   const [dockSelected, setDockSelected] = useState(0);
@@ -519,7 +537,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
-          {`${APP_VERSION}-it.15 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.16 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 连续曲率 · 面板可拖动`}

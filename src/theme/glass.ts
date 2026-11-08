@@ -80,7 +80,8 @@ export const SCALE_RANGES: Record<GlassScaleKey, ScaleRange> = {
   blurScale: { min: 0.2, max: 3.0, default: 0.2 },
   tintScale: { min: 0, max: 2, default: 2.0 },
   lensScale: { min: 0, max: 3, default: 3.0 },
-  glowScale: { min: 0.05, max: 2, default: 1.75 },
+  // it.16：glowScale 默认 1.75 → 2.0（用户 2026-11-08 指定配置；区间 0.05–2 不变）
+  glowScale: { min: 0.05, max: 2, default: 2.0 },
 } as const;
 
 /** glowScale 有效下限（X4） */
@@ -299,8 +300,12 @@ export const useGlassStore = create<GlassState>()(
        * lens=2 仍落在新区间内（clampScale 不会纠正），必须 bump 版本让 migrate
        * 一次性覆盖为新 default；blur=0.10 也会被新 min 0.2 钳制，同样需要覆盖。
        * 此后照常随滑块持久化（用户调过的值不再被 migrate 重置）。
+       *
+       * it.16：v2 → v3。glowScale 默认 1.75 → 2.0（用户 2026-11-08 指定配置）；
+       * 旧持久化的 glowScale=1.75 仍落在 0.05–2 区间内，clampScale 不会纠正，
+       * 必须 bump 版本让 migrate 一次性覆盖为新 default。migrate 语义不变。
        */
-      version: 2,
+      version: 3,
       migrate: () => ({ ...DEFAULT_SCALES }),
     },
   ),
