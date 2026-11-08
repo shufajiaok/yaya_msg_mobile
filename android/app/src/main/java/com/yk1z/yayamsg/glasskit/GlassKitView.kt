@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
@@ -44,7 +45,10 @@ import android.view.ViewTreeObserver
  *    非透镜面板走纯模糊路径不变；
  * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
  * 5. 压暗：#000 @ dimmingAlpha；
- * 6. 高光：1dp #FFF @0.14 描边；
+ * 6. 高光（it.7 重做，Apple Liquid Glass 调研口径）：贴轮廓的顶/底窄带
+ *    LinearGradient 多 stop 非线性衰减（边缘最亮、向内快速衰减，陡在边缘平在
+ *    内部；顶部显著亮于底部），取代 it.6 的均匀描边；轮廓另留 1dp 发丝线
+ *    （alpha ≤ 0.18）界定边缘；
  * 7. 裁剪：圆角矩形 Path clip。
  *
  * 重绘触发：背景视图挂 OnPreDrawListener（返回 true 不拦截绘制），33ms 节流
@@ -118,6 +122,29 @@ class GlassKitView(context: Context) : View(context) {
          */
         /** drawBlurredLayer 诊断日志 tag（logcat: adb logcat -s GlassKitBlur）。 */
         const val BLUR_LOG_TAG: String = "GlassKitBlur"
+
+        /**
+         * it.7 边缘高光窄带的 stop 位置表：t = 距轮廓边缘的距离 / 带深度 ∈ [0,1]，
+         * t=0 即轮廓边缘。陡在边缘、平在内部——前 35% 深度内亮度跌去约 72%，
+         * 后 40% 只剩 <5% 的余晖，逼近凸形剖面 h(x)=(1-(1-x)^4)^(1/4) 的形状
+         * （Apple Liquid Glass 调研结论，主理人核实采信）。
+         */
+        val GLOW_BAND_POSITIONS: FloatArray =
+            floatArrayOf(0f, 0.15f, 0.35f, 0.6f, 0.85f, 1f)
+
+        /** 与 GLOW_BAND_POSITIONS 一一对应的亮度（白光 alpha 系数，边缘 1 → 内缘 0）。 */
+        val GLOW_BAND_ALPHAS: FloatArray =
+            floatArrayOf(1f, 0.55f, 0.28f, 0.12f, 0.04f, 0f)
+
+        /** it.7 高光带静态色表：白色 × GLOW_BAND_ALPHAS（构造一次，随 Paint 复用）。 */
+        val GLOW_BAND_COLORS: IntArray = IntArray(GLOW_BAND_ALPHAS.size).also { colors ->
+            for (i in GLOW_BAND_ALPHAS.indices) {
+                colors[i] = (Math.round(GLOW_BAND_ALPHAS[i] * 255f) shl 24) or 0x00FFFFFF
+            }
+        }
+
+        /** it.7 轮廓发丝线 alpha 上限（调研口径：极细 1px 亮线 ≤0.18 界定边缘）。 */
+        const val GLOW_HAIRLINE_ALPHA: Float = 0.18f
     }
 
     /* ---------------- props（GlassKitManager @ReactProp 一一对应） ---------------- */
@@ -318,11 +345,30 @@ class GlassKitView(context: Context) : View(context) {
         // floor=35 → 35/255≈0.1373 ≤ 0.14，alpha 契约恒不超出）
         alpha = floor(EDGE_HIGHLIGHT_ALPHA * 255f).toInt()
     }
+
+    /**
+     * it.7：顶/底高光窄带专用 Paint（shader 每帧 setShader 覆盖，TileMode.CLAMP；
+     * alpha 由各带亮度控制，Paint 实例复用零每帧分配——每帧仅 2 个 LinearGradient
+     * 小对象，QA 已确认按需重绘非逐帧，成本可接受）。
+     */
+    private val glowPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+    }
     private val clipPath: Path = Path()
     private val clipRect: RectF = RectF()
 
     /** 背景目标视图（弱注册表解析结果，附 PreDraw 监听）。 */
     private var targetView: View? = null
+
+    /**
+     * it.7 POC 采集重入防护：玻璃视图位于 backdrop 子树内时（AppTabBar 接入，
+     * GlassKitView 是 GlassKitBackdrop 的后代），capture() 内 targetView.draw()
+     * 会再次触发本视图 onDraw——无防护则「onDraw → capture → draw → onDraw →
+     * capture」无限递归栈溢出。置位期间 onDraw 直接返回（玻璃对采集位图零贡献，
+     * 采集结果即玻璃下层的真实背景，同时规避自采集反馈环）。测试页路径玻璃与
+     * backdrop 平级，防护天然不触发，行为不变。
+     */
+    private var isCapturing: Boolean = false
 
     /** 采集位图缓存（尺寸随视图 / 降采样档变化重建）。 */
     private var captureBitmap: Bitmap? = null
@@ -616,6 +662,9 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // it.7 POC 采集重入防护：capture() 经 backdrop.draw 间接触发本 onDraw 时
+        // 直接跳过（见 isCapturing 注释），防止无限递归与自采集反馈
+        if (isCapturing) return
         if (!loggedPropsSnapshot) {
             loggedPropsSnapshot = true
             Log.i(
@@ -654,11 +703,16 @@ class GlassKitView(context: Context) : View(context) {
             resolveTarget()
         }
 
-        // ① 捕获
+        // ① 捕获（isCapturing 置位期间 backdrop.draw 重入本 onDraw 会被顶部短路）
         val capture = obtainCaptureBitmap(w, h)
-        val captureOk = capture != null &&
-            targetView != null &&
-            GlassCaptureEngine.capture(targetView!!, this, capture!!)
+        val captureOk = try {
+            isCapturing = true
+            capture != null &&
+                targetView != null &&
+                GlassCaptureEngine.capture(targetView!!, this, capture!!)
+        } finally {
+            isCapturing = false
+        }
 
         if (blurEnabled && captureOk && capture != null) {
             // ② 模糊 + ③ 透镜
@@ -697,29 +751,53 @@ class GlassKitView(context: Context) : View(context) {
             canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), dimmingPaint)
         }
 
-        // ⑥ 边缘高光：#FFF @0.14 基准（it.6 柔光细化——描边亮度/宽度、顶缘/底缘
-        //    加强均独立可调：宽 = 1dp × glowScale × glowWidthScale clamp 0.5–8dp；
-        //    alpha = 0.14 × glowScale × glowAlphaScale clamp 0–1；视图上半/下半分别
-        //    以 alpha × glowTopScale / glowBottomScale 描 stroke，侧缘上下对半分摊）
+        // ⑥ 边缘高光（it.7 重做）：调研来源——Apple Liquid Glass 边缘高光是
+        //    「贴轮廓的窄带」：轮廓边缘最亮、向内快速非线性衰减（凸形剖面：陡在
+        //    边缘、平在内部，参考高度剖面 h(x)=(1-(1-x)^4)^(1/4)，以 LinearGradient
+        //    多 stop 逼近）；顶部显著亮于底部（参考 top:bottom:sides ≈ 0.55:0.30:0.20）。
+        //    it.6 的「上/下半 clipRect + 两次均匀描边」已删除——高光取代描边，不是
+        //    描边+渐变叠加。带深度 = 「宽度」滑块语义：向内渐变的深度；顶/底带矩形
+        //    由外层 clipPath（⑦ 圆角裁剪）统一裁剪，圆角处自动贴合。左右侧带本轮
+        //    不做（顶/底优先），侧缘以 1dp 发丝线补足轮廓感。
         if (cornerRadiusPx > 0f) {
             val glow = glowScale.coerceIn(0.05f, 2f)
-            strokePaint.strokeWidth =
-                (EDGE_HIGHLIGHT_DP * glow * glowWidthScale.coerceIn(0.2f, 4f)).coerceIn(0.5f, 8f) * density
-            val baseAlpha = (EDGE_HIGHLIGHT_ALPHA * glow * glowAlphaScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
+            // 带深度：1dp × glowScale × glowWidthScale，clamp 1–8dp（it.6 四 prop 全沿用）
+            val bandDp =
+                (EDGE_HIGHLIGHT_DP * glow * glowWidthScale.coerceIn(0.2f, 4f)).coerceIn(1f, 8f)
+            val bandPx = minOf(bandDp * density, h / 2f)
+            // 亮度：base = 0.14 × glowScale × glowAlphaScale；顶/底带分别乘
+            // glowTopScale / glowBottomScale（语义与 it.6 一致，终值 clamp 0–1）
+            val baseAlpha =
+                (EDGE_HIGHLIGHT_ALPHA * glow * glowAlphaScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
             val topAlpha = (baseAlpha * glowTopScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
             val bottomAlpha = (baseAlpha * glowBottomScale.coerceIn(0f, 4f)).coerceIn(0f, 1f)
-            // 上半：顶缘 + 侧缘上段
-            canvas.save()
-            canvas.clipRect(0f, 0f, w.toFloat(), h / 2f)
-            strokePaint.alpha = floor(topAlpha * 255f).toInt()
-            canvas.drawPath(clipPath, strokePaint)
-            canvas.restore()
-            // 下半：底缘 + 侧缘下段
-            canvas.save()
-            canvas.clipRect(0f, h / 2f, w.toFloat(), h.toFloat())
-            strokePaint.alpha = floor(bottomAlpha * 255f).toInt()
-            canvas.drawPath(clipPath, strokePaint)
-            canvas.restore()
+            if (bandPx > 0f && (topAlpha > 0f || bottomAlpha > 0f)) {
+                val wF = w.toFloat()
+                val hF = h.toFloat()
+                // 顶带：y=0（边缘最亮）→ y=bandPx（透明），垂直 CLAMP，多 stop 非线性衰减
+                glowPaint.shader = LinearGradient(
+                    0f, 0f, 0f, bandPx,
+                    GLOW_BAND_COLORS, GLOW_BAND_POSITIONS, Shader.TileMode.CLAMP,
+                )
+                glowPaint.alpha = floor(topAlpha * 255f).toInt()
+                canvas.drawRect(0f, 0f, wF, bandPx, glowPaint)
+                // 底带：y=h（边缘最亮）→ y=h-bandPx（透明）
+                glowPaint.shader = LinearGradient(
+                    0f, hF, 0f, hF - bandPx,
+                    GLOW_BAND_COLORS, GLOW_BAND_POSITIONS, Shader.TileMode.CLAMP,
+                )
+                glowPaint.alpha = floor(bottomAlpha * 255f).toInt()
+                canvas.drawRect(0f, hF - bandPx, wF, hF, glowPaint)
+                glowPaint.shader = null
+                // 发丝线：沿轮廓 1dp 白线补足侧缘/界定边缘，alpha = 0.18 × baseAlpha
+                //（终值 ≤0.18，floor 取整同 S1 口径）；baseAlpha=0 时静默跳过
+                val hairlineAlpha = floor((GLOW_HAIRLINE_ALPHA * baseAlpha) * 255f).toInt()
+                if (hairlineAlpha > 0) {
+                    strokePaint.strokeWidth = density
+                    strokePaint.alpha = hairlineAlpha
+                    canvas.drawPath(clipPath, strokePaint)
+                }
+            }
         }
     }
 
