@@ -65,22 +65,46 @@ export const GLASS_DEBUG_DEFAULTS = {
 export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
 
 /**
- * it.19 透镜量纲基准（**dp**）：对应原版 `GlassLevel.java:37-38` 的两档透镜参数，
- * 供 `AppTabBar` 与 `GlassTestScreen` 共用同一套基准，避免两个调用点各写一份。
+ * it.19 透镜量纲基准（**dp**）：对应原版四档透镜参数，供 `AppTabBar` 与
+ * `GlassTestScreen` 共用同一套基准，避免调用点各写一份。
  *
  * 量纲口径（it.19 修正）：JS 只做 `dp × PixelRatio.get()` → **px**，
  * `lensScale` 由 native 统一乘一次（`GlassKitView.drawLensLayer`），
  * 最终位移 = `dp × density × lensScale`，跨机型一致、与滑块线性。
  *
- * - `barRefractionDp` / `barBandDp`：原版 BAR `refractionAmountDp=5` / `refractionHeightDp=3`
- * - `indicatorRefractionDp` / `indicatorBandDp`：原版 INDICATOR `amount=10dp` / `height=8dp`，
- *   **已把 lockedRefraction 0.8 烘进基数**（10×0.8=8、8×0.8=6.4）——我们保留
- *   「指示器受 lensScale 调节」（用户已验收），但保持原版 8 : 6.4 的带高/位移比例。
+ * 权威来源（唯一依据，不靠读数）：
+ * - `GlassLevel.java:123-124`（BAR / CONTROL 构造）、`:37-38`（INDICATOR / OVERLAY）
+ * - `GlassSurfaceKt.java:683-688`：
+ *   `lensScale = lockedRefraction ?: refractionScale(滑块)`；
+ *   `h_px = toPx(refractionHeightDp) × lensScale`；
+ *   `amount_px = toPx(refractionAmountDp) × lensScale`
+ * - `GlassTuning.java:24`：原版滑块 `refractionScale` **默认 3.0**（与我们 lensScale 默认 3 同值）
+ *
+ * 四档基准（dp）与原版有效 px（density 3）：
+ *
+ * | 档位      | blurDp | band dp | amount dp | chromatic | 原版有效 band/amount px |
+ * |-----------|--------|---------|-----------|-----------|-------------------------|
+ * | BAR       | 10     | 3       | 5         | false     | 27 / 45（滑块 3.0）     |
+ * | CONTROL   | 10     | 5       | 8         | false     | 45 / 72（滑块 3.0）     |
+ * | INDICATOR | 0      | 8       | 10        | **true**  | 19.2 / 24（锁 0.8）     |
+ * | OVERLAY   | 30     | 3       | 5         | false     | 27 / 45（滑块 3.0）     |
+ *
+ * ★ INDICATOR 的 0.8 是**替换**滑块而非与滑块相乘（`?:` 而非 `×`）：原版
+ *   `lensScale = 0.8`（与 refractionScale 3.0 无关）⇒ 有效 band 19.2px / amount 24px。
+ *   我们按主理人拍板「指示器保留受 lensScale 调节」，把 0.8 **烘进基数**
+ *   （10×0.8=8、8×0.8=6.4）并继续乘滑块 3.0 ⇒ 有效 57.6 / 72 px = 原版锁值的 3×，
+ *   带高:位移比例仍守恒（6.4 : 8 = 8 : 10）。滑块拨到 1.0 时即逐值等于原版锁值。
+ *   inv-engine 记的「INDICATOR 带高 19dp」即 19.2 **px**（density 3 × 8dp × 0.8），
+ *   单位被写成了 dp；BAR 的「9dp / 15dp」同理是 9px / 15px。
+ *
  * - `indicatorDispersionDp`：色散基准幅（8dp = 与折射位移 1:1）。原版色散没有独立
- *   幅度参数（`dispersedCoord = d * grad * dispersionIntensity`，即 = 折射位移 × 象限
- *   符号），因此这里取「与 indicatorRefractionDp 相同」，滑块满幅 1.0 时 dispK = 1.0
- *   = 原版；旧实现是 10dp / 0.35 归一（默认 dispK ≈ 3.6，彩虹明显偏重）。
+ *   幅度参数（`dispersionIntensity = d × grad × (px·py)/(halfW·halfH)`，即 = 折射位移
+ *   × 象限符号），因此取「与 indicatorRefractionDp 相同」，滑块满幅 1.0 时 dispK = 1.0
+ *   = 原版；旧实现 10dp / 0.35 归一让默认 dispK ≈ 3.6（彩虹偏重 3.6 倍）。
  * - `dispersionLevelBase`：滑块 0–1 直接作倍数（1.0 = 原版满幅）。
+ * - `control*` / `overlay*`：暂未接线（生产面目前只有 dock bar / 指示器走透镜；
+ *   实验页面板未下发 lensBandPx，native 兜底 `band = amount`＝it.18 前的覆盖范围）。
+ *   后续给卡片 / 弹层接透镜时直接用这四个值，不要再另算。
  */
 export const GLASS_LENS_PROFILE = {
   barRefractionDp: 5,
@@ -89,6 +113,10 @@ export const GLASS_LENS_PROFILE = {
   indicatorBandDp: 6.4,
   indicatorDispersionDp: 8,
   dispersionLevelBase: 1,
+  controlRefractionDp: 8,
+  controlBandDp: 5,
+  overlayRefractionDp: 5,
+  overlayBandDp: 3,
 } as const;
 
 /**

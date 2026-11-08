@@ -619,6 +619,9 @@ class GlassKitView(context: Context) : View(context) {
      */
     private var loggedNestedSoftRender: Boolean = false
 
+    /** it.19①-fix 一次性日志：折射带高未下发、退化用 refractionPx（防刷屏）。 */
+    private var loggedBandFallback: Boolean = false
+
     /* ------- it.9 闪烁取证计数（GlassKitFlicker） ------- */
     /** onDraw 累计帧序（含 isCapturing 短路帧）。 */
     private var flickerSeq: Long = 0L
@@ -1628,7 +1631,24 @@ class GlassKitView(context: Context) : View(context) {
         // it.19：折射带高（circleMap 剖面的归一化尺度），与 refraction 同口径乘 lensScale。
         // ⓪ 阶段 shader 只声明不读（uLensBandPx 未参与求值）⇒ 观感零变化，
         // 仅用于把量纲与 prop 链先行落地，便于单独二分。① 起由 circleMap 使用。
-        val lensBand = lensBandPx * lensScale
+        // ①-fix：带高未下发（0 / 负数 / NaN）时退化为「带高 = 位移量」——
+        // 等价 ① 之前的覆盖范围（旧剖面把 uRefractionPx 同时当带高与最大位移），
+        // 避免未迁移的调用点因子 1px 带高把折射压成一条 1px 亮边（≈折射消失）。
+        // 已迁移的 dock bar / 指示器显式下发 lensBandPx，不走本兜底。
+        val effectiveBandPx = if (lensBandPx.isFinite() && lensBandPx > 0f) {
+            lensBandPx
+        } else {
+            if (!loggedBandFallback && refractionPx > 0f) {
+                loggedBandFallback = true
+                Log.i(
+                    logTag,
+                    "lens band fallback: view=$id lensBandPx=$lensBandPx → band=refractionPx" +
+                        " ($refractionPx px，等价 it.18 前的剖面覆盖范围)",
+                )
+            }
+            refractionPx
+        }
+        val lensBand = effectiveBandPx * lensScale
         shader.setFloatUniform("uRefractionPx", refraction)
         shader.setFloatUniform("uDispersionPx", dispersion)
         shader.setFloatUniform("uLensBandPx", lensBand)
