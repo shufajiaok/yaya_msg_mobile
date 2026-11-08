@@ -1,5 +1,13 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.7）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.8）。
+ *
+ * it.8：① 高光滑块归零残余高光修复（根因：chip/toolbar 两块面板此前未传 glow
+ * 系列 props，归零后仍吃原生默认值 glowTopScale/glowBottomScale=1——四面板现已
+ * 全量透传；原生侧发丝线 alpha 同步随 max(top,bottom) 缩放，全关=完全无高光）；
+ * ② 面板大小滑块拆分为「宽度倍率」「高度倍率」两个独立滑块；③ 新增第五块
+ * demo「底部菜单（玻璃叠玻璃）」：外层 dock capturable=true 注册为采集源，
+ * 内层指示条 backdropTag 指向外层 handle，双重透镜（透镜仅限本页验证场，
+ * 正式接入仍守 lens 仅 indicator 铁律②）。
  *
  * it.7：边缘高光重做（原生侧顶/底窄带 LinearGradient 多 stop 非线性衰减，
  * 高光取代描边），状态行 it.7。
@@ -21,14 +29,15 @@
  *  （glowScale 自本轮迭代起进引擎，作用于边缘高光宽/alpha）；
  * - 真机调参工作台（用户指令「开始迭代」）：
  *   · 四块玻璃面板全部**可拖动**（PanResponder，拖到色球/文字上便于观察模糊与折射）；
- *   · 圆角倍率 / 面板大小倍率实时滑块；
+ *   · 圆角倍率 / 宽度倍率 / 高度倍率实时滑块（it.8 长宽独立调节）；
  *   · 模糊路径开关（真机默认 RenderEffect 真高斯；模拟器 GPU 缺陷时开「强制降采样」）；
  *   · 版本号显示（expo-constants 读 app.json version，随迭代 bump）。
  *
  * 结构：
  * - GlassKitBackdrop（absoluteFill）：彩色渐变 + 色块（被玻璃采集的内容层）；
  * - 前景层：标题/状态行、4 块可拖动玻璃面板（hero / chip / toolbar / clear+压暗）、
- *   控制卡（总开关 + 路径开关 + 六行滑块）、返回主界面按钮。
+ *   第 5 块 demo「底部菜单（玻璃叠玻璃）」（it.8，可拖动）、
+ *   控制卡（总开关 + 路径开关 + 滑块组）、返回主界面按钮。
  *
  * ⚠️ 本页为临时验证页：路由经 GLASS_TEST_FIRST 临时首屏开关进入（navigation/index.tsx），
  * 验证完成后改回 false 即恢复原首屏，本页路由保留可随时再进。
@@ -46,6 +55,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  useWindowDimensions,
   View,
   type StyleProp,
   type ViewStyle,
@@ -229,7 +239,12 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const [blurOn, setBlurOn] = useState(true);
   const [forceDown, setForceDown] = useState(false);
   const [radiusScale, setRadiusScale] = useState(1);
-  const [sizeScale, setSizeScale] = useState(1);
+  // it.8：面板大小拆分为宽度/高度两个独立倍率（0.5–2）
+  const [widthScale, setWidthScale] = useState(1);
+  const [heightScale, setHeightScale] = useState(1);
+  // it.8 任务四：玻璃叠玻璃 demo——外层 dock 的原生 tag（内层指示条采集源）
+  const dockGlassRef = useRef(null);
+  const [dockGlassTag, setDockGlassTag] = useState<number | undefined>(undefined);
   // it.6 柔光细化四参数（本地调参态，不进持久化 store——与圆角/大小倍率同模式）
   const [glowAlpha, setGlowAlpha] = useState(1);
   const [glowWidth, setGlowWidth] = useState(1);
@@ -245,6 +260,21 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     const handle = findNodeHandle(backdropRef.current);
     if (handle != null) setBackdropTag(handle);
   }, []);
+
+  // it.8 任务四：外层 dock 挂载后取 handle 广播给内层指示条（backdropTag）
+  const onDockGlassLayout = useCallback(() => {
+    const handle = findNodeHandle(dockGlassRef.current);
+    if (handle != null) setDockGlassTag(handle);
+  }, []);
+
+  // it.8：chip/toolbar 行宽缩放。设计说明：行内两面板 flex:1 / flex:1.4（flexBasis 0
+  // + flexGrow 按比例分配），对两者乘同一 widthScale 是数学上的 no-op（比例项相约，
+  // 行宽不变）——故改为缩放整行宽度：行基准宽 = 屏宽 − 40（foreground 左右 padding），
+  // 目标宽 = 基准 × widthScale → marginHorizontal = (基准 − 目标)/2。负 margin 下限
+  // −20（吃满内容层 padding 即屏宽封顶）：行永不换行、永不溢出屏幕，相对比例 1:1.4
+  // 恒保持；widthScale > 屏宽上限后行宽封顶不再变化（hero/clear 全宽面板不受限）。
+  const winWidth = useWindowDimensions().width;
+  const panelRowMargin = Math.max(-20, ((winWidth - 40) * (1 - widthScale)) / 2);
 
   const apiLevel = Platform.OS === 'android' ? Number(Platform.Version) : -1;
 
@@ -262,13 +292,22 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.7 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.8 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'RenderEffect 真高斯'} · 面板可拖动`}
         </Text>
 
-        <DraggableGlass style={[styles.panelHero, { height: Math.round(120 * sizeScale) }]}>
+        <DraggableGlass
+          style={[
+            styles.panelHero,
+            {
+              height: Math.round(120 * heightScale),
+              width: `${widthScale * 100}%`,
+              alignSelf: 'center',
+            },
+          ]}
+        >
           <GlassPanel
             title="Hero 大面板"
             subtitle="blurDp 14 · 折射+色散 · 可拖动"
@@ -286,8 +325,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             forceDownsample={forceDown}
           />
         </DraggableGlass>
-        <View style={styles.panelRow}>
-          <DraggableGlass style={[styles.panelChip, { height: Math.round(72 * sizeScale) }]}>
+        <View style={[styles.panelRow, { marginHorizontal: panelRowMargin }]}>
+          <DraggableGlass style={[styles.panelChip, { height: Math.round(72 * heightScale) }]}>
             <GlassPanel
               title="Chip 胶囊"
               subtitle="blurDp 8 · 折射+色散 · 可拖动"
@@ -297,11 +336,17 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               cornerRadiusDp={Math.round(radii.pill * radiusScale)}
               refractionPx={10}
               dispersionPx={6}
+              // it.8 修复：chip/toolbar 此前漏传 glow 系列 props（归零后仍吃原生
+              // 默认值 top/bottom=1，即用户报告的「胶囊和工具条仍有基础顶/底高光」）
+              glowAlphaScale={glowAlpha}
+              glowWidthScale={glowWidth}
+              glowTopScale={glowTop}
+              glowBottomScale={glowBottom}
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
           </DraggableGlass>
-          <DraggableGlass style={[styles.panelToolbar, { height: Math.round(72 * sizeScale) }]}>
+          <DraggableGlass style={[styles.panelToolbar, { height: Math.round(72 * heightScale) }]}>
             <GlassPanel
               title="工具条"
               subtitle="blurDp 12 · 折射+色散 · 可拖动"
@@ -311,12 +356,25 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               cornerRadiusDp={Math.round(22 * radiusScale)}
               refractionPx={10}
               dispersionPx={6}
+              glowAlphaScale={glowAlpha}
+              glowWidthScale={glowWidth}
+              glowTopScale={glowTop}
+              glowBottomScale={glowBottom}
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
           </DraggableGlass>
         </View>
-        <DraggableGlass style={[styles.panelClear, { height: Math.round(88 * sizeScale) }]}>
+        <DraggableGlass
+          style={[
+            styles.panelClear,
+            {
+              height: Math.round(88 * heightScale),
+              width: `${widthScale * 100}%`,
+              alignSelf: 'center',
+            },
+          ]}
+        >
           <GlassPanel
             title="clear + 压暗"
             subtitle="blurDp 10 · dimming 0.35 · 折射+色散"
@@ -334,6 +392,42 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             blurEnabled={blurOn}
             forceDownsample={forceDown}
           />
+        </DraggableGlass>
+
+        {/* it.8 任务四 demo：玻璃叠玻璃底部菜单。外层 dock capturable=true 注册为
+            采集源（GlassCaptureEngine 注册表）；内层指示条 backdropTag 指向外层
+            handle——采集到的是「已被外层模糊+折射过一次」的合成帧，再叠一层透镜
+            = 双重透镜观感（边缘色散叠加，与直接采 backdrop 的单层明显不同）。
+            dock 属浮层，透镜按测试页口径开——正式接入仍守「lens 仅 indicator」铁律②。 */}
+        <DraggableGlass style={styles.dockWrap}>
+          <View style={styles.dockFrame}>
+            <GlassKitView
+              ref={dockGlassRef}
+              style={StyleSheet.absoluteFill}
+              onLayout={onDockGlassLayout}
+              backdropTag={backdropTag}
+              capturable={true}
+              blurDp={14}
+              tintAlpha={0.10}
+              tintColor={PANEL_TINT}
+              cornerRadiusDp={radii.capsule}
+              refractionPx={10}
+              dispersionPx={6}
+              blurEnabled={blurOn}
+              forceDownsample={forceDown}
+            />
+            <GlassKitView
+              style={styles.dockIndicator}
+              backdropTag={dockGlassTag}
+              blurDp={8}
+              cornerRadiusDp={radii.pill}
+              refractionPx={10}
+              dispersionPx={6}
+              blurEnabled={blurOn}
+              forceDownsample={forceDown}
+            />
+            <Text style={styles.dockLabel}>玻璃叠玻璃 · 双重透镜</Text>
+          </View>
         </DraggableGlass>
 
         <View style={styles.controlCard}>
@@ -403,11 +497,18 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             onChange={(next) => setRadiusScale(clampRange(next, 0, 3))}
           />
           <SliderRow
-            label="面板大小（0.5–2）"
-            value={sizeScale}
+            label="宽度倍率（0.5–2）"
+            value={widthScale}
             min={0.5}
             max={2}
-            onChange={(next) => setSizeScale(clampRange(next, 0.5, 2))}
+            onChange={(next) => setWidthScale(clampRange(next, 0.5, 2))}
+          />
+          <SliderRow
+            label="高度倍率（0.5–2）"
+            value={heightScale}
+            min={0.5}
+            max={2}
+            onChange={(next) => setHeightScale(clampRange(next, 0.5, 2))}
           />
         </View>
 
@@ -438,6 +539,25 @@ const styles = StyleSheet.create({
   panelChip: { flex: 1, marginRight: 8 },
   panelToolbar: { flex: 1.4 },
   panelClear: { marginBottom: 18 },
+  // it.8 任务四：玻璃叠玻璃 demo（圆角全走 radii token，守卫 R3 合规）
+  dockWrap: { marginBottom: 18 },
+  dockFrame: {
+    height: 64,
+    borderRadius: radii.capsule,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  // 内层指示条：dock 底部一条 pill（backdropTag 指向外层 dock 的 handle）
+  dockIndicator: {
+    position: 'absolute',
+    bottom: 6,
+    left: 44,
+    right: 44,
+    height: 14,
+    borderRadius: radii.pill,
+  },
+  dockLabel: { position: 'absolute', top: 16, alignSelf: 'center', fontSize: 12, fontWeight: '600', color: '#ffffff' },
   controlCard: { borderRadius: radii.lg, backgroundColor: '#1a2027', opacity: 0.94, padding: 14 },
   switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   row: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },

@@ -4,6 +4,9 @@ import { PerfFlatList } from '../components/PerfFlatList';
 import { setLiveImmersiveMode } from '../native/LivePlayer';
 import { usePalette, radii, radiiAlias } from '../theme';
 import { useResolvedTheme } from '../hooks/useAppTheme';
+// it.8：chatTools 原生玻璃层（对齐 AppTabBar it.7 接入模式：只加效果不动结构）
+import GlassKitView from '../native/GlassKitView';
+import { useBackdropTag } from '../native/backdropTagStore';
 
 import {
   ActivityIndicator,
@@ -1096,6 +1099,9 @@ function avatarInitial(name: string) {
 export default function FollowedRoomsScreen() {
   const palette = usePalette();
   const resolvedTheme = useResolvedTheme();
+  // it.8：chatTools 玻璃层的采集 tag（App 级 GlassKitBackdrop 经模块级 store 广播；
+  // 未就绪 undefined 时原生走兜底底色，不影响既有实底观感）
+  const chatToolsBackdropTag = useBackdropTag();
   const { t } = useI18n();
   const token = useSettingsStore((state) => state.settings.p48Token);
   const setTabBarHidden = useUiStore((state) => state.setTabBarHidden);
@@ -2356,9 +2362,21 @@ export default function FollowedRoomsScreen() {
         } />
 
           {/* 聊天工具条（按深浅色实底，不挡房间背景）*/}
-          {/* 旧 expo-blur 引擎已删除（独立分支决策）；此处待 UI 重写接入 GlassKitView 原生引擎 */}
+          {/* it.8：实底保留为兜底；其上加 GlassKitView 原生玻璃垫底（对齐 AppTabBar
+              模式：blurDp 12 / tintAlpha 0.10 / 圆角沿用 chatTools 18 / 不传透镜
+              ——铁律② lens 仅 indicator / blurScale-tintScale 不传走 glass store）。
+              本工具条在 App 级 GlassKitBackdrop 子树内，采集重入由原生 isCapturing
+              防护兜底（it.7 已验证）。 */}
           <View style={[styles.chatToolsClip, { borderColor: palette.innerStroke }]}>
             <View style={[styles.chatTools, { backgroundColor: palette.surfaceElevated }]}>
+            <GlassKitView
+              style={StyleSheet.absoluteFill}
+              backdropTag={chatToolsBackdropTag}
+              blurDp={12}
+              tintAlpha={0.10}
+              tintColor={palette.name === 'dark' ? '#1E1F24' : '#F5F6FA'}
+              cornerRadiusDp={18}
+            />
           {/* 分段切换：大房间 / 小房间 */}
           <View style={[styles.segment, { backgroundColor: palette.fill2 }]}>
             <TouchableOpacity
