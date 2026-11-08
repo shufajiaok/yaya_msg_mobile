@@ -8,13 +8,17 @@
  * 本文件是 App 侧玻璃默认值的唯一出口：
  * - `GlassTestScreen` 的滑块 / 开关初值全部引用这里（不再散落字面量）；
  * - `AppTabBar` 的 dock 几何 / 玻璃参数全部引用这里（不自创尺寸）；
- * - `glass.ts` 的四倍率默认值（DEFAULT_SCALES）经 SCALE_RANGES 与本文件保持一致。
+ * - `glass.ts` 的四倍率默认值（DEFAULT_SCALES）经 SCALE_RANGES 与本文件保持一致；
+ * - it.17 起 `glassDockStore.ts` 的 22 项运行时状态默认值也全部引用这里。
+ *
+ * it.17 职责收窄：本文件**只放默认值常量**（纯数据，无 hook、无运行时状态）。
+ * 运行时状态与订阅出口搬到 `glassDockStore.ts`（`useDockSettings` /
+ * `useGlassScales` / `setGlassScale`），避免「默认值」与「运行时值」混在一个文件里。
  *
  * ⚠️ 修改本文件 = 改用户已验收的配置，必须有用户明确指令。
  * ⚠️ 守卫合规：降级实底色值集中在这里（theme 目录豁免 inline-rgba 基线），
  *    `AppTabBar.tsx` 不内联 rgba；所有圆角走 JSX inline 变量，不写死数字。
  */
-import { useGlassStore } from './glass';
 
 /** 顶部总开关（用户 2026-11-08 指定） */
 export const GLASS_SWITCH_DEFAULTS = {
@@ -73,6 +77,7 @@ export const GLASS_BAR_FALLBACK = {
 /**
  * 指示器降级实底（半透明白）：实色 + opacity，不产生内联 rgba。
  * 对齐 GlassTestScreen dockIndicatorFallback 的 0.25 语义。
+ * it.17：`glassOnGlass=false` 与无透镜能力两种情形共用本常量。
  */
 export const GLASS_INDICATOR_FALLBACK = {
   color: '#FFFFFF',
@@ -80,32 +85,33 @@ export const GLASS_INDICATOR_FALLBACK = {
 } as const;
 
 /**
- * dock bar 卡纸底衬色（不透明）。
+ * dock bar 卡纸底衬色（不透明）—— **it.17 起已停用，常量保留**。
  *
- * 为什么需要（用户 2026-11-08 反馈「dock 应该被卡纸遮罩挡住，看不到后面内容」）：
- * Kotlin 版底栏之所以像一张不透明卡纸，是因为其页面内容在 bar 区域本来就是背景色
- * （内容带 bottom inset），玻璃采集到的是纯背景；而 yaya 的列表内容一直延伸到
- * dock 下方，bar 玻璃的采集源是 App 级 GlassKitBackdrop（整棵内容树）⇒ 内容原样
- * 透上来。模糊救不了这件事：反编译 GlassSurfaceKt.java:680 的公式是
- * `blur = level.blurDp × blurScale`，BAR 的 10dp × 0.2 同样只有 2dp。
- * 修法：bar 内层放一块不透明 surface 色并把它注册成采集源，bar 玻璃只采它
- * ⇒ 纯色卡纸 + tint/膜层/底缘高光质感；指示器仍采集 bar 本体（玻璃叠玻璃）。
+ * 历史（it.16-fix1）：Kotlin 版底栏之所以像一张不透明卡纸，是因为其页面内容在
+ * bar 区域本来就是背景色（内容带 bottom inset），玻璃采集到的是纯背景；而 yaya
+ * 的列表内容一直延伸到 dock 下方，bar 玻璃的采集源是 App 级 GlassKitBackdrop
+ * （整棵内容树）⇒ 内容原样透上来。模糊救不了这件事：反编译 GlassSurfaceKt.java:680
+ * 的公式是 `blur = level.blurDp × blurScale`，BAR 的 10dp × 0.2 同样只有 2dp。
+ * 当时的修法：bar 内层放一块不透明 surface 色并注册成采集源，bar 玻璃只采它
+ * ⇒ 纯色卡纸 + tint/膜层/底缘高光质感。
+ *
+ * it.17 撤销（用户 2026-11-08：「确实有一层卡纸」→ 要求改成透视玻璃）：
+ * 已删除 `AppTabBar` 里那段 `GlassKitBackdrop` 内层渲染，bar 的 `backdropTag`
+ * 回到 `useBackdropTag()`（App 级采集源）⇒ 恢复透视玻璃。
+ *
+ * ✅ 已验证可用，需要卡纸时恢复这段 JSX 即可：frame 下插入
+ *    `<GlassKitBackdrop ref={barBaseRef} onLayout={onBarBaseLayout}>` 包一层
+ *    backgroundColor 为本色的绝对填充 View，并把 bar 玻璃的 `backdropTag`
+ *    改成 `barBaseTag ?? backdropTag`。色值本身不需要改，故常量保留。
  */
 export const GLASS_BAR_SURFACE = {
   dark: '#1E1F24',
   light: '#F5F6FA',
 } as const;
 
-/**
- * dock 指示器 / bar 所需的两个实时倍率。
+/* ------------------------------------------------------------------ *
+ * 运行时状态与订阅出口 → 见 `glassDockStore.ts`（it.17）
  *
- * 为什么放在这里而不是组件里直接 `useGlassStore`：守卫 `glass-api-access`
- * （S3）对 `src/**\/*.tsx` 里的 `useGlassStore` 按行计数且基线为「只拦新增」，
- * 在 `AppTabBar.tsx` 直接调用会新增命中。把订阅收敛到本 .ts 单一来源，
- * 组件只消费派生值，既满足 guard PASS，也让「玻璃数值唯一出口」更彻底。
- */
-export function useGlassScales(): { blurScale: number; lensScale: number } {
-  const blurScale = useGlassStore((state) => state.blurScale);
-  const lensScale = useGlassStore((state) => state.lensScale);
-  return { blurScale, lensScale };
-}
+ * 原先放在本文件的 `useGlassScales()` 已迁到 glassDockStore.ts，并扩展为返回
+ * 四项 { blurScale, tintScale, lensScale, glowScale }；本文件回归「纯默认值常量」。
+ * ------------------------------------------------------------------ */

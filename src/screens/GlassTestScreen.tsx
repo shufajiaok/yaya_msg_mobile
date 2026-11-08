@@ -1,5 +1,19 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.14）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.17）。
+ *
+ * it.17（可调参数提升为全局 store，实验页与 App 本体共用一套参数）：
+ * ① 本页原先的 22 个本地 useState（3 顶部开关 / 3 三开关 / 6 几何 / 7 扩展调试 /
+ *    1 高光 / 1 dock 选中态）全量迁入 `src/theme/glassDockStore.ts`，本页改为
+ *    读 / 写 store ⇒ 拖滑块时 App 本体 `AppTabBar` 实时联动（用户 2026-11-08：
+ *    「三个都要」「可调节，就和实验页一样啊，同步统一调节的」）。
+ * ② 滑块顺序 / 标签 / 区间 / 两位小数 / 折叠区结构一律不动；区间**数值**改为引用
+ *    store 的 `DOCK_RANGES`（与原先字面量逐项同值，只换唯一来源，防两处漂移）。
+ * ③ 四倍率（模糊 / 折射 / 膜层 / glowScale）仍在 `glass.ts` 的 useGlassStore，
+ *    本页经 `useGlassScales()` / `setGlassScale()` 消费（订阅在 .ts，守卫 S3 不计数）。
+ * ④ dock 段的玻璃 props 与 `AppTabBar` 保持同一套派生逻辑：tintAlpha 走
+ *    `resolveTintAlpha(TINT_ALPHA_BASE, tintScale)` 且显式 `tintScale={1}`（避免
+ *    原生再乘一次），并补 glowScale / glowAlphaScale / glowWidthScale /
+ *    glowBottomScale ⇒「实验页所见 = 本体所得」。
  *
  * it.14（底栏 Continuous Capsule + 指示器单独提亮）：
  * ① P0-1 底栏 / 指示器 / 顶栏演示件传 capsuleContinuous={true}：真胶囊
@@ -89,13 +103,13 @@ import { LinearGradient } from 'expo-linear-gradient';
 import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import GlassKitView from '../native/GlassKitView';
 import GlassSlider from '../components/GlassSlider';
-import { canBlur, canLens, SCALE_RANGES, useGlassStore } from '../theme/glass';
+import { canBlur, canLens, resolveTintAlpha, SCALE_RANGES, TINT_ALPHA_BASE } from '../theme/glass';
 import {
-  GLASS_DEBUG_DEFAULTS,
-  GLASS_EFFECT_DEFAULTS,
-  GLASS_PROFILE,
-  GLASS_SWITCH_DEFAULTS,
-} from '../theme/glassProfile';
+  DOCK_RANGES,
+  setGlassScale,
+  useDockSettings,
+  useGlassScales,
+} from '../theme/glassDockStore';
 import { radii } from '../theme/radii';
 
 /** 临时首屏开关 companion：见 src/navigation/index.tsx 顶部同名常量（同一布尔口径）。 */
@@ -158,31 +172,26 @@ const LENS_MIN = 0;
 const LENS_MAX = 3;
 const TINT_MIN = 0;
 const TINT_MAX = 2;
-const HIGHLIGHT_MIN = 0;
-const HIGHLIGHT_MAX = 1;
 /**
- * it.16：默认值全部引用 GLASS_PROFILE（用户 2026-11-08 指定的 HealthCheckIn 实测配置），
- * 区间 MIN/MAX 保持 it.13 原值不动。
+ * it.17：区间**数值**的唯一来源改为 `glassDockStore.DOCK_RANGES`（与 it.16 的字面量
+ * 逐项同值，滑块区间一字未变）；默认值不再在本文件出现，由 store 初值提供
+ * （store 初值又逐项引用 glassProfile.ts）。MIN/MAX 仍以常量形式传给滑块，
+ * 保持 JSX 可读性与守卫 R3 口径不变。
  */
-const HIGHLIGHT_DEFAULT = GLASS_PROFILE.highlightScale; // 0.3
-const TOP_BAR_WIDTH_MIN = 0.6;
-const TOP_BAR_WIDTH_MAX = 1.0;
-const TOP_BAR_WIDTH_DEFAULT = GLASS_PROFILE.topBarWidthScale; // 0.8
-const TOP_BAR_HEIGHT_MIN = 44;
-const TOP_BAR_HEIGHT_MAX = 72;
-const TOP_BAR_HEIGHT_DEFAULT = GLASS_PROFILE.topBarHeightDp; // 56.97
-const DOCK_WIDTH_MIN = 0.7;
-const DOCK_WIDTH_MAX = 1.0;
-const DOCK_WIDTH_DEFAULT = GLASS_PROFILE.dockWidthScale; // 0.81
-const DOCK_HEIGHT_MIN = 56;
-const DOCK_HEIGHT_MAX = 84;
-const DOCK_HEIGHT_DEFAULT = GLASS_PROFILE.dockHeightDp; // 56.86
-const DOCK_INNER_PAD_MIN = 0;
-const DOCK_INNER_PAD_MAX = 20;
-const DOCK_INNER_PAD_DEFAULT = GLASS_PROFILE.dockInnerPadDp; // 5.36
-const DOCK_FLOAT_DP_MIN = 0;
-const DOCK_FLOAT_DP_MAX = 24;
-const DOCK_FLOAT_DP_DEFAULT = GLASS_PROFILE.dockFloatDp; // 15.3
+const HIGHLIGHT_MIN = DOCK_RANGES.highlightScale.min;
+const HIGHLIGHT_MAX = DOCK_RANGES.highlightScale.max;
+const TOP_BAR_WIDTH_MIN = DOCK_RANGES.topBarWidthScale.min;
+const TOP_BAR_WIDTH_MAX = DOCK_RANGES.topBarWidthScale.max;
+const TOP_BAR_HEIGHT_MIN = DOCK_RANGES.topBarHeightDp.min;
+const TOP_BAR_HEIGHT_MAX = DOCK_RANGES.topBarHeightDp.max;
+const DOCK_WIDTH_MIN = DOCK_RANGES.dockWidthScale.min;
+const DOCK_WIDTH_MAX = DOCK_RANGES.dockWidthScale.max;
+const DOCK_HEIGHT_MIN = DOCK_RANGES.dockHeightDp.min;
+const DOCK_HEIGHT_MAX = DOCK_RANGES.dockHeightDp.max;
+const DOCK_INNER_PAD_MIN = DOCK_RANGES.dockInnerPadDp.min;
+const DOCK_INNER_PAD_MAX = DOCK_RANGES.dockInnerPadDp.max;
+const DOCK_FLOAT_DP_MIN = DOCK_RANGES.dockFloatDp.min;
+const DOCK_FLOAT_DP_MAX = DOCK_RANGES.dockFloatDp.max;
 
 /** it.9 tint 色（旧架构 Paper 桥接对 customType="Color" 自动 processColor，必须传原始
  *  字符串，禁止调用方预 processColor；真机 logcat + 像素取证实证）。 */
@@ -410,53 +419,53 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const C = THEME_COLORS[scheme];
   const backdropRef = useRef(null);
   const [backdropTag, setBackdropTag] = useState<number | undefined>(undefined);
-  // 三个原调试开关（it.16：默认值引用 GLASS_SWITCH_DEFAULTS；显式泛型放宽 as const 字面量）
-  const [blurOn, setBlurOn] = useState<boolean>(GLASS_SWITCH_DEFAULTS.blurEnabled);
-  const [forceDown, setForceDown] = useState<boolean>(GLASS_SWITCH_DEFAULTS.forceDownsample);
-  const [glassOnGlass, setGlassOnGlass] = useState<boolean>(
-    GLASS_SWITCH_DEFAULTS.glassOnGlass,
-  );
 
-  // it.13 对齐项 state（10 滑块 + 3 开关；it.16：默认值引用 GLASS_PROFILE）
-  const [dockHeight, setDockHeight] = useState<number>(DOCK_HEIGHT_DEFAULT);
-  const [dockWidthMult, setDockWidthMult] = useState<number>(DOCK_WIDTH_DEFAULT);
-  const [topBarWidthScale, setTopBarWidthScale] = useState<number>(TOP_BAR_WIDTH_DEFAULT);
-  const [topBarHeightDp, setTopBarHeightDp] = useState<number>(TOP_BAR_HEIGHT_DEFAULT);
-  const [dockInnerPad, setDockInnerPad] = useState<number>(DOCK_INNER_PAD_DEFAULT);
-  const [dockFloatDp, setDockFloatDp] = useState<number>(DOCK_FLOAT_DP_DEFAULT);
-  const [highlightScale, setHighlightScale] = useState<number>(HIGHLIGHT_DEFAULT);
-  const [chromaticEnabled, setChromaticEnabled] = useState<boolean>(
-    GLASS_EFFECT_DEFAULTS.chromaticEnabled,
-  );
-  const [depthEffect, setDepthEffect] = useState<boolean>(GLASS_EFFECT_DEFAULTS.depthEffect);
-  const [vibrancyEnabled, setVibrancyEnabled] = useState<boolean>(
-    GLASS_EFFECT_DEFAULTS.vibrancyEnabled,
-  );
-
-  // it.13 扩展调试（Kotlin 无对应；折叠区；it.16：默认值引用 GLASS_DEBUG_DEFAULTS）
+  /**
+   * it.17：22 项可调参数全部来自全局 store（`glassDockStore`），与 App 本体
+   * `AppTabBar` 共用同一份运行时状态 ⇒「实验页拖滑块 = 本体底栏同步变」。
+   * 本页不再持有任何参数 useState；折叠区开合属本页 UI 局部状态，留在本地。
+   *
+   * 别名说明（避免改动下方 JSX 与滑块文案）：blurOn / forceDown / dockWidthMult /
+   * dockHeight / dockInnerPad / dockRadius 都是 store 字段的本地别名，取值口径与 it.16
+   * 完全一致，只是「真相源」从 useState 换成 store。
+   */
   const [debugExpanded, setDebugExpanded] = useState(false);
-  const [dockRadius, setDockRadius] = useState<number>(GLASS_DEBUG_DEFAULTS.dockRadiusDp); // 999 = 真胶囊
-  const [glowAlpha, setGlowAlpha] = useState<number>(GLASS_DEBUG_DEFAULTS.glowAlpha);
-  const [glowWidth, setGlowWidth] = useState<number>(GLASS_DEBUG_DEFAULTS.glowWidth);
-  const [glowBottom, setGlowBottom] = useState<number>(GLASS_DEBUG_DEFAULTS.glowBottom);
-  const [dispersionLevel, setDispersionLevel] = useState<number>(
-    GLASS_DEBUG_DEFAULTS.dispersionLevel,
-  );
-  const [radiusScale, setRadiusScale] = useState<number>(GLASS_DEBUG_DEFAULTS.radiusScale);
-  const [widthScale, setWidthScale] = useState<number>(GLASS_DEBUG_DEFAULTS.widthScale);
-  const [heightScale, setHeightScale] = useState<number>(GLASS_DEBUG_DEFAULTS.heightScale);
+  const {
+    blurEnabled: blurOn,
+    forceDownsample: forceDown,
+    glassOnGlass,
+    chromaticEnabled,
+    depthEffect,
+    vibrancyEnabled,
+    topBarWidthScale,
+    topBarHeightDp,
+    dockWidthScale: dockWidthMult,
+    dockHeightDp: dockHeight,
+    dockInnerPadDp: dockInnerPad,
+    dockFloatDp,
+    dockRadiusDp: dockRadius,
+    dispersionLevel,
+    glowAlpha,
+    glowWidth,
+    glowBottom,
+    radiusScale,
+    widthScale,
+    heightScale,
+    highlightScale,
+    dockSelected,
+    setNumber,
+    setBoolean,
+    setDockSelected,
+  } = useDockSettings();
 
-  // it.9 Dock：选中 tab + 容器宽（指示器 translationX 由弹簧驱动）
-  const [dockSelected, setDockSelected] = useState(0);
+  // it.9 Dock：容器宽（指示器 translationX 由弹簧驱动）+ bar 采集源 tag
   const [dockWidth, setDockWidth] = useState(0);
   const dockIndicatorX = useRef(new Animated.Value(0)).current;
   const dockGlassRef = useRef(null);
   const [dockGlassTag, setDockGlassTag] = useState<number | undefined>(undefined);
 
-  const blurScale = useGlassStore((state) => state.blurScale);
-  const tintScale = useGlassStore((state) => state.tintScale);
-  const lensScale = useGlassStore((state) => state.lensScale);
-  const glowScale = useGlassStore((state) => state.glowScale);
+  // 四倍率（仍在 glass.ts 的 useGlassStore；订阅出口收敛在 .ts，守卫 S3 不计数）
+  const { blurScale, tintScale, lensScale, glowScale } = useGlassScales();
 
   const onBackdropLayout = useCallback(() => {
     const handle = findNodeHandle(backdropRef.current);
@@ -493,6 +502,10 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const indicatorBlurDp = Math.round(2 * blurScale);
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。
+  // it.17：dock bar 的 tint 与 AppTabBar 同一口径 —— resolveTintAlpha 是 glass.ts 的
+  // H1 唯一出口（0.06 × tintScale，≤0.12）；原生最终 alpha = min(tintAlpha × tintScale,
+  // 0.12)，若再传 store 的 tintScale 会二次乘算，故显式传 tintScale={1}。
+  const dockBarTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
 
   // it.8：chip/toolbar 行宽缩放（对同乘 widthScale 是 no-op，改缩放整行宽度）。
   const winWidth = useWindowDimensions().width;
@@ -537,7 +550,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
-          {`${APP_VERSION}-it.16 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.17 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 连续曲率 · 面板可拖动`}
@@ -666,13 +679,19 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               backdropTag={backdropTag}
               capturable={true}
               blurDp={10}
-              tintAlpha={0.06}
+              blurScale={blurScale}
+              tintAlpha={dockBarTintAlpha}
+              tintScale={1}
               tintColor={panelTintFor(scheme)}
               cornerRadiusDp={dockRadius}
               capsuleContinuous={true}
               refractionPx={Math.round(5 * lensScale)}
               dispersionPx={0}
               highlightScale={highlightScale}
+              glowScale={glowScale}
+              glowAlphaScale={glowAlpha}
+              glowWidthScale={glowWidth}
+              glowBottomScale={glowBottom}
               chromaticEnabled={chromaticEnabled}
               depthEffect={depthEffect}
               vibrancyEnabled={vibrancyEnabled}
@@ -779,21 +798,26 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         </DraggableGlass>
 
         <View style={[styles.controlCard, { backgroundColor: C.surface }]}>
-          {/* 三个原调试开关保留原位不动 */}
-          <SwitchRow label="模糊总开关" value={blurOn} onChange={setBlurOn} />
+          {/* 三个原调试开关保留原位不动（it.17：值与写入全部走 store） */}
+          <SwitchRow
+            label="模糊总开关"
+            value={blurOn}
+            onChange={(next) => setBoolean('blurEnabled', next)}
+          />
           <SwitchRow
             label="强制降采样（模拟器调试用）"
             value={forceDown}
-            onChange={setForceDown}
+            onChange={(next) => setBoolean('forceDownsample', next)}
           />
           <SwitchRow
             label="玻璃叠玻璃（指示器透镜）"
             value={glassOnGlass}
-            onChange={setGlassOnGlass}
+            onChange={(next) => setBoolean('glassOnGlass', next)}
           />
 
           {/* it.13 对齐项：顺序 / 标签 / 区间 / 默认值逐字照抄
-              SettingsScreenKt.java:1905-2128 + GlassTuning.java:21-57 */}
+              SettingsScreenKt.java:1905-2128 + GlassTuning.java:21-57
+              it.17：值来自 store、写入经 setNumber / setGlassScale（store 内再钳一次） */}
           <Text style={[styles.groupCaption, { color: C.accent }]}>
             HealthCheckIn 对齐项（10 滑块 + 3 开关）
           </Text>
@@ -801,41 +825,51 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             label="模糊"
             value={blurScale}
             scaleKey="blurScale"
-            onChange={(next) => useGlassStore.setState({ blurScale: clampScale('blurScale', next) })}
+            onChange={(next) => setGlassScale('blurScale', clampScale('blurScale', next))}
           />
           <ScaleSliderRow
             label="折射"
             value={lensScale}
             scaleKey="lensScale"
-            onChange={(next) => useGlassStore.setState({ lensScale: clampScale('lensScale', next) })}
+            onChange={(next) => setGlassScale('lensScale', clampScale('lensScale', next))}
           />
           <ScaleSliderRow
             label="膜层"
             value={tintScale}
             scaleKey="tintScale"
-            onChange={(next) => useGlassStore.setState({ tintScale: clampScale('tintScale', next) })}
+            onChange={(next) => setGlassScale('tintScale', clampScale('tintScale', next))}
           />
           <SliderRow
             label="顶缘高光"
             value={highlightScale}
             min={HIGHLIGHT_MIN}
             max={HIGHLIGHT_MAX}
-            onChange={(next) => setHighlightScale(clampRange(next, HIGHLIGHT_MIN, HIGHLIGHT_MAX))}
+            onChange={(next) =>
+              setNumber('highlightScale', clampRange(next, HIGHLIGHT_MIN, HIGHLIGHT_MAX))
+            }
           />
           <SwitchRow
             label="色散（整层画三遍）"
             value={chromaticEnabled}
-            onChange={setChromaticEnabled}
+            onChange={(next) => setBoolean('chromaticEnabled', next)}
           />
-          <SwitchRow label="景深" value={depthEffect} onChange={setDepthEffect} />
-          <SwitchRow label="鲜活度" value={vibrancyEnabled} onChange={setVibrancyEnabled} />
+          <SwitchRow
+            label="景深"
+            value={depthEffect}
+            onChange={(next) => setBoolean('depthEffect', next)}
+          />
+          <SwitchRow
+            label="鲜活度"
+            value={vibrancyEnabled}
+            onChange={(next) => setBoolean('vibrancyEnabled', next)}
+          />
           <SliderRow
             label="顶栏宽度 ×屏"
             value={topBarWidthScale}
             min={TOP_BAR_WIDTH_MIN}
             max={TOP_BAR_WIDTH_MAX}
             onChange={(next) =>
-              setTopBarWidthScale(clampRange(next, TOP_BAR_WIDTH_MIN, TOP_BAR_WIDTH_MAX))
+              setNumber('topBarWidthScale', clampRange(next, TOP_BAR_WIDTH_MIN, TOP_BAR_WIDTH_MAX))
             }
           />
           <SliderRow
@@ -844,7 +878,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             min={TOP_BAR_HEIGHT_MIN}
             max={TOP_BAR_HEIGHT_MAX}
             onChange={(next) =>
-              setTopBarHeightDp(clampRange(next, TOP_BAR_HEIGHT_MIN, TOP_BAR_HEIGHT_MAX))
+              setNumber('topBarHeightDp', clampRange(next, TOP_BAR_HEIGHT_MIN, TOP_BAR_HEIGHT_MAX))
             }
           />
           <SliderRow
@@ -852,14 +886,18 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             value={dockWidthMult}
             min={DOCK_WIDTH_MIN}
             max={DOCK_WIDTH_MAX}
-            onChange={(next) => setDockWidthMult(clampRange(next, DOCK_WIDTH_MIN, DOCK_WIDTH_MAX))}
+            onChange={(next) =>
+              setNumber('dockWidthScale', clampRange(next, DOCK_WIDTH_MIN, DOCK_WIDTH_MAX))
+            }
           />
           <SliderRow
             label="底栏高度 dp"
             value={dockHeight}
             min={DOCK_HEIGHT_MIN}
             max={DOCK_HEIGHT_MAX}
-            onChange={(next) => setDockHeight(clampRange(next, DOCK_HEIGHT_MIN, DOCK_HEIGHT_MAX))}
+            onChange={(next) =>
+              setNumber('dockHeightDp', clampRange(next, DOCK_HEIGHT_MIN, DOCK_HEIGHT_MAX))
+            }
           />
           <SliderRow
             label="底栏内缩 dp"
@@ -867,7 +905,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             min={DOCK_INNER_PAD_MIN}
             max={DOCK_INNER_PAD_MAX}
             onChange={(next) =>
-              setDockInnerPad(clampRange(next, DOCK_INNER_PAD_MIN, DOCK_INNER_PAD_MAX))
+              setNumber('dockInnerPadDp', clampRange(next, DOCK_INNER_PAD_MIN, DOCK_INNER_PAD_MAX))
             }
           />
           <SliderRow
@@ -876,7 +914,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             min={DOCK_FLOAT_DP_MIN}
             max={DOCK_FLOAT_DP_MAX}
             onChange={(next) =>
-              setDockFloatDp(clampRange(next, DOCK_FLOAT_DP_MIN, DOCK_FLOAT_DP_MAX))
+              setNumber('dockFloatDp', clampRange(next, DOCK_FLOAT_DP_MIN, DOCK_FLOAT_DP_MAX))
             }
           />
 
@@ -895,66 +933,100 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               <SliderRow
                 label="dock 圆角（0–48，999=全胶囊）"
                 value={dockRadius}
-                min={0}
-                max={48}
-                onChange={(next) => setDockRadius(Math.round(clampRange(next, 0, 48)))}
+                min={DOCK_RANGES.dockRadiusDp.min}
+                max={DOCK_RANGES.dockRadiusDp.max}
+                onChange={(next) =>
+                  setNumber(
+                    'dockRadiusDp',
+                    Math.round(
+                      clampRange(next, DOCK_RANGES.dockRadiusDp.min, DOCK_RANGES.dockRadiusDp.max),
+                    ),
+                  )
+                }
               />
               <ScaleSliderRow
                 label="glowScale（柔光倍率）"
                 value={glowScale}
                 scaleKey="glowScale"
-                onChange={(next) =>
-                  useGlassStore.setState({ glowScale: clampScale('glowScale', next) })
-                }
+                onChange={(next) => setGlassScale('glowScale', clampScale('glowScale', next))}
               />
               <SliderRow
                 label="色散强度（0–1）"
                 value={dispersionLevel}
-                min={0}
-                max={1}
-                onChange={(next) => setDispersionLevel(clampRange(next, 0, 1))}
+                min={DOCK_RANGES.dispersionLevel.min}
+                max={DOCK_RANGES.dispersionLevel.max}
+                onChange={(next) =>
+                  setNumber(
+                    'dispersionLevel',
+                    clampRange(next, DOCK_RANGES.dispersionLevel.min, DOCK_RANGES.dispersionLevel.max),
+                  )
+                }
               />
               <SliderRow
                 label="描边亮度（0–3）"
                 value={glowAlpha}
-                min={0}
-                max={3}
-                onChange={(next) => setGlowAlpha(clampRange(next, 0, 3))}
+                min={DOCK_RANGES.glowAlpha.min}
+                max={DOCK_RANGES.glowAlpha.max}
+                onChange={(next) =>
+                  setNumber('glowAlpha', clampRange(next, DOCK_RANGES.glowAlpha.min, DOCK_RANGES.glowAlpha.max))
+                }
               />
               <SliderRow
                 label="描边宽度（0–3）"
                 value={glowWidth}
-                min={0}
-                max={3}
-                onChange={(next) => setGlowWidth(clampRange(next, 0, 3))}
+                min={DOCK_RANGES.glowWidth.min}
+                max={DOCK_RANGES.glowWidth.max}
+                onChange={(next) =>
+                  setNumber('glowWidth', clampRange(next, DOCK_RANGES.glowWidth.min, DOCK_RANGES.glowWidth.max))
+                }
               />
               <SliderRow
                 label="底缘加强（0–3）"
                 value={glowBottom}
-                min={0}
-                max={3}
-                onChange={(next) => setGlowBottom(clampRange(next, 0, 3))}
+                min={DOCK_RANGES.glowBottom.min}
+                max={DOCK_RANGES.glowBottom.max}
+                onChange={(next) =>
+                  setNumber(
+                    'glowBottom',
+                    clampRange(next, DOCK_RANGES.glowBottom.min, DOCK_RANGES.glowBottom.max),
+                  )
+                }
               />
               <SliderRow
                 label="圆角倍率（0–3）"
                 value={radiusScale}
-                min={0}
-                max={3}
-                onChange={(next) => setRadiusScale(clampRange(next, 0, 3))}
+                min={DOCK_RANGES.radiusScale.min}
+                max={DOCK_RANGES.radiusScale.max}
+                onChange={(next) =>
+                  setNumber(
+                    'radiusScale',
+                    clampRange(next, DOCK_RANGES.radiusScale.min, DOCK_RANGES.radiusScale.max),
+                  )
+                }
               />
               <SliderRow
                 label="宽度倍率（0.5–2）"
                 value={widthScale}
-                min={0.5}
-                max={2}
-                onChange={(next) => setWidthScale(clampRange(next, 0.5, 2))}
+                min={DOCK_RANGES.widthScale.min}
+                max={DOCK_RANGES.widthScale.max}
+                onChange={(next) =>
+                  setNumber(
+                    'widthScale',
+                    clampRange(next, DOCK_RANGES.widthScale.min, DOCK_RANGES.widthScale.max),
+                  )
+                }
               />
               <SliderRow
                 label="高度倍率（0.5–2）"
                 value={heightScale}
-                min={0.5}
-                max={2}
-                onChange={(next) => setHeightScale(clampRange(next, 0.5, 2))}
+                min={DOCK_RANGES.heightScale.min}
+                max={DOCK_RANGES.heightScale.max}
+                onChange={(next) =>
+                  setNumber(
+                    'heightScale',
+                    clampRange(next, DOCK_RANGES.heightScale.min, DOCK_RANGES.heightScale.max),
+                  )
+                }
               />
             </View>
           )}
