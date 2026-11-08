@@ -119,8 +119,8 @@ import android.view.ViewTreeObserver
  *   → Transparent，仅顶缘），原有 glow 顶/底双带 + 发丝线保留但降为扩展调试。
  * ③ 三开关最小实现：chromaticEnabled 关闭时 drawLensLayer 把 dispersion 置 0；
  *   depthEffect 下发 uDepthEffect；vibrancyEnabled 默认走风险最低的
- *   GlassLensShader 末 saturation=1.5 矩阵（uVibrancy=1，见
- *   VIBRANCY_SHADER_FALLBACK 决策注释），不触碰 GPU 模糊链 / RenderEffect /
+ *   RenderEffect 的 ColorFilter 链（it.19 P0-4 回归原版，见
+ *   VIBRANCY_SHADER_FALLBACK 注释），与原版 ColorFilterKt 同层 / 同顺序 /
  *   propGeneration；GPU ColorFilterEffect 路径保留为编译期开关供真机 A/B。
  *   四新 prop 全部走 markPropChanged()，静止期零重绘契约不变。
  * ④ 膜层语义：membraneAlpha 默认 0.38 → 0（「膜层」滑块改绑 tintScale），
@@ -262,29 +262,31 @@ class GlassKitView(context: Context) : View(context) {
         /** it.13 顶缘高光起始 alpha 系数：GlassSurfaceKt.java:713 的 0.22f × highlightScale。 */
         const val TOP_HIGHLIGHT_ALPHA: Float = 0.22f
         /**
-         * it.13 鲜活度默认路径决策（主理人新指令：跳过真机取证，遇到「必须
-         * 真机 A/B 才能二选一」的分支一律选风险最低的默认路径 + 可关闭开关）。
+         * it.19 P0-4：鲜活度（saturation=1.5）**回归 RenderEffect 的 ColorFilter 链**。
          *
-         * 【所选默认路径】true = GlassLensShader 末的 saturation=1.5 矩阵
-         * （uVibrancy=1，仅 API33+ 硬件透镜帧生效）。理由：
-         *  ① 不触碰 GPU 模糊链 / RenderEffect / Effect 缓存键 / propGeneration，
-         *     GPU ColorFilterEffect 整段代码在默认配置下不执行 —— 零 it.9
-         *     纱窗感 / 闪烁回归面（原 GPU 路径的回归风险恰恰需要真机 A/B 才能排除，
-         *     本轮不做取证，故不作为默认）；
-         *  ② uniform 默认 0：软画布快照回录帧 / API<33 不下发 uVibrancy，
-         *     逐位等价 it.12、不抛异常（it.8-fix1 教训）；
-         *  ③ 运行时可关闭开关 = vibrancyEnabled prop（默认 true，三开关之一），
-         *     置 false 即完全关闭鲜活度（uVibrancy=0、ColorFilter 亦不挂）。
+         * 历史：it.13 为了绕开「GPU 模糊链回归风险」把 saturation 塞进
+         * GlassLensShader 末的矩阵，用本常量做编译期开关（true = shader 矩阵）。
+         * 该做法有三个缺口，it.19 逐项对比原版后判定必须回归：
+         *  ① **覆盖不全**：shader 只在 API33+ 硬件透镜帧执行 ⇒ 纯模糊面板、
+         *     软画布回录帧、API31–32 全都没有鲜活度；原版 `ColorFilterKt.java:16`
+         *     是 ColorMatrixColorFilter 挂在 RenderEffect 链上，**所有玻璃面都有**。
+         *  ② **7-tap 冲突**：it.19 色散改成 7 点光谱后，像素是单一合成色，
+         *     矩阵输入得从 `cR.r/cG.g/cB.b` 改成 `composite.rgb`（否则色偏）；
+         *     与其返工不如把饱和搬回它原本该在的层。
+         *  ③ 每像素 3×3 矩阵换成一个 GPU 原生 ColorFilter，纯赚。
          *
-         * 【保留的备选路径】改为 false = 原 GPU 模糊链 RenderEffect
-         * .createColorFilterEffect（API31+，ColorFilterKt.java 语义）。本常量即
-         * 编译期 A/B 开关，供用户真机肉眼验收 / 后续取证时切换，本轮不启用。
-         * 两路互斥，不会双重饱和。
+         * 【拼接顺序】原版 `GlassSurfaceKt.java:677` 先 vibrancy 后 blur，而
+         * `internal/RenderEffectKt.chain(prev, other)` = `createChainEffect(other, prev)`
+         * ⇒ 实际是 **cf → blur**。旧实现用的 `createColorFilterEffect(cf, blur)`
+         * 等价于 `createChainEffect(cf, blur)` = **blur → cf**（顺序反了）。
+         * 两者在高色度边界不等价，本迭代改为显式
+         * `createChainEffect(blur, colorFilterEffect)`，与原版同序。
          *
-         * 【已知代价（非回归）】默认路径下鲜活度仅在 API33+ 硬件透镜帧生效，
-         * 软画布回录降级帧 / API31–32 无鲜活度；需要全帧鲜活度时切 false。
+         * 【门控】`vibrancyEnabled` prop（默认 true，三开关之一）关掉即完全不挂
+         * ColorFilter；API < 31（canBlur 之外）也不挂，行为与 it.12 一致。
+         * shader 侧已不再声明 uVibrancy（见 GlassLensShader），不存在双重饱和。
          */
-        const val VIBRANCY_SHADER_FALLBACK: Boolean = true
+        const val VIBRANCY_SHADER_FALLBACK: Boolean = false
     }
 
     /* ---------------- props（GlassKitManager @ReactProp 一一对应） ---------------- */
@@ -678,8 +680,10 @@ class GlassKitView(context: Context) : View(context) {
      * colorControls(brightness=0, contrast=1, saturation=1.5) 实算）。
      * invSat=-0.5 ⇒ r=-0.1065 / g=-0.3575 / b=-0.036 / cs=1.5：
      * [1.3935,-0.3575,-0.036; -0.1065,1.1425,-0.036; -0.1065,-0.3575,1.464]。
-     * 惰性构造一次，GPU 备选路径（VIBRANCY_SHADER_FALLBACK=false）的模糊链与
-     * 清晰折射帧共用（API31+ 门控）；默认 shader 矩阵路径下不触发构造。
+     * it.19 P0-4 起这是鲜活度的**唯一**实现（saturation 已从 shader 移除）：
+     * 惰性构造一次，模糊链（createChainEffect(blur, cf)）与清晰折射帧
+     * （obtainGpuVibrancyOnlyEffect）共用；API31+ 门控，vibrancyEnabled=false
+     * 时一次都不构造。
      */
     private val vibrancyColorFilter: ColorFilter by lazy {
         ColorMatrixColorFilter(
@@ -1834,10 +1838,9 @@ class GlassKitView(context: Context) : View(context) {
             node.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
         } else {
             // blurScale≈0（清晰折射）：不挂 BlurEffect，仅借离屏链路产独立硬件缓冲；
-            // it.13 默认 shader 矩阵路径下此处返回 null（等价 it.12 的
-            // setRenderEffect(null)），鲜活度由 drawLensLayer 的 RuntimeShader
-            // uVibrancy=1 承担；切 VIBRANCY_SHADER_FALLBACK=false 时才单独挂
-            // ColorFilterEffect（不引入任何模糊）。
+            // it.19 P0-4 起鲜活度回归 ColorFilter 链 ⇒ 这里单独挂一个
+            // ColorFilterEffect（不引入任何模糊），与模糊路径的
+            // createChainEffect(blur, cf) 在「无模糊」时退化为同一个 cf。
             node.setRenderEffect(obtainGpuVibrancyOnlyEffect())
         }
         val recordingCanvas = node.beginRecording()
@@ -1964,7 +1967,13 @@ class GlassKitView(context: Context) : View(context) {
         // 矩阵出处 ColorFilterKt.java:16 / 75-85）。默认 shader 矩阵路径下
         // useVibrancy 恒 false，此处直接返回纯 blur，GPU 模糊链逐位等价 it.12。
         val effect = if (useVibrancy) {
-            RenderEffect.createColorFilterEffect(vibrancyColorFilter, blur)
+            // 原版顺序是 cf → blur（GlassSurfaceKt.java:677 先 vibrancy 再 blur，
+            // 而 chain(prev, other) = createChainEffect(other, prev)），故显式串成
+            // createChainEffect(blur, cf)：先 colorFilter 再模糊。
+            RenderEffect.createChainEffect(
+                blur,
+                RenderEffect.createColorFilterEffect(vibrancyColorFilter),
+            )
         } else {
             blur
         }
@@ -2263,7 +2272,13 @@ class GlassKitView(context: Context) : View(context) {
         // 纯模糊路径（无透镜面板 / 软画布降级帧）同样叠 saturation=1.5；
         // 默认 shader 矩阵路径下 useVibrancy 恒 false，保持纯 blur 逐位等价 it.12。
         val effect = if (useVibrancy) {
-            RenderEffect.createColorFilterEffect(vibrancyColorFilter, blur)
+            // 原版顺序是 cf → blur（GlassSurfaceKt.java:677 先 vibrancy 再 blur，
+            // 而 chain(prev, other) = createChainEffect(other, prev)），故显式串成
+            // createChainEffect(blur, cf)：先 colorFilter 再模糊。
+            RenderEffect.createChainEffect(
+                blur,
+                RenderEffect.createColorFilterEffect(vibrancyColorFilter),
+            )
         } else {
             blur
         }
@@ -2308,18 +2323,14 @@ class GlassKitView(context: Context) : View(context) {
         shader.setInputShader("uBlurred", bitmapShader)
         shader.setFloatUniform("uSize", w.toFloat(), h.toFloat())
         shader.setFloatUniform("uCornerRadiusPx", cornerRadiusPx)
-        // it.13：新增 uniform 只在硬件画布的 drawLensLayer 里下发。软画布快照回录
-        // 帧走 drawBlurredLayer 降级，不进本方法 —— uniform 未下发时 AGSL 内部
-        // n=max(uCornerExponent,2.0) 兜底为圆弧、uVibrancy=0 跳过矩阵分支，
-        // 逐位等价 it.12、不抛异常（it.8-fix1 教训）。
+        // it.13：uniform 只在硬件画布的 drawLensLayer 里下发。软画布快照回录帧走
+        // drawBlurredLayer 降级，不进本方法 —— uniform 未下发时 AGSL 内部
+        // n=max(uCornerExponent,2.0) 兜底为圆弧，逐位等价 it.12、不抛异常
+        //（it.8-fix1 教训）。
         shader.setFloatUniform("uCornerExponent", cornerExponentN)
         shader.setFloatUniform("uDepthEffect", if (depthEffect) 1f else 0f)
-        // 默认路径（VIBRANCY_SHADER_FALLBACK=true）：鲜活度由 shader 末矩阵承担；
-        // 运行时开关 vibrancyEnabled=false 时下发 0，完全关闭鲜活度。
-        shader.setFloatUniform(
-            "uVibrancy",
-            if (vibrancyEnabled && VIBRANCY_SHADER_FALLBACK) 1f else 0f,
-        )
+        // it.19 P0-4：shader 已无 uVibrancy（鲜活度走 RenderEffect 的 ColorFilter 链），
+        // 不再下发该 uniform —— AGSL 里也没有这个声明，下发会静默失败。
         return shader
     }
 }

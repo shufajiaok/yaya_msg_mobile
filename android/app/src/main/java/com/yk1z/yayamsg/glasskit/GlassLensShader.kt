@@ -17,7 +17,7 @@ import androidx.annotation.RequiresApi
  * - uniform float uCornerRadiusPx    ：圆角半径（px，已钳 min(w,h)/2）
  * - uniform float uCornerExponent    ：it.13 连续曲率超椭圆指数 n（Path 同源）
  * - uniform float uDepthEffect       ：it.13 景深开关（0/1）
- * - uniform float uVibrancy          ：it.13 鲜活度矩阵开关（0/1，默认路径）
+ * （it.19 P0-4 起**没有** uVibrancy：鲜活度回归 RenderEffect 的 ColorFilter 链。）
  *
  * it.19 P0-3（透镜剖面）—— 对齐原版 `ShadersKt.java:11 RoundedRectRefractionShaderString`：
  * - 剖面由「线性 `clamp(1 + sdf/refraction)`」改为**圆透镜 `circleMap`**：
@@ -62,7 +62,6 @@ uniform float uLensBandPx;
 uniform float uCornerRadiusPx;
 uniform float uCornerExponent;
 uniform float uDepthEffect;
-uniform float uVibrancy;
 
 // it.19 圆透镜剖面（原版 ShadersKt.java:11 circleMap）。
 // x=0 → 0（带内缘无位移）；x=1 → 1（贴边满位移），且起步平缓、贴边陡。
@@ -163,17 +162,12 @@ half4 main(float2 fragCoord) {
 
     // it.10 边缘 AA：贴边 1px 内向 alpha 渐变（表达式保留不动）
     float edgeAA = clamp(-sdf, 0.0, 1.0);
-    // it.13 鲜活度默认路径：uVibrancy=1 时由末矩阵承担 saturation=1.5
-    // 矩阵 = ColorFilterKt.java:16 / 75-85 colorControls(saturation=1.5) 实算。
-    // it.19：7-tap 之后像素已是**单一合成色**，矩阵输入必须改为 color.rgb
-    //（旧实现在这里拿 cRed.r / cGreen.g / cBlue.b 当三通道，那是 3-tap 的副产物，
-    //  7-tap 下继续这么用会色偏）。
-    if (uVibrancy > 0.5) {
-        float vr = clamp(1.3935 * composite.r - 0.3575 * composite.g - 0.036 * composite.b, 0.0, 1.0);
-        float vg = clamp(-0.1065 * composite.r + 1.1425 * composite.g - 0.036 * composite.b, 0.0, 1.0);
-        float vb = clamp(-0.1065 * composite.r - 0.3575 * composite.g + 1.464 * composite.b, 0.0, 1.0);
-        return half4(vr, vg, vb, composite.a * edgeAA);
-    }
+    // it.19 P0-4：鲜活度（saturation=1.5）**移出 shader**，回归原版 ColorFilter 链
+    // （ColorFilterKt.java:16,57-60 挂的是 RenderEffect 里的 ColorMatrixColorFilter，
+    //  原版 lens shader 从不做 saturation）。原来塞在这里有三个缺口：
+    //  ① 只有 API33+ 硬件透镜帧有饱和，纯模糊面板 / API31–32 完全没有；
+    //  ② 7-tap 之后像素是单一合成色，矩阵输入要从 cR.r/cG.g/cB.b 改写成 composite.rgb；
+    //  ③ 每像素多一次 3×3 矩阵运算。
     return half4(composite.r, composite.g, composite.b, composite.a * edgeAA);
 }
 """.trim()
