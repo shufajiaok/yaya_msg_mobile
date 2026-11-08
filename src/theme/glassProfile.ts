@@ -91,16 +91,23 @@ export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
  *
  * ★ INDICATOR 的 0.8 是**替换**滑块而非与滑块相乘（`?:` 而非 `×`）：原版
  *   `lensScale = 0.8`（与 refractionScale 3.0 无关）⇒ 有效 band 19.2px / amount 24px。
- *   我们按主理人拍板「指示器保留受 lensScale 调节」，把 0.8 **烘进基数**
- *   （10×0.8=8、8×0.8=6.4）并继续乘滑块 3.0 ⇒ 有效 57.6 / 72 px = 原版锁值的 3×，
- *   带高:位移比例仍守恒（6.4 : 8 = 8 : 10）。滑块拨到 1.0 时即逐值等于原版锁值。
+ *   我们按主理人拍板「指示器保留受 lensScale 调节」，但**校准点必须落在默认滑块值上**：
+ *   用户默认 lensScale = 3.0，此时指示器应恰好等于原版锁定值（19.2 / 24 px）。
+ *   故基数按「原版 dp × 0.8 ÷ 3.0」反算：
+ *     - `indicatorBandDp`     = 8dp  × 0.8 / 3.0 = **2.1333**  → ×3(density)×3(滑块) = 19.2px
+ *     - `indicatorRefractionDp` = 10dp × 0.8 / 3.0 = **2.6667** → ×3×3 = 24px
+ *   滑块拖到 1.0 ⇒ 只有原版 1/3（用户主动要的「变弱」）；拖回 3.0 ⇒ 逐像素回到原版。
+ *   ⚠️ 因此 dock/指示器的透镜 px **不能 Math.round**：2.1333×3 = 6.3999，round 成 6
+ *   再 ×3 只有 18px（丢 1.2px）。调用点直接传浮点。
  *   inv-engine 记的「INDICATOR 带高 19dp」即 19.2 **px**（density 3 × 8dp × 0.8），
  *   单位被写成了 dp；BAR 的「9dp / 15dp」同理是 9px / 15px。
  *
- * - `indicatorDispersionDp`：色散基准幅（8dp = 与折射位移 1:1）。原版色散没有独立
- *   幅度参数（`dispersionIntensity = d × grad × (px·py)/(halfW·halfH)`，即 = 折射位移
- *   × 象限符号），因此取「与 indicatorRefractionDp 相同」，滑块满幅 1.0 时 dispK = 1.0
- *   = 原版；旧实现 10dp / 0.35 归一让默认 dispK ≈ 3.6（彩虹偏重 3.6 倍）。
+ * - `indicatorDispersionDp`：色散基准幅，**恒等于 indicatorRefractionDp**。原版色散
+ *   没有独立幅度参数（`dispersionIntensity = d × grad × (px·py)/(halfW·halfH)`，即 =
+ *   折射位移 × 象限符号），所以 `dispK = uDispersionPx / uRefractionPx` 必须是滑块值本身：
+ *   基数相等 ⇒ dispK = dispersionLevel。滑块满幅 1.0 时 dispK = 1.0 = 原版。
+ *   （旧实现 10dp / 0.35 归一让默认 dispK ≈ 3.6，彩虹偏重 3.6 倍；改基数时若只动折射
+ *   不动色散，dispK 会跟着变 3 倍 —— 两者必须同步改。）
  * - `dispersionLevelBase`：滑块 0–1 直接作倍数（1.0 = 原版满幅）。
  * - `control*` / `overlay*`：暂未接线（生产面目前只有 dock bar / 指示器走透镜；
  *   实验页面板未下发 lensBandPx，native 兜底 `band = amount`＝it.18 前的覆盖范围）。
@@ -109,9 +116,12 @@ export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
 export const GLASS_LENS_PROFILE = {
   barRefractionDp: 5,
   barBandDp: 3,
-  indicatorRefractionDp: 8,
-  indicatorBandDp: 6.4,
-  indicatorDispersionDp: 8,
+  // = 10dp × 0.8 / 3.0（原版 INDICATOR amount 10dp、lockedRefraction 0.8、默认滑块 3.0）
+  indicatorRefractionDp: 2.6667,
+  // = 8dp × 0.8 / 3.0（原版 INDICATOR band 8dp）
+  indicatorBandDp: 2.1333,
+  // 恒等于 indicatorRefractionDp（原版色散无独立幅度，dispK 必须 = 滑块值）
+  indicatorDispersionDp: 2.6667,
   dispersionLevelBase: 1,
   controlRefractionDp: 8,
   controlBandDp: 5,

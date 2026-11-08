@@ -1663,7 +1663,8 @@ class GlassKitView(context: Context) : View(context) {
         // it.14 取证：追加 capsule / boost 标记，logcat 可直接核对
         // 「n=2.0 capsule=true boost=0.05」（dock / 指示器 / 顶栏演示件帧）。
         // it.19 取证：追加三个最终 px 值（已乘 lensScale），用于核对量纲修正：
-        // BAR 期望 refract=45.0 band=27.0；INDICATOR 期望 refract=72.0 band=57.6
+        // BAR 期望 refract=45.0 band=27.0；INDICATOR 期望 refract=24.0 band=19.2
+        // （it.19 指示器基准校准后：原版 10dp/8dp × lockedRefraction 0.8 = 24/19.2px）
         // （density 3 / lensScale 3）。
         val flags = "chromatic=$chromaticEnabled depth=$depthEffect" +
             " vibrancy=$vibrancyEnabled n=$cornerExponentN" +

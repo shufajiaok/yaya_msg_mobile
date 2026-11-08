@@ -506,16 +506,16 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
    * 默认 lensScale=3 / density=3 时恰好等于原版 72px，但滑块响应非线性、且与 density 无关。
    * 基准值统一来自 glassProfile.GLASS_LENS_PROFILE（与 AppTabBar 同一份）。
    */
+  // ⚠️ 透镜 px 不取整（2.1333dp × 3 = 6.3999，round 成 6 会丢 1.2px @ ×lensScale）
   const density = PixelRatio.get();
-  const barRefractionPx = Math.round(GLASS_LENS_PROFILE.barRefractionDp * density);
-  const barLensBandPx = Math.round(GLASS_LENS_PROFILE.barBandDp * density);
-  const indicatorRefractionPx = Math.round(GLASS_LENS_PROFILE.indicatorRefractionDp * density);
-  const indicatorLensBandPx = Math.round(GLASS_LENS_PROFILE.indicatorBandDp * density);
-  const indicatorDispersionPx = Math.round(
+  const barRefractionPx = GLASS_LENS_PROFILE.barRefractionDp * density;
+  const barLensBandPx = GLASS_LENS_PROFILE.barBandDp * density;
+  const indicatorRefractionPx = GLASS_LENS_PROFILE.indicatorRefractionDp * density;
+  const indicatorLensBandPx = GLASS_LENS_PROFILE.indicatorBandDp * density;
+  const indicatorDispersionPx =
     GLASS_LENS_PROFILE.indicatorDispersionDp *
-      density *
-      (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase),
-  );
+    density *
+    (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
   const indicatorBlurDp = Math.round(2 * blurScale);
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。

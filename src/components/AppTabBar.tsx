@@ -20,8 +20,9 @@
  * - 指示器：backdropTag 指向 bar 原生 handle（玻璃叠玻璃）、内缩 = dockInnerPadDp、
  *   capsuleContinuous、indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451
  *   的 White@0.05）、highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
- *   blur 2dp × blurScale、refraction 8dp × density、带高 6.4dp × density、
- *   dispersion 8dp × density × (dispersionLevel/1.0)（三者都由 native 再乘 lensScale；
+ *   blur 2dp × blurScale、refraction 2.6667dp × density、带高 2.1333dp × density（= 原版
+ *   10dp/8dp × lockedRefraction 0.8 ÷ 默认滑块 3.0，见 GLASS_LENS_PROFILE 推导）、
+ *   dispersion 2.6667dp × density × (dispersionLevel/1.0)（三者都由 native 再乘 lensScale；
  *   与实验页同一公式）。
  *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
  *   绝不用累加增量）。
@@ -230,16 +231,17 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
    *   滑块响应非线性、跨机型不一致。
    * 修正后 = `dp × density × lensScale`，跨机型一致且与滑块线性。
    */
+  // ⚠️ 透镜 px **不取整**（it.19 指示器基准校准）：2.1333dp × 3 = 6.3999，若 round
+  // 成 6 再 ×lensScale 只有 18px（原版 19.2px，丢 1.2px）。桥接层收 Float，直传即可。
   const density = PixelRatio.get();
-  const barRefractionPx = Math.round(GLASS_LENS_PROFILE.barRefractionDp * density);
-  const barLensBandPx = Math.round(GLASS_LENS_PROFILE.barBandDp * density);
-  const indicatorRefractionPx = Math.round(GLASS_LENS_PROFILE.indicatorRefractionDp * density);
-  const indicatorLensBandPx = Math.round(GLASS_LENS_PROFILE.indicatorBandDp * density);
-  const indicatorDispersionPx = Math.round(
+  const barRefractionPx = GLASS_LENS_PROFILE.barRefractionDp * density;
+  const barLensBandPx = GLASS_LENS_PROFILE.barBandDp * density;
+  const indicatorRefractionPx = GLASS_LENS_PROFILE.indicatorRefractionDp * density;
+  const indicatorLensBandPx = GLASS_LENS_PROFILE.indicatorBandDp * density;
+  const indicatorDispersionPx =
     GLASS_LENS_PROFILE.indicatorDispersionDp *
-      density *
-      (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase),
-  );
+    density *
+    (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
 
   // 指示器只做「绝对目标 x」的 spring，不累加增量（it.10 漂移根因）。
   useEffect(() => {
