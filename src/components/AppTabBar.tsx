@@ -66,6 +66,8 @@ import { useBackdropTag } from '../native/backdropTagStore';
 import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/glass';
 import {
   GLASS_BAR_FALLBACK,
+  GLASS_DOCK_ACTIVE,
+  GLASS_DOCK_INACTIVE,
   GLASS_INDICATOR_FALLBACK,
   GLASS_LENS_PROFILE,
   GLASS_TINT_COLOR,
@@ -103,10 +105,12 @@ function TabCell({
   onSelect: () => void;
 }) {
   const palette = usePalette();
-  // it.19：真机色值是 #7CA6FF / #9CA8BC，但守卫硬规则 D7 禁止落地 Accent 色值
-  //（03 §3.1）⇒ 仍走 palette.tint / labelSecondary，色值差异待用户定夺。
-  const activeColor = palette.tint;
-  const inactiveColor = palette.labelSecondary;
+  // it.19（用户 2026-11-09 裁决「只放开颜色」）：深色主题取原版 glasskit 库的
+  // 品牌玻璃色 #7CA6FF / #9CA8BC；浅色主题仍走 palette（库色板写死深色，
+  // #9CA8BC 在浅底上对比度不足）。
+  const useBrandColor = palette.name === 'dark';
+  const activeColor = useBrandColor ? GLASS_DOCK_ACTIVE : palette.tint;
+  const inactiveColor = useBrandColor ? GLASS_DOCK_INACTIVE : palette.labelSecondary;
 
   return (
     <Pressable

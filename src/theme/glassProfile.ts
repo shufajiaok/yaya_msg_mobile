@@ -140,6 +140,22 @@ export const GLASS_INDICATOR_FALLBACK = {
 } as const;
 
 /**
+ * dock tab 文字/图标色 —— 原版 glasskit 库写死的**品牌玻璃色**（深色）。
+ *
+ * 来源：`hc-src/.../com/jiale/glasskit/GlassKitKt.java` GlassBottomTabs：
+ * 选中 #7CA6FF（Bold）/ 未选中 #9CA8BC（Normal）。
+ *
+ * 用户 2026-11-09 裁决：「只放开颜色，字号保 11sp」⇒ 这两个色值获准落地，
+ * 守卫 D7 对它们的白名单仅限本文件 + 这两个常量名（scripts/glass-guard.js
+ * 的 brandGlassColorFile / brandGlassColorLine）。
+ *
+ * ⚠️ 该库色板**写死深色、不跟随 light/dark**；我们 App 有浅色主题，
+ * #9CA8BC 在浅底上对比度不足 ⇒ 只在深色主题取权威值，浅色主题仍走 palette。
+ */
+export const GLASS_DOCK_ACTIVE = '#7CA6FF';
+export const GLASS_DOCK_INACTIVE = '#9CA8BC';
+
+/**
  * dock bar 卡纸底衬色（不透明）—— **it.17 起已停用，常量保留**。
  *
  * 历史（it.16-fix1）：Kotlin 版底栏之所以像一张不透明卡纸，是因为其页面内容在

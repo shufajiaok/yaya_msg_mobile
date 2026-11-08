@@ -157,6 +157,16 @@ function scanHardRules() {
   const problems = [];
   const bannedParams = /\b(?:refractDp|refractMode|dispersion|edgeWidthDp|edgeGlow|legacyBackdrop|GLASS_DEFAULTS)\b/;
   const engineHardcode = /#7CA6FF|Color\(\s*0x/i;
+  /**
+   * D7 唯一例外（用户 2026-11-09 裁决：「只放开颜色，字号保 11sp」）：
+   * dock tab 的选中/未选中色是原版 glasskit 库写死的**品牌玻璃色**
+   * （GlassKitKt.java GlassBottomTabs：active #7CA6FF / inactive #9CA8BC），
+   * 不是通用 Accent。仅允许在 theme/glassProfile.ts 内以
+   * GLASS_DOCK_ACTIVE / GLASS_DOCK_INACTIVE 两个常量落地；
+   * 其他文件、其他色值、其他常量名一律仍按 D7 拦截。
+   */
+  const brandGlassColorFile = 'src/theme/glassProfile.ts';
+  const brandGlassColorLine = /\bGLASS_DOCK_(?:ACTIVE|INACTIVE)\b/;
   const danmakuRel = 'src/components/DanmakuOverlay.tsx';
 
   for (const file of files) {
@@ -169,7 +179,8 @@ function scanHardRules() {
       if (bannedParams.test(line)) {
         problems.push('[旧参数残留] ' + where + ' — v2.1 已删除八项旧参数（03 §13.3）');
       }
-      if (engineHardcode.test(line)) {
+      const isBrandGlassColor = rel === brandGlassColorFile && brandGlassColorLine.test(line);
+      if (engineHardcode.test(line) && !isBrandGlassColor) {
         problems.push('[引擎硬编码色] ' + where + ' — 禁止落地 Accent #7CA6FF / Color(0xFF...)（03 §3.1 / D7）');
       }
       if (rel === danmakuRel && GLASS_USAGE_RE.test(line)) {
