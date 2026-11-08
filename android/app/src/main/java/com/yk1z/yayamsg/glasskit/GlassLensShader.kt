@@ -13,6 +13,8 @@ import androidx.annotation.RequiresApi
  * - uniform float2 uSize             ：玻璃面板尺寸（px，本地坐标系）
  * - uniform float uRefractionPx      ：折射位移幅度（px，已乘 lensScale）
  * - uniform float uDispersionPx      ：色散位移幅度（px，已乘 lensScale）
+ * - uniform float uLensBandPx        ：it.19 折射带高（px，已乘 lensScale）；
+ *                                      ① circleMap 剖面启用，⓪ 仅声明
  * - uniform float uCornerRadiusPx    ：圆角半径（px，已钳 min(w,h)/2）
  * - uniform float uCornerExponent    ：it.13 连续曲率超椭圆指数 n（Path 同源）
  * - uniform float uDepthEffect       ：it.13 景深开关（0/1）
@@ -53,6 +55,10 @@ uniform shader uBlurred;
 uniform float2 uSize;
 uniform float uRefractionPx;
 uniform float uDispersionPx;
+// it.19 折射带高（px）：circleMap 剖面的归一化尺度（对应原版
+// RoundedRectRefractionShaderString 的 refractionHeight）。⓪ 阶段只声明、
+// main 内不读取（AGSL 允许未使用 uniform）⇒ 观感零变化；① 起由剖面使用。
+uniform float uLensBandPx;
 uniform float uCornerRadiusPx;
 uniform float uCornerExponent;
 uniform float uDepthEffect;

@@ -10,11 +10,11 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * LiveExoViewManager 先例）。
  *
  * props 与 src/native/GlassKitView.tsx 一一对应：
- * blurDp / tintAlpha / tintColor / refractionPx / dispersionPx / cornerRadiusDp /
- * dimmingAlpha / backdropTag / blurScale / tintScale / lensScale / blurEnabled /
- * glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
+ * blurDp / tintAlpha / tintColor / refractionPx / dispersionPx / lensBandPx /
+ * cornerRadiusDp / dimmingAlpha / backdropTag / blurScale / tintScale / lensScale /
+ * blurEnabled / glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
  * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled /
- * capsuleContinuous / indicatorBoostAlpha。
+ * capsuleContinuous / indicatorBoostAlpha / liveBackdrop。
  * 所有 setter 对 JS 空值做兜底（default* 注解 + null 合并），倍率默认 1f，
  * blurEnabled 默认 true（H2 语义：能力门控在 JS 侧 canBlur/canLens 收口）。
  *
@@ -71,6 +71,19 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "dispersionPx", defaultFloat = 0f)
     fun setDispersionPx(view: GlassKitView, value: Float) {
         view.dispersionPx = value
+    }
+
+    /**
+     * it.19 折射带高（px；circleMap 剖面入参，透镜时再乘 lensScale）。
+     *
+     * 原版 `GlassLevel.refractionHeightDp` 与之对应（BAR 3dp / INDICATOR 8dp），
+     * 与 refractionPx（最大位移）**是两个独立参数**：带内位移 = circleMap(t) × 位移，
+     * t 由「距边缘距离 / 带高」归一化。JS 侧按 `dp × PixelRatio.get()` 传 px，
+     * 与 refractionPx 同一量纲（两者都由 native 统一乘 lensScale，避免二次乘算）。
+     */
+    @ReactProp(name = "lensBandPx", defaultFloat = 0f)
+    fun setLensBandPx(view: GlassKitView, value: Float) {
+        view.lensBandPx = value
     }
 
     /** 圆角半径（dp）。 */

@@ -65,6 +65,29 @@ export const GLASS_DEBUG_DEFAULTS = {
 export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
 
 /**
+ * it.19 透镜量纲基准（**dp**）：对应原版 `GlassLevel.java:37-38` 的两档透镜参数，
+ * 供 `AppTabBar` 与 `GlassTestScreen` 共用同一套基准，避免两个调用点各写一份。
+ *
+ * 量纲口径（it.19 修正）：JS 只做 `dp × PixelRatio.get()` → **px**，
+ * `lensScale` 由 native 统一乘一次（`GlassKitView.drawLensLayer`），
+ * 最终位移 = `dp × density × lensScale`，跨机型一致、与滑块线性。
+ *
+ * - `barRefractionDp` / `barBandDp`：原版 BAR `refractionAmountDp=5` / `refractionHeightDp=3`
+ * - `indicatorRefractionDp` / `indicatorBandDp`：原版 INDICATOR `amount=10dp` / `height=8dp`，
+ *   **已把 lockedRefraction 0.8 烘进基数**（10×0.8=8、8×0.8=6.4）——我们保留
+ *   「指示器受 lensScale 调节」（用户已验收），但保持原版 8 : 6.4 的带高/位移比例。
+ * - `indicatorDispersionDp`：色散基准幅（10dp），`dispersionLevelBase` 为滑块满幅基准。
+ */
+export const GLASS_LENS_PROFILE = {
+  barRefractionDp: 5,
+  barBandDp: 3,
+  indicatorRefractionDp: 8,
+  indicatorBandDp: 6.4,
+  indicatorDispersionDp: 10,
+  dispersionLevelBase: 0.35,
+} as const;
+
+/**
  * dock bar 降级实底（!canBlur() || !canLens() 时使用）。
  * 沿用替换前 AppTabBar 的半透明实底；集中在 theme 目录定义，避免守卫 R1
  * 把 `AppTabBar.tsx` 里的内联 rgba 计为「新增」。

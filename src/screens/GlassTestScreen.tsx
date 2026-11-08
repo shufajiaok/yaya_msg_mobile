@@ -85,6 +85,7 @@ import {
   Animated,
   findNodeHandle,
   PanResponder,
+  PixelRatio,
   Platform,
   Pressable,
   ScrollView,
@@ -104,6 +105,7 @@ import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import GlassKitView from '../native/GlassKitView';
 import GlassSlider from '../components/GlassSlider';
 import { canBlur, canLens, resolveTintAlpha, SCALE_RANGES, TINT_ALPHA_BASE } from '../theme/glass';
+import { GLASS_LENS_PROFILE } from '../theme/glassProfile';
 import {
   DOCK_RANGES,
   setGlassScale,
@@ -497,8 +499,23 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   }, [dockSelected, dockTabWidth, dockInnerPad, dockIndicatorX]);
 
   const panelDispersionPx = Math.round(dispersionLevel * DISPERSION_PX_PER_UNIT);
-  const indicatorRefractionPx = Math.round(8 * lensScale);
-  const indicatorDispersionPx = Math.round(10 * lensScale * (dispersionLevel / 0.35));
+  /**
+   * it.19 量纲修正（dp → px）：JS 只做 `dp × PixelRatio.get()`，
+   * lensScale 由 native 统一乘一次（GlassKitView.drawLensLayer）。
+   * 修正前这里写的是 `round(8 × lensScale)` 而 native 又乘一次 ⇒ 实际 = 8 × lensScale²，
+   * 默认 lensScale=3 / density=3 时恰好等于原版 72px，但滑块响应非线性、且与 density 无关。
+   * 基准值统一来自 glassProfile.GLASS_LENS_PROFILE（与 AppTabBar 同一份）。
+   */
+  const density = PixelRatio.get();
+  const barRefractionPx = Math.round(GLASS_LENS_PROFILE.barRefractionDp * density);
+  const barLensBandPx = Math.round(GLASS_LENS_PROFILE.barBandDp * density);
+  const indicatorRefractionPx = Math.round(GLASS_LENS_PROFILE.indicatorRefractionDp * density);
+  const indicatorLensBandPx = Math.round(GLASS_LENS_PROFILE.indicatorBandDp * density);
+  const indicatorDispersionPx = Math.round(
+    GLASS_LENS_PROFILE.indicatorDispersionDp *
+      density *
+      (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase),
+  );
   const indicatorBlurDp = Math.round(2 * blurScale);
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。
@@ -685,7 +702,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               tintColor={panelTintFor(scheme)}
               cornerRadiusDp={dockRadius}
               capsuleContinuous={true}
-              refractionPx={Math.round(5 * lensScale)}
+              refractionPx={barRefractionPx}
+              lensBandPx={barLensBandPx}
               dispersionPx={0}
               highlightScale={highlightScale}
               glowScale={glowScale}
@@ -741,6 +759,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                     capsuleContinuous={true}
                     indicatorBoostAlpha={0.05}
                     refractionPx={indicatorRefractionPx}
+                    lensBandPx={indicatorLensBandPx}
                     dispersionPx={indicatorDispersionPx}
                     highlightScale={0}
                     chromaticEnabled={chromaticEnabled}

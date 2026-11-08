@@ -344,6 +344,28 @@ class GlassKitView(context: Context) : View(context) {
             markPropChanged()
         }
 
+    /**
+     * it.19 折射带高（px；透镜时乘 lensScale）。
+     *
+     * 与 [refractionPx]（带内最大位移）是**两个独立参数**，对应原版
+     * `GlassLevel.refractionHeightDp` + `refractionAmountDp`
+     * （ShadersKt.java:11 `RoundedRectRefractionShaderString` 的
+     * `refractionHeight` / `refractionAmount` 两个 uniform）：
+     * 带内 `t = clamp(1 - (-sd)/h, 0, 1)`、位移 = `circleMap(t) × amount`。
+     *
+     * 量纲：JS 传 **px**（`dp × PixelRatio.get()`），native 侧与 refractionPx
+     * 一样统一再乘 lensScale ⇒ 与滑块线性相关，且不依赖设备 density。
+     * 默认 0f = 未接线；shader 侧以 `max(uLensBandPx, 1.0)` 兜底防除零。
+     */
+    var lensBandPx: Float = 0f
+        set(value) {
+            // S4 修复：同 refractionPx，NaN/Infinity 回退 0f
+            val v = if (value.isFinite()) value else 0f
+            if (field == v) return
+            field = v
+            markPropChanged()
+        }
+
     /** 圆角半径（dp）。 */
     var cornerRadiusDp: Float = 0f
         set(value) {
@@ -1225,7 +1247,7 @@ class GlassKitView(context: Context) : View(context) {
                 logTag,
                 "props snapshot: blurDp=$blurDp blurScale=$blurScale tintAlpha=$tintAlpha" +
                     " tintColor=$tintColor tintScale=$tintScale lensScale=$lensScale" +
-                    " refractionPx=$refractionPx dispersionPx=$dispersionPx" +
+                    " refractionPx=$refractionPx dispersionPx=$dispersionPx lensBandPx=$lensBandPx" +
                     " cornerRadiusDp=$cornerRadiusDp dimmingAlpha=$dimmingAlpha" +
                     " membraneAlpha=$membraneAlpha highlightScale=$highlightScale" +
                     " chromatic=$chromaticEnabled depth=$depthEffect vibrancy=$vibrancyEnabled" +
@@ -1595,14 +1617,23 @@ class GlassKitView(context: Context) : View(context) {
         // 自动重合（shader 主体不动，零彩边）；lensActive 判定仍用原始 prop，
         // 不影响采集全分辨率语义。
         val dispersion = if (chromaticEnabled) dispersionPx * lensScale else 0f
+        // it.19：折射带高（circleMap 剖面的归一化尺度），与 refraction 同口径乘 lensScale。
+        // ⓪ 阶段 shader 只声明不读（uLensBandPx 未参与求值）⇒ 观感零变化，
+        // 仅用于把量纲与 prop 链先行落地，便于单独二分。① 起由 circleMap 使用。
+        val lensBand = lensBandPx * lensScale
         shader.setFloatUniform("uRefractionPx", refraction)
         shader.setFloatUniform("uDispersionPx", dispersion)
+        shader.setFloatUniform("uLensBandPx", lensBand)
         // it.13 效果开关 A/B 取证（仅硬件路径，切换/首帧各一条，防刷屏）
         // it.14 取证：追加 capsule / boost 标记，logcat 可直接核对
         // 「n=2.0 capsule=true boost=0.05」（dock / 指示器 / 顶栏演示件帧）。
+        // it.19 取证：追加三个最终 px 值（已乘 lensScale），用于核对量纲修正：
+        // BAR 期望 refract=45.0 band=27.0；INDICATOR 期望 refract=72.0 band=57.6
+        // （density 3 / lensScale 3）。
         val flags = "chromatic=$chromaticEnabled depth=$depthEffect" +
             " vibrancy=$vibrancyEnabled n=$cornerExponentN" +
-            " capsule=$capsuleContinuous boost=$indicatorBoostAlpha"
+            " capsule=$capsuleContinuous boost=$indicatorBoostAlpha" +
+            " refractPx=$refraction bandPx=$lensBand dispPx=$dispersion"
         if (loggedEffectFlags != flags) {
             loggedEffectFlags = flags
             Log.i(logTag, "lens effect flags: view=$id $flags")

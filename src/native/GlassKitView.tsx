@@ -13,6 +13,7 @@
  *                 tintColor 恒为 0。真机 logcat + 像素取证实证，2026-11-07）
  * - refractionPx  折射位移基准 px（API 33+ 透镜，乘 lensScale）
  * - dispersionPx  色散位移基准 px（API 33+ 透镜，乘 lensScale）
+ * - lensBandPx    it.19 折射带高 px（circleMap 剖面；与 refractionPx 独立）
  * - cornerRadiusDp 圆角半径 dp（it.13：引擎按连续曲率超椭圆生成 clip 与 SDF）
  * - dimmingAlpha  压暗层 alpha（#000，独立于 tint）
  * - backdropTag   背景容器 tag（findNodeHandle(GlassKitBackdrop ref)）
@@ -71,6 +72,13 @@ export interface GlassKitViewProps extends ViewProps {
   refractionPx?: number;
   /** 色散位移基准（px，仅 API 33+ 生效）。 */
   dispersionPx?: number;
+  /**
+   * it.19 折射带高（px，仅 API 33+ 生效；circleMap 剖面的归一化尺度）。
+   * 与 refractionPx（带内最大位移）是两个独立参数，对应原版
+   * `GlassLevel.refractionHeightDp` / `refractionAmountDp`。
+   * 调用方按 `dp × PixelRatio.get()` 传 px，native 与本组件一样只再乘 lensScale 一次。
+   */
+  lensBandPx?: number;
   /** 圆角半径（dp）。it.13：引擎按连续曲率超椭圆（n 由尺寸/半径自动计算）裁剪。 */
   cornerRadiusDp?: number;
   /**
@@ -212,6 +220,7 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         blurDp={blurOn ? (props.blurDp ?? 0) : 0}
         blurEnabled={blurOn}
         refractionPx={lensOn ? (props.refractionPx ?? 0) : 0}
+        lensBandPx={lensOn ? (props.lensBandPx ?? 0) : 0}
         dispersionPx={lensOn ? (props.dispersionPx ?? 0) : 0}
         blurScale={props.blurScale ?? blurScale}
         tintScale={props.tintScale ?? tintScale}

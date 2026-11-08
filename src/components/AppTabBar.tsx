@@ -15,12 +15,14 @@
  * 玻璃（与实验页 dock 同一套派生逻辑，保证「实验页所见 = 本体所得」）：
  * - bar：capturable（指示器的采集源）+ capsuleContinuous（n=3 连续曲率端帽）、
  *   blurDp 10 × blurScale、tintAlpha = resolveTintAlpha(0.06, tintScale)、
- *   refraction 5dp × lensScale、dispersion 0、highlightScale / glow 三倍率来自 store。
+ *   refraction 5dp × density、带高 3dp × density（native 再乘 lensScale 一次）、
+ *   dispersion 0、highlightScale / glow 三倍率来自 store。
  * - 指示器：backdropTag 指向 bar 原生 handle（玻璃叠玻璃）、内缩 = dockInnerPadDp、
  *   capsuleContinuous、indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451
  *   的 White@0.05）、highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
- *   blur 2dp × blurScale、refraction 8dp × lensScale、
- *   dispersion 10dp × lensScale × (dispersionLevel/0.35)（与实验页同一公式）。
+ *   blur 2dp × blurScale、refraction 8dp × density、带高 6.4dp × density、
+ *   dispersion 10dp × density × (dispersionLevel/0.35)（三者都由 native 再乘 lensScale；
+ *   与实验页同一公式）。
  *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
  *   绝不用累加增量）。
  *
@@ -47,6 +49,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   findNodeHandle,
+  PixelRatio,
   Pressable,
   StyleSheet,
   Text,
@@ -64,6 +67,7 @@ import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/gl
 import {
   GLASS_BAR_FALLBACK,
   GLASS_INDICATOR_FALLBACK,
+  GLASS_LENS_PROFILE,
   GLASS_TINT_COLOR,
 } from '../theme/glassProfile';
 import { useDockSettings, useGlassScales } from '../theme/glassDockStore';
@@ -85,14 +89,6 @@ const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
 
 /** bar 的基准模糊半径 dp（Kotlin BAR 档 = 10dp，最终半径 = 10 × blurScale × density）。 */
 const BAR_BLUR_DP = 10;
-/** bar 折射基准 dp（最终 = 5 × lensScale px，与实验页 dock bar 同一基准）。 */
-const BAR_REFRACTION_DP = 5;
-/** 指示器折射基准 dp（最终 = 8 × lensScale px）。 */
-const INDICATOR_REFRACTION_DP = 8;
-/** 指示器色散基准 dp（最终 = 10 × lensScale × dispersionLevel/0.35 px）。 */
-const INDICATOR_DISPERSION_DP = 10;
-/** 色散强度归一基准（实验页 dispersionLevel 滑块默认 1.0 时 = 10dp × lensScale）。 */
-const DISPERSION_LEVEL_BASE = 0.35;
 /** 指示器专属提亮 alpha（Kotlin GlassKitKt.java:1434-1435,1451，无对应滑块）。 */
 const INDICATOR_BOOST_ALPHA = 0.05;
 
@@ -151,7 +147,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   // App 级 backdrop 容器 tag（App.tsx 经模块级 store 广播；未就绪时原生走兜底底色）。
   const backdropTag = useBackdropTag();
   // 四倍率实时值（订阅收敛在 .ts，守卫 glass-api-access 只对 .tsx 计数）。
-  const { blurScale, tintScale, lensScale, glowScale } = useGlassScales();
+  const { blurScale, tintScale, glowScale } = useGlassScales();
   // 22 项可调参数（开关 / 几何 / 高光 / 扩展调试）：与实验页同一份 store。
   const {
     blurEnabled,
@@ -216,11 +212,28 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   // 原生侧最终 alpha = min(tintAlpha × tintScale, 0.12)＝若再传 tintScale 会二次乘算，
   // 故显式传 tintScale={1}，让 JS 的 resolveTintAlpha 成为唯一一次乘算。
   const barTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
-  const barRefractionPx = Math.round(BAR_REFRACTION_DP * lensScale);
   const indicatorBlurDp = Math.round(2 * blurScale);
-  const indicatorRefractionPx = Math.round(INDICATOR_REFRACTION_DP * lensScale);
+  /**
+   * it.19 折射 / 色散 / 带高量纲修正（dp → px）。
+   *
+   * 口径：**JS 只做 dp × density，lensScale 由 native 统一乘一次**
+   * （GlassKitView.drawLensLayer 内 `refractionPx * lensScale`）。
+   * 修正前 JS 传的是 `round(5 × lensScale)`，native 又乘一次 lensScale ⇒
+   * 最终 = 5 × lensScale²，与设备的 density 无关：
+   * - 默认 lensScale=3、density=3 时恰好 = 45px（= 原版 BAR 15dp），所以**默认观感是对的**；
+   * - 但 lensScale=1 时只有 5px（原版 15px），density=2 的机型上又偏大 ⇒
+   *   滑块响应非线性、跨机型不一致。
+   * 修正后 = `dp × density × lensScale`，跨机型一致且与滑块线性。
+   */
+  const density = PixelRatio.get();
+  const barRefractionPx = Math.round(GLASS_LENS_PROFILE.barRefractionDp * density);
+  const barLensBandPx = Math.round(GLASS_LENS_PROFILE.barBandDp * density);
+  const indicatorRefractionPx = Math.round(GLASS_LENS_PROFILE.indicatorRefractionDp * density);
+  const indicatorLensBandPx = Math.round(GLASS_LENS_PROFILE.indicatorBandDp * density);
   const indicatorDispersionPx = Math.round(
-    INDICATOR_DISPERSION_DP * lensScale * (dispersionLevel / DISPERSION_LEVEL_BASE),
+    GLASS_LENS_PROFILE.indicatorDispersionDp *
+      density *
+      (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase),
   );
 
   // 指示器只做「绝对目标 x」的 spring，不累加增量（it.10 漂移根因）。
@@ -288,6 +301,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             cornerRadiusDp={dockRadiusDp}
             capsuleContinuous={true}
             refractionPx={barRefractionPx}
+            lensBandPx={barLensBandPx}
             dispersionPx={0}
             highlightScale={highlightScale}
             glowScale={glowScale}
@@ -332,6 +346,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
                 capsuleContinuous={true}
                 indicatorBoostAlpha={INDICATOR_BOOST_ALPHA}
                 refractionPx={indicatorRefractionPx}
+                lensBandPx={indicatorLensBandPx}
                 dispersionPx={indicatorDispersionPx}
                 highlightScale={0}
                 chromaticEnabled={chromaticEnabled}
