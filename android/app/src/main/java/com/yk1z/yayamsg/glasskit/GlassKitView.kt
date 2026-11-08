@@ -85,6 +85,18 @@ import android.view.ViewTreeObserver
  * 背景源 drawGeneration，重满预算）+ 无关交叉触发预算递减至静止 + 回录只在
  * 屏幕帧做 + CPU 槽位升四槽（0/1/2 轮换 + 槽 3 回录专用）；③ membraneAlpha
  * 膜层 prop（tint 后压暗前白色覆盖层，默认 0.38）。
+ * it.10（指示器「透明边缘锯齿」取证修复）：
+ * ① 取证结论：指示器视图宽 < MAX_CAPTURE_WIDTH_PX，obtainCaptureBitmap 的超宽
+ *   降采样分支天然不触发（capture scale=1 全分辨率）——「GPU 路径 capture 仍
+ *   走降采样」的头号嫌疑被静态分析证伪；真主根因 = AGSL 透镜 shader 的 SDF
+ *   硬截断（形内→形外 1px 无过渡翻转，见 GlassLensShader it.10 注释），已在
+ *   shader 侧加贴边 1px 内向 alpha 渐变 AA。
+ * ② 透镜路径 capture 强制全分辨率：obtainCaptureBitmap 增加 allowDownsample
+ *   参数——lensActive（硬件画布）时不允许降采样（头号嫌疑若在特定机型复现也
+ *   被结构性排除）；模糊路径保留既有降采样语义不变。
+ * ③ capture 分辨率取证日志：位图尺寸变化时打一条「capture res view=WxH
+ *   bitmap=WxH scale=… lensFullRes=…」（logcat -s GlassKitBlur），装机可直接核对
+ *   capture 实际分辨率 vs 视图分辨率。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -1035,7 +1047,16 @@ class GlassKitView(context: Context) : View(context) {
         }
 
         // ① 捕获（isCapturing 置位期间 backdrop.draw 重入本 onDraw 会被顶部短路）
-        val capture = obtainCaptureBitmap(w, h)
+        // it.10：lensActive 的硬件画布帧强制全分辨率 capture（透镜输入不做超宽
+        // 降采样；模糊路径保留降采样语义）。lensActive 须在采集前算好（参数依赖）。
+        val blurRadiusPx = blurDp * blurScale * density
+        val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
+        val capture = obtainCaptureBitmap(
+            w,
+            h,
+            allowDownsample = !(lensActive && canvas.isHardwareAccelerated),
+        )
         val captureOk = try {
             isCapturing = true
             capture != null &&
@@ -1047,9 +1068,6 @@ class GlassKitView(context: Context) : View(context) {
 
         if (blurEnabled && captureOk && capture != null) {
             // ② 模糊 + ③ 透镜
-            val blurRadiusPx = blurDp * blurScale * density
-            val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
             // 软件画布不支持 RuntimeShader（快照回录用 Bitmap 软画布，it.8 真机崩溃实证），
             // 回录帧透镜降级为模糊/清晰层；屏幕硬件加速路径不受影响
             if (lensActive && canvas.isHardwareAccelerated) {
@@ -1151,12 +1169,21 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     /**
-     * 采集位图缓存：宽度超 MAX_CAPTURE_WIDTH_PX 时按比例降采样，
-     * 视图尺寸变化时重建。返回 null 表示无法预算（视图尺寸异常）。
+     * 采集位图缓存：宽度超 MAX_CAPTURE_WIDTH_PX 时按比例降采样，视图尺寸变化时
+     * 重建。返回 null 表示无法预算（视图尺寸异常）。
+     * it.10：透镜路径（lensActive 硬件画布帧）传 allowDownsample=false 强制全分辨率
+     * ——透镜输入不做超宽降采样（小图放大 = 已登记的锯齿源，结构性排除）；模糊
+     * 路径维持降采样防 OOM 语义。
+     * it.10 取证日志：位图尺寸变化时打一条「capture res view=WxH bitmap=WxH
+     * scale=… lensFullRes=…」（GlassKitBlur tag），装机核对 capture 实际分辨率。
      */
-    private fun obtainCaptureBitmap(w: Int, h: Int): Bitmap? {
+    private fun obtainCaptureBitmap(w: Int, h: Int, allowDownsample: Boolean): Bitmap? {
         if (w <= 0 || h <= 0) return null
-        val scale = minOf(1f, GlassCaptureEngine.MAX_CAPTURE_WIDTH_PX.toFloat() / w.toFloat())
+        val scale = if (allowDownsample) {
+            minOf(1f, GlassCaptureEngine.MAX_CAPTURE_WIDTH_PX.toFloat() / w.toFloat())
+        } else {
+            1f
+        }
         val bw = Math.max(1, Math.round(w * scale))
         val bh = Math.max(1, Math.round(h * scale))
         var bitmap = captureBitmap
@@ -1164,6 +1191,12 @@ class GlassKitView(context: Context) : View(context) {
             if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
             bitmap = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
             captureBitmap = bitmap
+            // 取证日志：仅尺寸变化时打一条（每帧刷屏防抖）
+            Log.i(
+                logTag,
+                "capture res view=${w}x$h bitmap=${bw}x$bh scale=$scale" +
+                    " lensFullRes=${!allowDownsample} maxW=${GlassCaptureEngine.MAX_CAPTURE_WIDTH_PX}",
+            )
         }
         return bitmap
     }

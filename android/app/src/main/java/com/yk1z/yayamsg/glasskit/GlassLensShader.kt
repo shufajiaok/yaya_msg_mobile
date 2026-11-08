@@ -32,6 +32,11 @@ import androidx.annotation.RequiresApi
  * - 色散：R/G/B 分别以 uDispersionPx 的 1.0 / 0.5 / 0.0 倍叠加位移后采样 uBlurred，
  *   取 cR.r / cG.g / cB.b 合成；
  * - 形外像素（sdf > 0）返回透明，配合视图侧圆角 clip 双保险。
+ * - it.10 边缘 AA（指示器「透明边缘锯齿」取证修复）：旧实现形内到形外 1px 硬
+ *   翻转（sdf≤0 满 alpha、sdf>0 直接透明，无过渡带）——胶囊曲面边界上每个像素
+ *   阶梯翻转即锯齿。修复 = alpha 贴边 1px 内向渐变：edgeAA = clamp(-sdf, 0, 1)
+ *   （sdf=0 边界像素 alpha=0、sdf=-1 处 alpha=1），过渡带完全落在形内——视图侧
+ *   clipPath（无 AA，硬裁剪在 sdf=0）不会切掉过渡带，曲线边缘平滑无阶梯。
  *
  * AGSL 语法均为 RuntimeShader 合法子集：half4 main(float2 fragCoord)、
  * uniform shader/float/float2、用户自定义标量函数、.eval() 采样。
@@ -80,7 +85,10 @@ half4 main(float2 fragCoord) {
     half4 cR = uBlurred.eval(fragCoord - d * (refraction + uDispersionPx));
     half4 cG = uBlurred.eval(fragCoord - d * (refraction + uDispersionPx * 0.5));
     half4 cB = uBlurred.eval(fragCoord - d * refraction);
-    return half4(cR.r, cG.g, cB.b, cG.a);
+    // it.10 边缘 AA：贴边 1px 内向 alpha 渐变（过渡带全在形内，不被视图侧无 AA
+    // clipPath 切掉）；sdf=0 边界像素 alpha=0 → 曲线边缘无硬翻转阶梯
+    float edgeAA = clamp(-sdf, 0.0, 1.0);
+    return half4(cR.r, cG.g, cB.b, cG.a * edgeAA);
 }
 """.trim()
 
