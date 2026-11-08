@@ -56,6 +56,7 @@ import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import GlassKitView from '../native/GlassKitView';
+import GlassKitBackdrop from '../native/GlassKitBackdrop';
 import { useBackdropTag } from '../native/backdropTagStore';
 import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/glass';
 import {
@@ -269,6 +270,12 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
       >
         {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）。
             it.17 起 backdropTag 回到 App 级采集源 ⇒ 透视玻璃（不再是卡纸底衬）。 */}
+        {/* it.18 采集排除子树：dock（bar 玻璃 + 指示器 + 图标）整体不进入 App 级
+            backdrop 的采集纹理 ⇒ bar 采到的是 dock **下方**的真实内容：
+            ① 透视实时背景 ② 图标/文字不会被自己的透镜折射（旧行为是自采样：
+            bar 采 App backdrop 时把自己的图标与上一帧玻璃烘进纹理）。
+            注意：指示器采集 bar（目标在本容器内）时照常绘制，玻璃叠玻璃不受影响。 */}
+        <GlassKitBackdrop excludeFromCapture style={StyleSheet.absoluteFill} pointerEvents="box-none">
         {!degraded && (
           <GlassKitView
             ref={attachBarGlass}
@@ -276,6 +283,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             onLayout={onBarLayout}
             backdropTag={backdropTag}
             capturable={true}
+            liveBackdrop={true}
             blurDp={BAR_BLUR_DP}
             blurScale={blurScale}
             tintAlpha={barTintAlpha}
@@ -370,6 +378,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             />
           ))}
         </View>
+        </GlassKitBackdrop>
       </View>
     </View>
   );
