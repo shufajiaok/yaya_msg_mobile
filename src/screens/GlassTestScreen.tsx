@@ -202,9 +202,6 @@ function panelTintFor(scheme: GlassScheme): string {
   return THEME_COLORS[scheme].glassTint;
 }
 
-/** it.9 色散强度换算（扩展调试项）：dispersionPx = 值 × 20。 */
-const DISPERSION_PX_PER_UNIT = 20;
-
 /** it.9 Dock tab 集（demo 无图标资源：emoji 色块模拟实例 Image 图标区）。 */
 const DOCK_TABS = [
   { icon: '⌂', label: '首页' },
@@ -363,6 +360,8 @@ function GlassPanel(props: {
   blurDp: number;
   cornerRadiusDp: number;
   refractionPx?: number;
+  /** it.19 2076030：折射带高（px），与 refractionPx 成对传（CONTROL 档 = 5dp×density）。 */
+  lensBandPx?: number;
   dispersionPx?: number;
   dimmingAlpha?: number;
   membraneAlpha?: number;
@@ -396,6 +395,7 @@ function GlassPanel(props: {
         tintColor={panelTintFor(scheme)}
         cornerRadiusDp={props.cornerRadiusDp}
         refractionPx={props.refractionPx}
+        lensBandPx={props.lensBandPx}
         dispersionPx={props.dispersionPx}
         dimmingAlpha={props.dimmingAlpha}
         membraneAlpha={props.membraneAlpha}
@@ -517,7 +517,6 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     }).start();
   }, [dockSelected, dockTabWidth, dockInnerPad, dockIndicatorX]);
 
-  const panelDispersionPx = Math.round(dispersionLevel * DISPERSION_PX_PER_UNIT);
   /**
    * it.19 量纲修正（dp → px）：JS 只做 `dp × PixelRatio.get()`，
    * lensScale 由 native 统一乘一次（GlassKitView.drawLensLayer）。
@@ -535,6 +534,22 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     GLASS_LENS_PROFILE.indicatorDispersionDp *
     density *
     (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
+  /**
+   * it.19 2076030：实验页 5 个演示面板（Hero / 顶栏演示件 / Chip / 工具条 / clear）
+   * **显式传原版 CONTROL 档**：amount = `GlassLevel.CONTROL.refractionAmountDp` = 8dp、
+   * band = `refractionHeightDp` = 5dp（基准值统一取 glassProfile.GLASS_LENS_PROFILE）。
+   *
+   * 为什么必须显式传：native 在 `lensBandPx` 未下发时有一条临时兜底
+   * （`effectiveBandPx = refractionPx`，2076022 引入，防止 band=1px 让折射只剩贴边
+   * 1px）。那是兜底、不是口径 —— 显式传齐之后 fallback 分支就可以在下一轮删掉。
+   *
+   * 色散基数 = 折射基数（不变量）：`dispK = dispersionPx / refractionPx`，原版色散
+   * 没有独立幅度参数，只有两者基数相等时 `dispK = dispersionLevel` 才是 1:1。
+   */
+  const panelRefractionPx = GLASS_LENS_PROFILE.controlRefractionDp * density;
+  const panelLensBandPx = GLASS_LENS_PROFILE.controlBandDp * density;
+  const panelDispersionPx =
+    panelRefractionPx * (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
   const indicatorBlurDp = Math.round(2 * blurScale);
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。
@@ -610,7 +625,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             backdropTag={backdropTag}
             blurDp={14}
             cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
-            refractionPx={10}
+            refractionPx={panelRefractionPx}
+            lensBandPx={panelLensBandPx}
             dispersionPx={panelDispersionPx}
             rimEnabled
             {...effectProps}
@@ -634,7 +650,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             blurDp={10}
             cornerRadiusDp={999}
             capsuleContinuous={true}
-            refractionPx={10}
+            refractionPx={panelRefractionPx}
+            lensBandPx={panelLensBandPx}
             dispersionPx={panelDispersionPx}
             {...effectProps}
           />
@@ -649,7 +666,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               backdropTag={backdropTag}
               blurDp={8}
               cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
-              refractionPx={10}
+              refractionPx={panelRefractionPx}
+              lensBandPx={panelLensBandPx}
               dispersionPx={panelDispersionPx}
               {...effectProps}
             />
@@ -662,7 +680,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               backdropTag={backdropTag}
               blurDp={12}
               cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
-              refractionPx={10}
+              refractionPx={panelRefractionPx}
+              lensBandPx={panelLensBandPx}
               dispersionPx={panelDispersionPx}
               {...effectProps}
             />
@@ -685,7 +704,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             backdropTag={backdropTag}
             blurDp={10}
             cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
-            refractionPx={10}
+            refractionPx={panelRefractionPx}
+            lensBandPx={panelLensBandPx}
             dispersionPx={panelDispersionPx}
             dimmingAlpha={0.35}
             {...effectProps}
