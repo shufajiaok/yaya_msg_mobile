@@ -41,7 +41,7 @@
  * src/navigation/index.tsx 零改动。tab 选中态仍由 props 的 activeKey 驱动
  * （导航真相源），**不**用 store 的 dockSelected 覆盖（后者只给实验页对齐测试用）。
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   findNodeHandle,
@@ -180,8 +180,23 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   // 降级：无模糊能力（API<31）或无透镜能力（API<33）时整条 dock 退实底。
   const degraded = !canBlur() || !canLens();
 
-  const barGlassRef = useRef(null);
+  const barGlassRef = useRef<any>(null);
   const [barGlassTag, setBarGlassTag] = useState<number | undefined>(undefined);
+
+  /**
+   * it.17-fix1：bar 采集源 tag 的 ref callback 主路径（onLayout 保留为兜底）。
+   *
+   * 只在 onLayout 单点取 findNodeHandle 时，bar 若重新挂载（导航切换 / 重渲染导致
+   * 原生实例 tag 变化）而 layout 不再触发，barGlassTag 会一直停在旧 tag ⇒ 指示器
+   * 的 backdropTag 指向已失效视图，采集不到 dock 本体，跌回引擎兜底色。
+   * ref callback 在每次挂载/卸载同步触发，必然拿到当前实例。
+   */
+  const attachBarGlass = useCallback((node: any) => {
+    barGlassRef.current = node;
+    if (node == null) return;
+    const handle = findNodeHandle(node);
+    if (handle != null) setBarGlassTag(handle);
+  }, []);
   const [dockWidth, setDockWidth] = useState(0);
 
   const activeIndex = Math.max(
@@ -256,7 +271,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             it.17 起 backdropTag 回到 App 级采集源 ⇒ 透视玻璃（不再是卡纸底衬）。 */}
         {!degraded && (
           <GlassKitView
-            ref={barGlassRef}
+            ref={attachBarGlass}
             style={StyleSheet.absoluteFill}
             onLayout={onBarLayout}
             backdropTag={backdropTag}

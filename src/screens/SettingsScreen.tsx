@@ -373,6 +373,15 @@ export default function SettingsScreen() {
             title={t('运行日志')}
             onPress={() => setLogVisible(true)}
           />
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+          {/* it.17：玻璃参数实验页入口。底栏 / 面板的全部玻璃参数与滑块都在该页，
+              改完即时生效（全局 store），用于本体观感对齐与调参。 */}
+          <Row
+            icon="glass-cockpit"
+            title={t('玻璃参数调试')}
+            value={t('实验页')}
+            onPress={() => navigation.navigate('GlassTest')}
+          />
         </Section>
 
         {/* 成员数据 */}

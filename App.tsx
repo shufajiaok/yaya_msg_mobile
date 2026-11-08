@@ -529,7 +529,9 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [message, setMessage] = useState('正在初始化...');
   // it.7 POC：GlassKitBackdrop 原生 tag（onLayout 后 findNodeHandle 实测）
-  const glassBackdropRef = useRef(null);
+  // 原生宿主实例（ref callback 挂载时同步取 findNodeHandle）；类型擦除到 unknown，
+  // 只在 findNodeHandle 调用点收窄（App.tsx 不引入额外的 React 内部类型）
+  const glassBackdropRef = useRef<unknown>(null);
   const appTheme = useResolvedTheme();
   const palette = usePalette();
   const customBackgroundFile = useSettingsStore((state) => state.settings.customBackgroundFile);
@@ -644,10 +646,36 @@ export default function App() {
     : null;
 
   // it.7 POC：backdrop 挂载/布局后实测原生 tag 广播（GlassTestScreen 同模式）
-  const onGlassBackdropLayout = useCallback(() => {
-    const handle = findNodeHandle(glassBackdropRef.current);
-    setGlobalBackdropTag(handle != null ? handle : undefined);
+  /**
+   * it.17-fix1：全局 backdropTag 三重保险（ref callback + onLayout + 定时补取）。
+   *
+   * 现象：真机 logcat `props snapshot` 里 dock bar 长期 `backdropTag=-1`（View.NO_ID），
+   * 引擎拿不到采集源 → 走 FALLBACK_COLOR 乳白兜底，dock 不透背景（"透视玻璃"失效）。
+   * 根因：只在 onLayout 单点取 findNodeHandle，该回调触发时 ref/layout 未必就绪；
+   * 一旦错过，之后没有 props 更新就不会再取，tag 永为 undefined。
+   * ref callback 在 commit 阶段同步触发（早于 onLayout 且必然发生），作为主路径；
+   * 其余两路幂等（setGlobalBackdropTag 内部相等即返回），只做兜底。
+   */
+  const attachGlassBackdrop = useCallback((node: unknown) => {
+    glassBackdropRef.current = node;
+    if (node == null) return;
+    const handle = findNodeHandle(node as Parameters<typeof findNodeHandle>[0]);
+    if (handle != null) setGlobalBackdropTag(handle);
   }, []);
+
+  const resolveBackdropTag = useCallback(() => {
+    const handle = findNodeHandle(glassBackdropRef.current as Parameters<typeof findNodeHandle>[0]);
+    if (handle != null) setGlobalBackdropTag(handle);
+  }, []);
+
+  const onGlassBackdropLayout = useCallback(() => {
+    resolveBackdropTag();
+  }, [resolveBackdropTag]);
+
+  useEffect(() => {
+    const timer = setTimeout(resolveBackdropTag, 500);
+    return () => clearTimeout(timer);
+  }, [resolveBackdropTag]);
 
   const content = (
     <View style={{ flex: 1, backgroundColor: backgroundSource ? 'transparent' : palette.background }}>
@@ -662,7 +690,7 @@ export default function App() {
           非 Android 平台 backdrop 组件返回 null，这里条件分支保证内容照常渲染。 */}
       {Platform.OS === 'android' ? (
         <GlassKitBackdrop
-          ref={glassBackdropRef}
+          ref={attachGlassBackdrop}
           style={{ flex: 1 }}
           onLayout={onGlassBackdropLayout}
         >
