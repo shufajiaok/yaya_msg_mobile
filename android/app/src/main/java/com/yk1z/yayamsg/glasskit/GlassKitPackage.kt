@@ -9,7 +9,8 @@ import com.facebook.react.uimanager.ViewManager
  * GlassKit ReactPackage（引擎重写清单 §三 #6）。
  *
  * 本批只交付原生能力，无 NativeModule（createNativeModules 空列表）；
- * ViewManager 两个：GlassKitView（渲染核心）+ GlassKitBackdrop（背景容器）。
+ * ViewManager 三个：GlassKitView（渲染核心）+ GlassKitBackdrop（背景容器）+
+ * GlassKitRimView（it.19 P0-1 轮廓光，独立透明覆盖层）。
  * 注册点：MainApplication.getPackages() 手动 add（项目 R-07 惯例）。
  */
 class GlassKitPackage : ReactPackage {
@@ -18,5 +19,5 @@ class GlassKitPackage : ReactPackage {
         emptyList()
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
-        listOf(GlassKitManager(), GlassKitBackdropManager())
+        listOf(GlassKitManager(), GlassKitBackdropManager(), GlassKitRimViewManager())
 }

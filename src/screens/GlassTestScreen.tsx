@@ -106,6 +106,7 @@ import GlassKitView from '../native/GlassKitView';
 import GlassSlider from '../components/GlassSlider';
 import { canBlur, canLens, resolveTintAlpha, SCALE_RANGES, TINT_ALPHA_BASE } from '../theme/glass';
 import { GLASS_LENS_PROFILE } from '../theme/glassProfile';
+import GlassKitRimView from '../native/GlassKitRimView';
 import {
   DOCK_RANGES,
   setGlassScale,
@@ -376,6 +377,12 @@ function GlassPanel(props: {
   vibrancyEnabled: boolean;
   blurEnabled: boolean;
   forceDownsample: boolean;
+  /**
+   * it.19 P0-1 轮廓光：默认 false ⇒ 其余面板零回归。
+   * 本轮只给 Hero 开一个 demo（验证 45° 方向调制对不对就够），
+   * dock bar / 指示器的接线留到 2076027 inset 那笔一起做。
+   */
+  rimEnabled?: boolean;
 }) {
   const scheme: GlassScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   const C = THEME_COLORS[scheme];
@@ -412,6 +419,18 @@ function GlassPanel(props: {
           {props.subtitle}
         </Text>
       </View>
+      {/*
+        it.19 P0-1 轮廓光：**必须是最后一个子节点** —— 原版 HighlightNode 在内容之后
+        绘制（盖住图标 / 文字），RN 同层后绘者在上，放前面就会被文字压住。
+        与玻璃同圆角、同胶囊开关，absoluteFill + pointerEvents="none" 不吃触摸。
+        本轮只有 Hero 开（rimEnabled），其余面板不传 ⇒ 零回归。
+      */}
+      {props.rimEnabled ? (
+        <GlassKitRimView
+          cornerRadiusDp={props.cornerRadiusDp}
+          capsuleContinuous={props.capsuleContinuous ?? false}
+        />
+      ) : null}
     </View>
   );
 }
@@ -586,13 +605,14 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         >
           <GlassPanel
             title="Hero 大面板"
-            subtitle="blurDp 14 · 圆角24(连续曲率) · 可拖动"
+            subtitle="blurDp 14 · 圆角24(连续曲率) · 轮廓光"
             style={styles.panelFill}
             backdropTag={backdropTag}
             blurDp={14}
             cornerRadiusDp={Math.round(SHAPE_CONTAINER * radiusScale)}
             refractionPx={10}
             dispersionPx={panelDispersionPx}
+            rimEnabled
             {...effectProps}
           />
         </DraggableGlass>
