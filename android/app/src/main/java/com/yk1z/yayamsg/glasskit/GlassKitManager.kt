@@ -139,6 +139,12 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
         view.forceDownsample = value
     }
 
+    /** it.8 玻璃叠玻璃：true 时本视图注册为采集源（其他玻璃 backdropTag 指向本视图 handle）。 */
+    @ReactProp(name = "capturable", defaultBoolean = false)
+    fun setCapturable(view: GlassKitView, value: Boolean) {
+        view.capturable = value
+    }
+
     override fun onDropViewInstance(view: GlassKitView) {
         // View 从窗口摘除时清掉 PreDraw 监听（视图自身 onDetachedFromWindow 也会兜底清理）
         super.onDropViewInstance(view)

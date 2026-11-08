@@ -66,6 +66,10 @@ import android.view.ViewTreeObserver
  * observer 均无效时用 glass 自身 viewTreeObserver 移除（E2 场景①残余泄漏，
  * F1）；backdropTag 变更时重置 E3 重试计数（F2）；dimmingAlpha /
  * cornerRadiusDp 补 isFinite 兜底（F3）。
+ * it.8：① capturable prop——本视图可作采集源（注册 GlassCaptureEngine，玻璃叠
+ * 玻璃链路）；② 嵌套采集重入降级——capturable 视图短路重入时回放最近合成帧
+ * 快照（onDraw / recordFrameCache，透镜回录走专用槽 2）；③ 发丝线 alpha 随
+ * max(glowTopScale, glowBottomScale) 缩放（顶/底全关 = 完全无高光）。
  * 注意：不设 LAYER_TYPE_HARDWARE（任务书明确不设，保持默认 NONE，让 RenderNode
  * 路径直接落在父级硬件画布上）；isHardwareAvailable 只判 SDK_INT。
  */
@@ -322,6 +326,25 @@ class GlassKitView(context: Context) : View(context) {
             invalidate()
         }
 
+    /**
+     * it.8 玻璃叠玻璃：true 时本视图可作**采集源**——以自身 id 注册进
+     * GlassCaptureEngine 注册表（与 GlassKitBackdrop 同构机制），其他玻璃的
+     * backdropTag 指向本视图 handle（findNodeHandle）即可采集本视图子树的合成帧，
+     * 实现「外层玻璃渲染模糊+折射画面 → 内层再套一次透镜 = 双重透镜」链路。
+     * detach 时对称注销；默认 false，行为与 it.7 完全一致。
+     */
+    var capturable: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            // props 晚于 attach 到达时就地补注册/注销；attach 前调用则等
+            // onAttachedToWindow 统一注册（NO_ID 由 register 拒绝）
+            if (isAttachedToWindow) {
+                if (value) GlassCaptureEngine.register(id, this)
+                else GlassCaptureEngine.unregister(id)
+            }
+        }
+
     /* ---------------- 内部状态 ---------------- */
 
     private val density: Float = resources.displayMetrics.density
@@ -370,6 +393,20 @@ class GlassKitView(context: Context) : View(context) {
      */
     private var isCapturing: Boolean = false
 
+    /**
+     * it.8：合成帧快照缓存（仅 capturable=true 视图维护）——嵌套采集重入降级用。
+     * 时序推演（详见 drawGlassFrame / recordFrameCache 注释）：下游玻璃（backdropTag
+     * 指向本视图）采集本视图时，若本视图恰处自身 capture 置位期（本视图在它所采集
+     * 的 backdrop 子树内），onDraw 短路会让下游拿到透明空白帧。capturable 视图
+     * 每次 onDraw 末尾回录合成帧到 frameCacheBitmap，短路时回放缓存而非空白。
+     * 非 capturable 视图不建缓存，短路保持空白语义（backdrop 自采集时排除自身，
+     * 即「玻璃对采集位图零贡献」的期望行为）。
+     */
+    private var frameCacheBitmap: Bitmap? = null
+    private var frameCacheCanvas: Canvas? = null
+    /** 快照回录进行中标记：回录链路内再触发短路时纯跳过（防缓存位图自绘别名）。 */
+    private var recordingFrameCache: Boolean = false
+
     /** 采集位图缓存（尺寸随视图 / 降采样档变化重建）。 */
     private var captureBitmap: Bitmap? = null
     /** 近似模糊的小位图缓存（宽高 = 视图 / 降采样档；纯模糊路径专用）。 */
@@ -384,20 +421,23 @@ class GlassKitView(context: Context) : View(context) {
      * （用户反馈「遮挡和不遮挡之间切换」）。双缓冲后第 N 帧写入的位图与第 N-1 帧
      * 被 RenderThread 采样的位图恒不同实例，竞态根除。
      */
-    private val lensInputBuffers: Array<Bitmap?> = arrayOfNulls(2)
-    /** it.4：双缓冲各自的 BitmapShader（绑定各自位图实例，位图重建时一并重建）。 */
-    private val lensShaderInputs: Array<BitmapShader?> = arrayOfNulls(2)
-    /** it.4：本帧写入的双缓冲槽位（0/1 交替）。 */
+    private val lensInputBuffers: Array<Bitmap?> = arrayOfNulls(3)
+    /** it.4：双缓冲各自的 BitmapShader（绑定各自位图实例，位图重建时一并重建）。
+     *  it.8：槽位扩为 3——0/1 仍为屏幕绘制 ping-pong；槽 2 为快照回录专用
+     *  （recordFrameCache 重跑透镜管线时不参与屏幕帧轮换，避免覆写 RenderThread
+     *  正在采样的槽位、重演双缓冲消灭过的跨帧竞态）。 */
+    private val lensShaderInputs: Array<BitmapShader?> = arrayOfNulls(3)
+    /** it.4：本帧写入的双缓冲槽位（屏幕绘制路径 0/1 交替；快照回录固定槽 2）。 */
     private var lensInputSlot: Int = 0
 
     /* ------- it.4-R2（QA 回修）：小图 CPU box blur 缓冲与复用对象（零每帧分配） ------- */
 
     /** 各槽位像素缓冲（box blur 原地读写），尺寸随槽位位图复用。 */
-    private val lensPixelBuffers: Array<IntArray?> = arrayOfNulls(2)
+    private val lensPixelBuffers: Array<IntArray?> = arrayOfNulls(3)
     /** box blur 水平/垂直 pass 的临时缓冲（UI 单线程使用，尺寸复用）。 */
     private var lensBlurTempBuffer: IntArray? = null
     /** 各槽位复用 Canvas（绑定槽位位图实例，位图重建时一并重建）。 */
-    private val lensCanvases: Array<Canvas?> = arrayOfNulls(2)
+    private val lensCanvases: Array<Canvas?> = arrayOfNulls(3)
     /** 三盒半径缓存（boxesForGauss 结果，radius 不变时复用）。 */
     private var lensBoxSizes: IntArray? = null
     private var lensBoxRadius: Int = -1
@@ -479,6 +519,10 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // it.8：capturable 视图「挂载即注册」（同 GlassKitBackdropView 策略——此时
+        // id 已由 RN 定稿，消除「props 注册点错过 attach 时序」的竞态；NO_ID 由
+        // register 按原语义拒绝）。
+        if (capturable) GlassCaptureEngine.register(id, this)
         // E1 修复：无条件重挂 PreDraw 监听。detach→re-attach 后 targetView 不变，
         // resolveTarget 的 oldTarget===newTarget 早退分支会跳过 attach，
         // 而 onDetachedFromWindow 已把 listener 摘掉 → 玻璃永不再跟随。
@@ -488,6 +532,12 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        // it.8：capturable 视图对称注销，防跨窗口注册表滞留
+        if (capturable) GlassCaptureEngine.unregister(id)
+        // it.8：合成帧快照随窗口释放（重挂后首次 onDraw 重建）
+        frameCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
+        frameCacheBitmap = null
+        frameCacheCanvas = null
         detachPreDraw()
         // S2 修复：RenderEffect 缓存随 detach 释放，不留跨窗口引用
         releaseBlurEffect()
@@ -621,6 +671,10 @@ class GlassKitView(context: Context) : View(context) {
     private fun releaseBitmaps() {
         captureBitmap?.recycle()
         captureBitmap = null
+        // it.8：尺寸变化时快照缓存一并释放（下一次 onDraw 末尾按新尺寸重建）
+        frameCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
+        frameCacheBitmap = null
+        frameCacheCanvas = null
         smallBlurBitmap?.recycle()
         smallBlurBitmap = null
         smallBlurFactor = 0
@@ -663,8 +717,74 @@ class GlassKitView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         // it.7 POC 采集重入防护：capture() 经 backdrop.draw 间接触发本 onDraw 时
-        // 直接跳过（见 isCapturing 注释），防止无限递归与自采集反馈
-        if (isCapturing) return
+        // 直接跳过（见 isCapturing 注释），防止无限递归与自采集反馈。
+        // it.8 嵌套采集降级：capturable 视图（可能被下游玻璃采集）在重入短路时
+        // 回放最近一次合成帧快照而非空白（下游不再拿到透明帧）；快照回录期间
+        // （recordingFrameCache）仍纯短路，防缓存位图自绘别名。非 capturable
+        // 视图维持空白短路（backdrop 自采集时排除自身的期望语义不变）。
+        if (isCapturing) {
+            if (capturable && !recordingFrameCache) {
+                frameCacheBitmap?.let { snap ->
+                    if (!snap.isRecycled && width > 0 && height > 0) {
+                        canvas.drawBitmap(
+                            snap,
+                            null,
+                            RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                            capturePaint,
+                        )
+                    }
+                }
+            }
+            return
+        }
+        drawGlassFrame(canvas)
+        if (capturable) recordFrameCache()
+    }
+
+    /**
+     * it.8：回录当前合成帧到快照缓存（仅 capturable 视图、正常 onDraw 末尾调用）。
+     * 完整重跑 drawGlassFrame（含重新采集 backdrop 子树）——capturable 视图数量
+     * 少（当前仅测试页 demo dock），且重绘受 33ms 节流约束，双倍成本可接受。
+     * 透镜管线在回录期间走专用槽 2（不覆写屏幕帧的 ping-pong 槽位，见
+     * lensShaderInputs 注释）；清晰路径（blurRadiusPx<0.5）零拷贝绑定 capture
+     * 位图，回录重采样的变异窗口与既有「RenderThread 采样 captureBitmap 跨帧
+     * 竞态」暴露等价，不另加防护。
+     */
+    private fun recordFrameCache() {
+        val w = width
+        val h = height
+        if (w <= 0 || h <= 0) return
+        var bitmap = frameCacheBitmap
+        if (bitmap == null || bitmap.width != w || bitmap.height != h) {
+            if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+            bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            frameCacheBitmap = bitmap
+            frameCacheCanvas = Canvas(bitmap)
+        }
+        val cacheCanvas = frameCacheCanvas ?: return
+        bitmap!!.eraseColor(Color.TRANSPARENT)
+        recordingFrameCache = true
+        try {
+            drawGlassFrame(cacheCanvas)
+        } finally {
+            recordingFrameCache = false
+        }
+    }
+
+    /**
+     * it.8：完整玻璃渲染管线（原 onDraw 主体抽出，屏幕绘制与快照回录共用）。
+     * onDraw 管线：
+     * 1. 捕获：GlassCaptureEngine 按 backdropTag 找背景视图，采玻璃覆盖区（失败画兜底底色）；
+     * 2. 模糊：API 31+ 且画布硬件加速 → RenderNode + RenderEffect.createBlurEffect；
+     *    API 26–30 / 软件画布 → 固定档降采样 1/6 + 双线性放大近似（H2 单档语义）；
+     * 3. 透镜（API 33+）：1/4 降采样 + 小图 CPU box blur ×3 近似高斯输入 +
+     *    AGSL RuntimeShader 折射/色散（it.4-R2 真模糊化输入）；
+     * 4. tint：tintColor withAlpha(min(tintAlpha * tintScale, 0.12)) —— H1 硬约束钳制；
+     * 5. 压暗：#000 @ dimmingAlpha；
+     * 6. 高光：顶/底窄带非线性渐变 + 1dp 发丝线（it.8：发丝线随顶/底加强倍率缩放）；
+     * 7. 裁剪：圆角矩形 Path clip。
+     */
+    private fun drawGlassFrame(canvas: Canvas) {
         if (!loggedPropsSnapshot) {
             loggedPropsSnapshot = true
             Log.i(
@@ -789,9 +909,16 @@ class GlassKitView(context: Context) : View(context) {
                 glowPaint.alpha = floor(bottomAlpha * 255f).toInt()
                 canvas.drawRect(0f, hF - bandPx, wF, hF, glowPaint)
                 glowPaint.shader = null
-                // 发丝线：沿轮廓 1dp 白线补足侧缘/界定边缘，alpha = 0.18 × baseAlpha
-                //（终值 ≤0.18，floor 取整同 S1 口径）；baseAlpha=0 时静默跳过
-                val hairlineAlpha = floor((GLOW_HAIRLINE_ALPHA * baseAlpha) * 255f).toInt()
+                // 发丝线：沿轮廓 1dp 白线补足侧缘/界定边缘。it.8：alpha 再乘
+                // max(glowTopScale, glowBottomScale)（clamp 0–1）——按用户语义
+                // 「顶/底滑块全关 = 完全无高光」处理：发丝线是轮廓界定元素，
+                // 任一缘仍有高光时按较强缘的强度保留（轮廓感与该缘实际亮度一致）；
+                // 两缘全零时 alpha 归零随带层一并消失。选 max 而非 (top+bottom)/2：
+                // 均值会让「只开一缘」时轮廓亮度低于该缘实际高光，观感脱节。
+                val hairlineEdgeFactor =
+                    maxOf(glowTopScale, glowBottomScale).coerceIn(0f, 1f)
+                val hairlineAlpha =
+                    floor((GLOW_HAIRLINE_ALPHA * baseAlpha * hairlineEdgeFactor) * 255f).toInt()
                 if (hairlineAlpha > 0) {
                     strokePaint.strokeWidth = density
                     strokePaint.alpha = hairlineAlpha
@@ -973,9 +1100,16 @@ class GlassKitView(context: Context) : View(context) {
         // ---- 模糊路径：1/4 降采样 → box blur ×3 ----
         val sw = Math.max(1, w / LENS_DOWNSAMPLE)
         val sh = Math.max(1, h / LENS_DOWNSAMPLE)
-        // ping-pong：切到「非上一帧采样中」的槽位再写入
-        lensInputSlot = (lensInputSlot + 1) % 2
-        val slot = lensInputSlot
+        // ping-pong：切到「非上一帧采样中」的槽位再写入；快照回录固定走专用槽 2
+        //（it.8：回录与屏幕绘制同一帧内先后各跑一次管线，若共用 ping-pong 槽位，
+        // 第二次会写回 RenderThread 正在采样的槽——三槽隔离根除该竞态）
+        val slot: Int
+        if (recordingFrameCache) {
+            slot = 2
+        } else {
+            lensInputSlot = (lensInputSlot + 1) % 2
+            slot = lensInputSlot
+        }
         var small = lensInputBuffers[slot]
         if (small == null || small.width != sw || small.height != sh) {
             if (small != null && !small.isRecycled) small.recycle()

@@ -84,6 +84,10 @@ export interface GlassKitViewProps extends ViewProps {
   glowBottomScale?: number;
   /** 强制降采样模糊路径（模拟器调试开关；真机默认 false 走 RenderEffect 真高斯）。 */
   forceDownsample?: boolean;
+  /** it.8 玻璃叠玻璃：true 时本视图注册为采集源（GlassCaptureEngine 注册表，
+   *  detach 自动注销），其他玻璃的 backdropTag 指向本视图 handle（findNodeHandle）
+   *  即可采集本视图的合成帧——内层再叠一层透镜 = 双重透镜。默认 false。 */
+  capturable?: boolean;
   /** 模糊总开关（reduceTransparency 时本组件强制传 false）。 */
   blurEnabled?: boolean;
 }
@@ -161,6 +165,7 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         glowTopScale={props.glowTopScale ?? 1}
         glowBottomScale={props.glowBottomScale ?? 1}
         forceDownsample={props.forceDownsample ?? false}
+        capturable={props.capturable ?? false}
         ref={ref as Ref<NativeViewInstance>}
       />
     );
