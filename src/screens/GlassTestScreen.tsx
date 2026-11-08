@@ -1,5 +1,28 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.9）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.10）。
+ *
+ * it.10（it.9 真机验收 8 项回修）：
+ * ① 指示器滑动修复（P0）：it.9 的 Animated.View style 漏挂 transform——dockIndicatorX
+ *   spring 在跑但动画值空转，指示器钉死原位。现挂 translateX（绝对目标定位 =
+ *   dockSelected × 步长，与实例 graphicsLayer translationX 同语义，无累计漂移）。
+ * ② 指示器接全局滑块（对齐实例 GlassKit.kt:293-299 lens(8·s, 10·s, 色散)）：
+ *   refractionPx = 8 × lensScale、dispersionPx = 10 × lensScale × (dispersionLevel /
+ *   0.35)（默认 0.35 时=10 与实例一致，色散滑块拉动即变）、blurDp = 2 × blurScale
+ *   （基础 2dp 轻模糊，模糊滑块可调；⚠️ 与实例偏差：实例指示器无 blur，此处为
+ *   滑块可调性而加）、membraneAlpha 保持 0.05（实例 Color.White 0.05f）。
+ * ③ dock bar 加折射（用户拍板：bar 本身也要有折射感）：refractionPx = 5 × lensScale、
+ *   dispersionPx 保持 0（色散留给指示器）。⚠️ 与实例偏差：实例 bar 无 lens
+ *   （GlassBottomTabs 仅 blur+vibrancy+tint），本项为用户真机验收拍板的偏离。
+ * ④ 胶囊/工具条圆角滑块修复：radii.pill=999 被引擎钳到 min(w,h)/2 恒定（钳制逻辑
+ *   正确不动），radiusScale 乘多少都无感——chip/toolbar 改用 radii.toolbar（22dp
+ *   基础可调）。⚠️ 与实例 Capsule 偏差：用户要求可调性优先。dock 两处真胶囊不动。
+ * ⑤ 指示器边缘锯齿（P0，取证修复见 GlassKitView.kt it.10 注释）：AGSL 透镜
+ *   shader SDF 硬截断（sdf>0 直接透明，1px 无过渡）为边缘锯齿主根因——shader
+ *   内 1px 贴边 alpha 渐变 AA；透镜路径 capture 强制全分辨率（不降采样）+
+ *   capture 分辨率取证日志。
+ * ⑥ 「玻璃叠玻璃（指示器透镜）」开关：关 = 条件渲染不挂指示器 GlassKitView（省
+ *   整条双重透射管线），显示纯色半透明胶囊占位（实色+opacity 守卫合规），spring
+ *   动画照常（transform 在 Animated.View 上与玻璃无关）——真机流畅度 A/B 用。
  *
  * it.9：① 第五块 demo 升级为「底部标签栏」完整还原（对照 lg-compose/GlassKit.kt
  * GlassBottomTabs 221–309 行）：64dp 全胶囊 bar（blurDp 10 / tint 走 store / 无透镜，
@@ -317,6 +340,9 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   // it.8 任务四：玻璃叠玻璃 demo——外层 dock 的原生 tag（内层指示条采集源）
   const dockGlassRef = useRef(null);
   const [dockGlassTag, setDockGlassTag] = useState<number | undefined>(undefined);
+  // it.10 任务六：玻璃叠玻璃开关（开 = 指示器 GlassKitView 双重透射；关 = 条件渲染
+  // 不挂内层玻璃，纯色半透明胶囊占位，spring 照常——真机流畅度 A/B 对比用）
+  const [glassOnGlass, setGlassOnGlass] = useState(true);
   // it.9 Dock：选中 tab + 容器宽（指示器 translationX = index × 宽/N）+ 弹簧驱动值
   const [dockSelected, setDockSelected] = useState(0);
   const [dockWidth, setDockWidth] = useState(0);
@@ -361,8 +387,16 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     }).start();
   }, [dockSelected, dockWidth, dockIndicatorX]);
 
-  // it.9：色散 px 换算（滑块值 × 20，作用于所有开透镜的面板；指示器固定 8/10 走实例）
+  // it.9：色散 px 换算（滑块值 × 20，作用于所有开透镜的面板）；指示器走实例公式
+  // lens(8, 10) × lensScale、色散 10 × lensScale × (dispersionLevel / 0.35)，见 dock 段。
   const panelDispersionPx = Math.round(dispersionLevel * DISPERSION_PX_PER_UNIT);
+  // it.10：指示器透镜参数（对齐实例 GlassKit.kt:293-299 lens(8·s, 10·s, chromaticAberration)）
+  const indicatorRefractionPx = Math.round(8 * lensScale);
+  // 默认 dispersionLevel=0.35 时 = 10 × lensScale（与实例完全一致）；色散滑块拉动即变
+  const indicatorDispersionPx = Math.round(10 * lensScale * (dispersionLevel / 0.35));
+  // it.10：指示器轻模糊基础 2dp × blurScale（⚠️ 与实例偏差：实例指示器无 blur，
+  // 此处为模糊滑块可调性而加；默认 blurScale=0.1 时 round 后=0 即无模糊）
+  const indicatorBlurDp = Math.round(2 * blurScale);
 
   // it.8：chip/toolbar 行宽缩放。设计说明：行内两面板 flex:1 / flex:1.4（flexBasis 0
   // + flexGrow 按比例分配），对两者乘同一 widthScale 是数学上的 no-op（比例项相约，
@@ -389,7 +423,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={styles.hero}>玻璃引擎测试</Text>
         <Text style={styles.statusLine}>
-          {`${APP_VERSION}-it.9 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.10 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={styles.statusLine}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 面板可拖动`}
@@ -428,11 +462,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           <DraggableGlass style={[styles.panelChip, { height: Math.round(64 * heightScale) }]}>
             <GlassPanel
               title="Chip 胶囊"
-              subtitle="blurDp 8 · 全胶囊 · 按压缩放0.94"
+              subtitle="blurDp 8 · 圆角22·可调 · 按压缩放0.94"
               style={styles.panelCompact}
               backdropTag={backdropTag}
               blurDp={8}
-              cornerRadiusDp={Math.round(radii.pill * radiusScale)}
+              // it.10 任务四：radii.pill=999 被引擎钳到 min(w,h)/2 恒定（半径滑块无感），
+              // 改用 radii.toolbar=22dp 基础可调。⚠️ 与实例 Capsule 偏差：用户要求可调性优先。
+              cornerRadiusDp={Math.round(radii.toolbar * radiusScale)}
               refractionPx={10}
               dispersionPx={panelDispersionPx}
               membraneAlpha={membrane}
@@ -450,11 +486,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           <DraggableGlass style={[styles.panelToolbar, { height: Math.round(64 * heightScale) }]}>
             <GlassPanel
               title="工具条"
-              subtitle="blurDp 12 · GlassDetailBar 64dp·Capsule"
+              subtitle="blurDp 12 · 圆角22·可调（原全胶囊）"
               style={styles.panelCompact}
               backdropTag={backdropTag}
               blurDp={12}
-              cornerRadiusDp={Math.round(radii.pill * radiusScale)}
+              // it.10 任务四：同 chip——radii.pill 改 radii.toolbar（22dp 基础可调），
+              // ⚠️ 与实例 GlassDetailBar Capsule 偏差：用户要求可调性优先。
+              cornerRadiusDp={Math.round(radii.toolbar * radiusScale)}
               refractionPx={10}
               dispersionPx={panelDispersionPx}
               membraneAlpha={membrane}
@@ -497,19 +535,22 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           />
         </DraggableGlass>
 
-        {/* it.9：底部标签栏完整还原（GlassKit.kt GlassBottomTabs）。
-            外层 bar：64dp 全胶囊（blur 10 / tint 走 store / 无透镜——实例 bar 仅
-            blur+vibrancy+tint），capturable=true 注册为采集源；内层 54dp 胶囊
-            指示器：lens refractionPx 8 / dispersionPx 10（实例指示器规格），backdropTag
-            指向外层 handle——采集到的是「已被外层模糊+tint 过一次」的合成帧，
-            再叠一层透镜 = 玻璃叠玻璃链路（透镜仅限本页验证场，正式接入仍守
-            「lens 仅 indicator」铁律②）。点按任意 tab 切换选中态，Animated spring
-            （dampingRatio 0.85 / stiffness 380，换算 damping 33.14）驱动指示器
-            translationX 到选中位。tab 文字 11sp（实例 10sp 被 guard R6 拦截）。 */}
+        {/* it.10：底部标签栏（GlassKit.kt GlassBottomTabs 还原 + 真机验收回修）。
+            外层 bar：64dp 全胶囊（blur 10 / tint 走 store）、capturable=true 注册为
+            采集源；⚠️ it.10 任务三与实例偏差：bar 加轻折射 refractionPx=5×lensScale
+            （实例 bar 无 lens）——用户拍板「bar 本身也要有折射感」，色散留给指示器。
+            内层 54dp 胶囊指示器：lens 参数接全局滑块（任务二，见 dock 段换算注释），
+            backdropTag 指向外层 handle——玻璃叠玻璃双重透射（透镜仅限本页验证场，
+            正式接入仍守「lens 仅 indicator」铁律②）；任务一修复：Animated.View style
+            挂 transform translateX（it.9 漏挂致动画值空转、指示器钉死原位），绝对
+            目标定位与实例 graphicsLayer translationX 同语义。任务六：glassOnGlass
+            开关关掉时条件渲染不挂内层玻璃（纯色占位、spring 照常）。点按任意 tab
+            切换选中态，Animated spring（damping 33.14 / stiffness 380）驱动指示器。
+            tab 文字 11sp（实例 10sp 被 guard R6 拦截）。 */}
         <Text style={styles.dockCaption}>底部标签栏（玻璃叠玻璃 · 点按弹簧移动）</Text>
         <DraggableGlass style={styles.dockWrap} interactive={true}>
           <View style={styles.dockFrame} onLayout={onDockFrameLayout}>
-            {/* 外层 bar（无透镜，对齐实例 GlassBottomTabs 的 Row） */}
+            {/* 外层 bar（it.10 任务三：加轻折射，用户拍板偏离实例） */}
             <GlassKitView
               ref={dockGlassRef}
               style={StyleSheet.absoluteFill}
@@ -520,29 +561,43 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               tintAlpha={0.10}
               tintColor={PANEL_TINT}
               cornerRadiusDp={radii.pill}
-              refractionPx={0}
+              refractionPx={Math.round(5 * lensScale)}
               dispersionPx={0}
               membraneAlpha={membrane}
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
-            {/* 选中指示器（唯一保留 lens 的地方；透镜采外层 bar 合成帧） */}
+            {/* 选中指示器（唯一保留 lens 的地方；透镜采外层 bar 合成帧）。
+                it.10 任务一：transform translateX 挂在 Animated.View 上——GlassKitView
+                原生视图位置随位移移动，玻璃采集链经 PreDraw 位置检测自动跟随。 */}
             {dockWidth > 0 && dockGlassTag != null && (
               <Animated.View
-                style={[styles.dockIndicatorTrack, { width: dockWidth / DOCK_TABS.length }]}
+                style={[
+                  styles.dockIndicatorTrack,
+                  {
+                    width: dockWidth / DOCK_TABS.length,
+                    transform: [{ translateX: dockIndicatorX }],
+                  },
+                ]}
                 pointerEvents="none"
               >
-                <GlassKitView
-                  style={styles.dockIndicator}
-                  backdropTag={dockGlassTag}
-                  blurDp={0}
-                  cornerRadiusDp={radii.pill}
-                  refractionPx={8}
-                  dispersionPx={10}
-                  membraneAlpha={0.05}
-                  blurEnabled={blurOn}
-                  forceDownsample={forceDown}
-                />
+                {glassOnGlass ? (
+                  <GlassKitView
+                    style={styles.dockIndicator}
+                    backdropTag={dockGlassTag}
+                    blurDp={indicatorBlurDp}
+                    cornerRadiusDp={radii.pill}
+                    refractionPx={indicatorRefractionPx}
+                    dispersionPx={indicatorDispersionPx}
+                    membraneAlpha={0.05}
+                    blurEnabled={blurOn}
+                    forceDownsample={forceDown}
+                  />
+                ) : (
+                  /* it.10 任务六：玻璃叠玻璃关——不渲染内层 GlassKitView（省掉整条
+                     双重透射管线），纯色半透明胶囊占位（实色+opacity 守卫合规） */
+                  <View style={styles.dockIndicatorFallback} />
+                )}
               </Animated.View>
             )}
             {/* tab 内容层：图标区 20dp + 文字（点按切换选中态） */}
@@ -573,6 +628,12 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             label="强制降采样（模拟器调试用）"
             value={forceDown}
             onChange={setForceDown}
+          />
+          {/* it.10 任务六：玻璃叠玻璃 A/B 开关（关 = 指示器纯色占位，真机流畅度对比） */}
+          <SwitchRow
+            label="玻璃叠玻璃（指示器透镜）"
+            value={glassOnGlass}
+            onChange={setGlassOnGlass}
           />
           <ScaleSliderRow
             label="blurScale（模糊倍率）"
@@ -715,6 +776,17 @@ const styles = StyleSheet.create({
     left: 5,
     right: 5,
     bottom: 5,
+  },
+  // it.10 任务六：玻璃叠玻璃关时的占位胶囊（实色 + opacity，守卫合规无内联 rgba）
+  dockIndicatorFallback: {
+    position: 'absolute',
+    top: 5,
+    left: 5,
+    right: 5,
+    bottom: 5,
+    borderRadius: radii.pill,
+    backgroundColor: '#ffffff',
+    opacity: 0.25,
   },
   // tab 内容层：容器内 5dp padding（实例 Row padding(5)），行内均分
   dockTabsRow: {
