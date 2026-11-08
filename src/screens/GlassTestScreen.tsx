@@ -1,14 +1,33 @@
 /**
- * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.13）。
+ * GlassTestScreen —— GlassKit 原生引擎验证页（玻璃迭代 it.14）。
+ *
+ * it.14（底栏 Continuous Capsule + 指示器单独提亮）：
+ * ① P0-1 底栏 / 指示器 / 顶栏演示件传 capsuleContinuous={true}：真胶囊
+ *    r=min(w,h)/2 一字不动，引擎把本帧超椭圆指数局部覆盖为 n=3（2<3<4），
+ *    clipPath 与 AGSL SDF 同 n → 端帽呈 G2 连续曲率，仍是胶囊（几何 / 滑动
+ *    目标 x 零影响）。RN dockFrame 去掉 overflow（圆弧父 clip 会先裁掉超椭圆
+ *    外扩角部），track 最大右边界 dockWidth−dockInnerPad < dockWidth 不露馅。
+ *    hero / chip / 工具条 / clear 不开启，n≈4 逐位零回归。GPU 模糊链
+ *    （HardwareRenderer / ImageReader / BitmapShader）完全不动。
+ * ② P0-2 指示器传 indicatorBoostAlpha={0.05}：对齐 Kotlin
+ *    GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708 的第二笔
+ *    White@0.05 rect（③tint 阶段末尾、高光之前）；Kotlin 无对应滑块 ⇒ 硬编码，
+ *    不加滑块 / 开关 / 内联 rgba / fallback 分支。
+ * ③ P1 指示器 highlightScale={0}：INDICATOR highlight=false
+ *    （GlassLevel.java:37 / GlassSurfaceKt.java:710）⇒ 不画 18dp 顶缘渐变。
+ *    chromaticEnabled / vibrancyEnabled 三开关有意保留全局联动（Kotlin
+ *    INDICATOR 真值 chromatic=true / vibrancy=false，见指示器处注释），
+ *    不硬编码，避免破坏 it.13 已验收的全局开关联动。
  *
  * it.13（SwiftUI 标准连续曲率圆角 + 滑块数值完全对齐 HealthCheckIn）：
  * ① 连续曲率（引擎侧，方案 B：Path + AGSL SDF 统一超椭圆）：
  *    - 组件形状分配（测试页 props 层）：dock bar / dock 指示器用
- *      cornerRadiusDp=999（默认 dockRadius=999，真胶囊）→ 引擎 n=2 硬守卫
- *      保持半圆端；chip / 工具条 / hero / clear 用 SHAPE_CONTAINER=24
- *      （GlassShape.java:11 container）→ 连续曲率 n≈4（G2）；顶栏演示件亦
- *      为真胶囊。GPU 模糊链（HardwareRenderer / ImageReader / BitmapShader）
- *      完全不动，本页不直接参与几何计算，只负责把 cornerRadiusDp 送进引擎。
+ *      cornerRadiusDp=999（默认 dockRadius=999，真胶囊）→ it.13 引擎 n=2 硬守卫
+ *      保持半圆端（it.14 起由 capsuleContinuous 局部覆盖为 n=3）；chip /
+ *      工具条 / hero / clear 用 SHAPE_CONTAINER=24（GlassShape.java:11 container）
+ *      → 连续曲率 n≈4（G2）；顶栏演示件亦为真胶囊。GPU 模糊链
+ *      （HardwareRenderer / ImageReader / BitmapShader）完全不动，本页不直接
+ *      参与几何计算，只负责把 cornerRadiusDp 送进引擎。
  *    - 契约红线不动：H1 tint≤0.12、canBlur≥31/canLens≥33、绘制顺序
  *      ①采集→②模糊/透镜→③tint→④膜层→⑤压暗→⑥高光、圆角钳 min(w,h)/2。
  * ② 滑块数值完全对齐（SettingsScreenKt.java:1898-2128 / GlassTuning.java:21-57）：
@@ -325,6 +344,8 @@ function GlassPanel(props: {
   dispersionPx?: number;
   dimmingAlpha?: number;
   membraneAlpha?: number;
+  /** it.14：仅顶栏演示件传 true（Continuous Capsule）；其余面板默认 false 零回归。 */
+  capsuleContinuous?: boolean;
   glowAlphaScale?: number;
   glowWidthScale?: number;
   glowBottomScale?: number;
@@ -350,6 +371,7 @@ function GlassPanel(props: {
         dispersionPx={props.dispersionPx}
         dimmingAlpha={props.dimmingAlpha}
         membraneAlpha={props.membraneAlpha}
+        capsuleContinuous={props.capsuleContinuous ?? false}
         glowAlphaScale={props.glowAlphaScale}
         glowWidthScale={props.glowWidthScale}
         glowTopScale={1}
@@ -497,7 +519,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
-          {`${APP_VERSION}-it.13 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.14 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 连续曲率 · 面板可拖动`}
@@ -527,8 +549,9 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
           />
         </DraggableGlass>
 
-        {/* it.13 顶栏演示件（Q6）：宽 = 屏宽 × 顶栏宽度 ×屏、高 = 顶栏高度 dp，
-            真胶囊 cornerRadiusDp=999 → 引擎 n=2 守卫保持半圆端（连续曲率胶囊）。 */}
+        {/* it.14 顶栏演示件（Q6）：宽 = 屏宽 × 顶栏宽度 ×屏、高 = 顶栏高度 dp，
+            真胶囊 cornerRadiusDp=999 + capsuleContinuous={true} → 与 dock 同为
+            Continuous Capsule（n=3 端帽）；r 仍 = min(w,h)/2，几何不变。 */}
         <DraggableGlass
           style={[
             styles.topBarDemoWrap,
@@ -542,6 +565,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             backdropTag={backdropTag}
             blurDp={10}
             cornerRadiusDp={999}
+            capsuleContinuous={true}
             refractionPx={10}
             dispersionPx={panelDispersionPx}
             {...effectProps}
@@ -601,7 +625,8 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
         </DraggableGlass>
 
         {/* 底部标签栏（玻璃叠玻璃 · 点按弹簧移动）：bar 与指示器 cornerRadiusDp
-            共用 dock 圆角滑块（默认 999 真胶囊 → 引擎 n=2 守卫半圆端）。 */}
+            共用 dock 圆角滑块（默认 999 真胶囊）。it.14 两者均开启
+            capsuleContinuous={true} → Continuous Capsule（n=3 端帽，仍是胶囊）。 */}
         <Text style={[styles.dockCaption, { color: C.accent }]}>底部标签栏（玻璃叠玻璃 · 点按弹簧移动）</Text>
         <DraggableGlass style={[styles.dockWrap, { marginBottom: dockFloatDp }]} interactive={true}>
           <View
@@ -626,6 +651,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               tintAlpha={0.06}
               tintColor={panelTintFor(scheme)}
               cornerRadiusDp={dockRadius}
+              capsuleContinuous={true}
               refractionPx={Math.round(5 * lensScale)}
               dispersionPx={0}
               highlightScale={highlightScale}
@@ -647,6 +673,20 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                 ]}
                 pointerEvents="none"
               >
+                {/*
+                 * it.14 指示器分级对齐（Kotlin GlassLevel.INDICATOR，GlassLevel.java:37）：
+                 * ① P0-1 capsuleContinuous={true}：与 dock bar 同为 Continuous Capsule（n=3 端帽）；
+                 * ② P0-2 indicatorBoostAlpha={0.05}：White@0.05 专属提亮
+                 *    （GlassKitKt.java:1434-1435,1451 → GlassSurfaceKt.java:704-708），
+                 *    Kotlin 无对应滑块（SettingsScreenKt.java:1898-2128）⇒ 硬编码常量，
+                 *    不加滑块 / 开关 / 内联 rgba / fallback 分支；
+                 * ③ P1 highlightScale={0}：INDICATOR highlight=false
+                 *    （GlassLevel.java:37 / GlassSurfaceKt.java:710）⇒ 不画 18dp 顶缘渐变。
+                 * Kotlin INDICATOR 真值登记：chromatic=true / vibrancy=false（GlassLevel.java:37）
+                 * ——此处「有意不」硬编码这两个开关：用户 it.13 刚验收三开关全局联动，
+                 * 且长期偏好「全局滑块统一控制，不为每个组件单独配置」，硬编码会破坏该功能
+                 * ⇒ chromaticEnabled / depthEffect / vibrancyEnabled 三开关保持全局联动。
+                 */}
                 {glassOnGlass ? (
                   <GlassKitView
                     style={[
@@ -661,9 +701,11 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                     backdropTag={dockGlassTag}
                     blurDp={indicatorBlurDp}
                     cornerRadiusDp={dockRadius}
+                    capsuleContinuous={true}
+                    indicatorBoostAlpha={0.05}
                     refractionPx={indicatorRefractionPx}
                     dispersionPx={indicatorDispersionPx}
-                    highlightScale={highlightScale}
+                    highlightScale={0}
                     chromaticEnabled={chromaticEnabled}
                     depthEffect={depthEffect}
                     vibrancyEnabled={vibrancyEnabled}
@@ -936,7 +978,11 @@ const styles = StyleSheet.create({
   dockCaption: { fontSize: 11, fontWeight: '400', marginBottom: 6 },
   // it.13：marginBottom 由「底栏留白 dp」滑块 inline 驱动
   dockWrap: {},
-  dockFrame: { overflow: 'hidden' },
+  // it.14 P0-1 必要伴生改动：去掉 overflow，RN 父 View 的圆弧 clip 会先裁掉
+  // n=3 超椭圆角部的外扩部分（it14-spec C7）；track 最大右边界 =
+  // dockWidth−dockInnerPad < dockWidth，去掉后不会露出界外内容。
+  // borderRadius 由 JSX inline（dockFrameRadius）传入，此处不再放任何裁剪样式。
+  dockFrame: {},
   dockIndicatorTrack: { position: 'absolute', top: 0, left: 0 },
   // it.13：top/left/right/bottom 由「底栏内缩 dp」滑块 inline 驱动
   dockIndicator: { position: 'absolute' },
