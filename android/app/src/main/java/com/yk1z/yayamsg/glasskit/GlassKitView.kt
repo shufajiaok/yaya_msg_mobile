@@ -32,6 +32,8 @@ import android.os.Build
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewTreeObserver
+import com.facebook.react.uimanager.PointerEvents
+import com.facebook.react.uimanager.ReactPointerEventsView
 
 /**
  * GlassKit 渲染核心（引擎重写清单 §二，纯 Kotlin View，零依赖）。
@@ -63,8 +65,10 @@ import android.view.ViewTreeObserver
  *    （alpha ≤ 0.18）界定边缘；
  * 7. 裁剪：圆角矩形 Path clip。
  *
- * 重绘触发：背景视图挂 OnPreDrawListener（返回 true 不拦截绘制），33ms 节流
- * （≈30fps），postInvalidateDelayed 排队；onDetachedFromWindow 清理。
+ * 重绘触发：背景视图挂 OnPreDrawListener（返回 true 不拦截绘制），it.26 起
+ * **16ms 节流（≈60fps 上限）+ postInvalidateOnAnimation 对齐下一个 VSYNC**
+ * （旧口径 33ms / postInvalidateDelayed 在 120Hz 上冻结 3/4 帧、且延迟拍与
+ * VSYNC 相位漂移）；onDetachedFromWindow 清理。
  * it.4 重绘触发改造：① PreDraw 检测面板 onScreen 位置变化 → 立即 invalidate 绕过
  * 节流（拖动/滚动时 capture offset 与面板框逐帧对齐，修复「拖动内容抖动」）；
  * ② 自激励环打断——自身 postInvalidate 引发的 traversal 不再续期（修复静止期
@@ -131,7 +135,21 @@ import android.view.ViewTreeObserver
  * ⑤ 软画布快照回录帧不创建 RuntimeShader、不下发任何新 uniform，
  *   保持原模糊降级（it.8-fix1 教训）。
  */
-class GlassKitView(context: Context) : View(context) {
+class GlassKitView(context: Context) : View(context), ReactPointerEventsView {
+
+    /**
+     * it.19 hotfix：玻璃是**纯绘制层，永不参与触摸**。
+     *
+     * 与 [GlassKitRimView] 同一个根因：Paper 的 TouchTargetHelper 只在 View 实现了
+     * [ReactPointerEventsView] 时才读 `pointerEvents`，否则一律按 `AUTO` 处理，
+     * 而 AUTO 的叶子 View 直接成为触摸目标 —— 自定义 SimpleViewManager 拿不到
+     * JS 侧的 `pointerEvents` prop（那个 @ReactProp 只存在于 ReactViewManager）。
+     *
+     * 以前没暴露，是因为玻璃总是先于内容层绘制（RN 同层倒序命中 ⇒ 内容里的
+     * Pressable 先命中）；一旦玻璃盖在按钮之上（轮廓光、L2 顶栏玻璃等）就会
+     * 吞掉整片触摸。这里统一钉成 NONE，杜绝「玻璃挡点击」这一类问题。
+     */
+    override val pointerEvents: PointerEvents = PointerEvents.NONE
 
     companion object {
         /**
@@ -205,8 +223,24 @@ class GlassKitView(context: Context) : View(context) {
          * radius = round(blurRadiusPx / LENS_DOWNSAMPLE)，三盒迭代的 sigma = radius/2。
          */
         const val MAX_LENS_BLUR_RADIUS: Int = 60
-        /** 重绘节流间隔（ms，≈30fps）。 */
-        const val FRAME_INTERVAL_MS: Long = 33L
+        /**
+         * 重绘节流间隔（ms）。it.26：33ms（≈30fps）→ 16ms（**60fps 上限**）。
+         *
+         * 33ms 在 120Hz 屏上把每个 VSYNC 周期砍掉 3/4（120Hz ≈ 8.3ms/帧，
+         * 33ms 只放行约 30 帧/秒）⇒ 拖动 / 滚动时玻璃明显掉帧。
+         * 取 16ms 而非 0：本引擎每帧要做两次软采集 + 一次 GPU 高斯（it.25 双源），
+         * 逐帧（120fps）会把 GPU 负载推到现状的数倍，故仍保留「≈60fps 上限」这道闸。
+         * ⚠️ 不要降成 0 / 不要改成逐帧 / 不要引 Choreographer——节流口径由
+         * [scheduleThrottledInvalidate] 的 VSYNC 对齐队列负责实现。
+         */
+        const val FRAME_INTERVAL_MS: Long = 16L
+
+        /**
+         * it.26：VSYNC 排队标记的失效阈值（ms）。超过它仍未走到 onDraw（视图被隐藏 /
+         * invalidate 被窗口丢弃）时，[scheduleThrottledInvalidate] 视为标记失效并重新排队，
+         * 防「同帧合并」标记永久为 true 导致停帧。
+         */
+        const val INVALIDATE_STALE_MS: Long = 250L
         /** 捕获失败兜底底色：半透明白灰。 */
         const val FALLBACK_COLOR: Int = 0x4DFFFFFF
         /** E3 修复：backdrop 晚挂载时 resolveTarget 空结果的重试间隔（ms）。 */
@@ -330,6 +364,46 @@ class GlassKitView(context: Context) : View(context) {
             // 会连累新 tag 的晚挂载重试提前停摆）
             pendingResolveRetries = 0
             resolveTarget()
+            markPropChanged()
+        }
+
+    /**
+     * it.25 双纹理分流：**背景**采集源 tag。
+     *
+     * it.26 语义修正：由「bar 玻璃叶子（已模糊的玻璃帧）」改为 **App 级背景源**
+     * （bar 下方真实内容、**未模糊**）。原因：it.25 指向 bar 玻璃时，下游拿到的是
+     * [recordFrameCache] 回放的软画布快照，而 [drawBlurredLayer] 的真高斯分支要求
+     * `canvas.isHardwareAccelerated`，软画布只能走 1/6 降采样近似 ⇒ 指示器「模糊 0」
+     * 时几乎无模糊，没有「叠在 bar 之上再糊一层」的观感。
+     *
+     * 现语义 = **两次高斯串行叠加**：调用方（AppTabBar / GlassTestScreen）把
+     * [blurDp] 传成叠加半径 √(barBlurDp² + indicatorBlurDp²)，本视图对这张未模糊
+     * 背景再跑一次高斯，两次串行高斯的合成标准差即 σ=√(σ₁²+σ₂²)。
+     *
+     * 与 [iconBackdropTag] 同时有效时，[drawGlassBody] 走双源路径：两次软采集 →
+     * 背景唯一一次 GPU 高斯 → SRC_OVER 合成清晰图标 → lens（输入 blur=0）。
+     * 任一为 NO_ID / 解析失败时**原样回退**到既有单纹理路径（其它玻璃面板零回归）——
+     * 调用方在 App 级背景未就绪时显式传 -1 即走此回退，不会解引用空视图。
+     *
+     * 换 tag 即走 markPropChanged()（四槽位代数指纹预算纪律：新增 prop 不标记
+     * 会导致滑块 / 重挂载时该 tag 变化不刷新）。
+     */
+    var blurBackdropTag: Int = View.NO_ID
+        set(value) {
+            if (field == value) return
+            field = value
+            markPropChanged()
+        }
+
+    /**
+     * it.25 双纹理分流：透明底图标采集源 tag（GlassKitBackdrop，只含图标/文字，
+     * 背景 transparent）。native 以 SRC_OVER 覆盖到「已模糊背景」之上，图标永不
+     * 进卷积；合成纹理喂 lens 后仍被放大/折射（it.23 能力保留）。
+     */
+    var iconBackdropTag: Int = View.NO_ID
+        set(value) {
+            if (field == value) return
+            field = value
             markPropChanged()
         }
 
@@ -676,25 +750,32 @@ class GlassKitView(context: Context) : View(context) {
      * detach 时对称注销；默认 false，行为与 it.7 完全一致。
      */
     var capturable: Boolean = false
-
-    /**
-     * it.18 实时背景透射（默认 false，仅固定悬浮的 dock bar 启用）。
-     *
-     * true：PreDraw 每帧（33ms 节流）重绘并重满预算，始终采集当前背景 —— 用于
-     * 「背景内容在其下方滚动、但本视图位置固定」的场景。默认按需重绘语义
-     * （位移 / prop 代数 / 背景源 drawGeneration）保持不变。
-     */
-    var liveBackdrop: Boolean = false
         set(value) {
             if (field == value) return
             field = value
-            // props 晚于 attach 到达时就地补注册/注销；attach 前调用则等
-            // onAttachedToWindow 统一注册（NO_ID 由 register 拒绝）
+            // it.22：props 晚于 attach 到达时就地补注册/注销（与 liveBackdrop 旧实现
+            // 对齐，但归属正确的字段）。attach 前调用则等 onAttachedToWindow 统一注册。
             if (isAttachedToWindow) {
                 if (value) GlassCaptureEngine.register(id, this)
                 else GlassCaptureEngine.unregister(id)
             }
         }
+
+    /**
+     * it.18 实时背景透射（默认 false，固定悬浮的 dock bar 与 it.22 起的指示器启用）。
+     *
+     * true：PreDraw 每帧（it.26 起 16ms 节流 ≈60fps 上限）重绘，始终采集当前背景 —— 用于
+     * 「背景内容在本视图下方持续变化、但本视图自身不动」的场景（it.26 起不再重满预算，
+     * 见 preDrawListener 注释）。
+     *
+     * it.22 指示器为何也开：它的采集源覆盖「背景 + 图标」两张纹理（it.25 双源；
+     * it.26 起背景源改为 App 级 backdrop），等价原版 `LayerBackdrop`——图层内容
+     * 每帧都在变。不开的话 PreDraw 只剩「自身位移 / prop 变化 / 源 drawGeneration」
+     * 三种刺激，而源是 GlassKitBackdrop 容器（子孙重绘不触发它的 dispatchDraw，
+     * 代数不变）⇒ 静止后**永久停在最后一次捕获**（真机表现：只在切换 tab 的那几帧
+     * 跟手，之后是冻结截图）。
+     */
+    var liveBackdrop: Boolean = false
 
     /* ---------------- 内部状态 ---------------- */
 
@@ -730,6 +811,13 @@ class GlassKitView(context: Context) : View(context) {
     /** it.19①-fix 一次性日志：折射带高未下发、退化用 refractionPx（防刷屏）。 */
     private var loggedBandFallback: Boolean = false
 
+    /**
+     * 一次性取证日志：采集源身份 + 采集位图中心像素。
+     * 「指示器到底采到哪一层」的唯一现场答案（logcat -s GlassKitBlur | grep "capture src"）：
+     * target 应是包住 [bar + 图标文字] 的 GlassKitBackdropView，centerARGB 应与被采内容同色。
+     */
+    private var loggedCaptureSource: Boolean = false
+
     /* ------- it.9 闪烁取证计数（GlassKitFlicker） ------- */
     /** onDraw 累计帧序（含 isCapturing 短路帧）。 */
     private var flickerSeq: Long = 0L
@@ -743,7 +831,7 @@ class GlassKitView(context: Context) : View(context) {
     private var flickerRecordCount: Int = 0
     /** 透镜输入槽位写入次数（obtainLensInputShader 模糊路径）。 */
     private var flickerSlotWrites: Int = 0
-    /** 节流调度打点上限（imm/delay 分支，防刷屏）。 */
+    /** 节流调度打点上限（it.26 起 vsync/wait 分支，防刷屏）。 */
     private var flickerSchedLogs: Int = 0
 
     private val capturePaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
@@ -903,6 +991,22 @@ class GlassKitView(context: Context) : View(context) {
     private var lensSharpShader: BitmapShader? = null
     private var lensSharpShaderCapture: Bitmap? = null
 
+    /* ------- it.25 双纹理分流（纯背景 / 透明底图标 两源合成） ------- */
+    /**
+     * 第二次采集位图（透明底图标层）。尺寸/降采样口径与 [captureBitmap] 逐位一致
+     * —— 两次 capture 共用同一 glassView(this) + 同一 insetPx + 同一 outBitmap
+     * 尺寸，offset/scale 天然同帧一致，合成时两张纹理严格对齐。
+     */
+    private var dualIconBitmap: Bitmap? = null
+    /** GPU 链路：背景子节点（唯一一次高斯挂这里），主节点只做 SRC_OVER 合成。 */
+    private var gpuBgNode: RenderNode? = null
+    /** CPU 回退（forceDownsample / GPU 失败）：合成位图及其 BitmapShader 缓存。 */
+    private var dualCompositeBitmap: Bitmap? = null
+    private var dualCompositeShader: BitmapShader? = null
+    private var dualCompositeShaderBitmap: Bitmap? = null
+    /** 双源日志去重键（tag 组合 / 尺寸 / blur 半径变化才重打一条，防刷屏）。 */
+    private var lastDualLogKey: String? = null
+
     /** API 31+ RenderNode 模糊路径的复用节点。 */
     private var blurRenderNode: RenderNode? = null
 
@@ -986,7 +1090,7 @@ class GlassKitView(context: Context) : View(context) {
 
     private val preDrawListener = ViewTreeObserver.OnPreDrawListener {
         // it.4 修复（抖动）：面板 onScreen 位置变化（拖动 / 滚动）→ 立即 invalidate
-        // 绕过 33ms 节流——重绘帧内 onDraw 用 getLocationOnScreen 现值采集，内容与
+        // 绕过 16ms 节流——重绘帧内 onDraw 用 getLocationOnScreen 现值采集，内容与
         // 面板框逐帧对齐；旧逻辑下未重跑 onDraw 的帧按旧位图在新位置重放，
         // 内容相对面板框瞬移（120Hz 真机上每两帧一跳即「拖动抖动」）。
         getLocationOnScreen(preDrawLocation)
@@ -1006,14 +1110,22 @@ class GlassKitView(context: Context) : View(context) {
             foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
             invalidate()
         } else if (liveBackdrop && targetView != null) {
-            // it.18 透射类玻璃（dock bar）：背景内容在本视图下方持续变化，但 App 级
-            // backdrop 的 dispatchDraw 不保证被滚动触发（RN 滚动容器可能只重绘子区域，
-            // 父 FrameLayout 无 traversal）⇒ sourceGeneration 长期不变，加上本视图位置
-            // 固定 / prop 不变，玻璃会永久停在首次捕获那一帧（表现为「dock 背后是一张
-            // 静止截图」，真机取证：滑动两次 GlassKitFlicker 0 帧）。
-            // 修法：此类视图按帧（33ms 节流）无条件重绘，始终采当前背景；仅 dock bar
-            // 启用（liveBackdrop=true），其他玻璃保持按需重绘语义与 it.9 预算不变。
-            foreignRedrawBudget = FOREIGN_REDRAW_BUDGET
+            // it.18 透射类玻璃（dock bar / it.26 起的 dock 指示器）：背景内容在本视图
+            // 下方持续变化，但 App 级 backdrop 的 dispatchDraw 不保证被滚动触发（RN
+            // 滚动容器可能只重绘子区域，父 FrameLayout 无 traversal）⇒
+            // sourceGeneration 长期不变，加上本视图位置固定 / prop 不变，玻璃会永久
+            // 停在首次捕获那一帧（表现为「dock 背后是一张静止截图」，真机取证：
+            // 滑动两次 GlassKitFlicker 0 帧）。
+            // 修法：此类视图按帧（it.26 起 16ms 节流 ≈60fps 上限）无条件重绘。
+            // ⚠️ it.26 两处修正：
+            // ① 本分支**显式消费** selfInvalidationPending —— 它排在
+            //    `else if (selfInvalidationPending)` 之前，旧实现让该标记永不清零，
+            //    经 markPropChanged 路径进来的自激励标记会一直为 true；
+            // ② 本分支**不再重满** foreignRedrawBudget —— liveBackdrop 视图每帧自己
+            //    重绘，不靠预算驱动，无条件重满会旁路 it.9 的风暴打断（静止期多个
+            //    视图互相喂帧时预算永远满 ⇒ 重绘风暴复活）。
+            // moved 分支的「立即 invalidate + 重满预算」语义（it.4 拖动抖动修复）不动。
+            selfInvalidationPending = false
             scheduleThrottledInvalidate()
         } else if (selfInvalidationPending) {
             // it.4 修复（闪烁伴生）：本次 traversal 由自身 postInvalidate 触发
@@ -1048,6 +1160,15 @@ class GlassKitView(context: Context) : View(context) {
 
     private var lastInvalidateAt: Long = 0L
 
+    /**
+     * it.26：已有一帧 VSYNC 对齐的重绘在排队中（同帧内合并多次调度，防重复 post）。
+     * 由 [onDraw] 顶部清零——PreDraw 先于 onDraw，故同一帧内的后续调度仍能被合并。
+     */
+    private var frameInvalidateScheduled: Boolean = false
+
+    /** it.26：未到节流窗口时挂的「下一帧复查」回调是否已挂（防每 PreDraw 重复 post）。 */
+    private var frameRetryPosted: Boolean = false
+
     /** 硬件模糊能力：只按 SDK_INT 判（清单 §二.2 / 任务书「isHardwareAvailable」）。 */
     val isHardwareAvailable: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -1056,6 +1177,10 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // it.26：跨窗口重挂时清掉节流排队标记（detach 期 post 的回调已随窗口取消，
+        // 标记若滞留为 true 会让后续 scheduleThrottledInvalidate 永久早退 ⇒ 停帧）
+        frameInvalidateScheduled = false
+        frameRetryPosted = false
         // it.8：capturable 视图「挂载即注册」（同 GlassKitBackdropView 策略——此时
         // id 已由 RN 定稿，消除「props 注册点错过 attach 时序」的竞态；NO_ID 由
         // register 按原语义拒绝）。
@@ -1069,6 +1194,9 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        // it.26：detach 后 post 的回调不再到达，排队标记必须复位（重挂后重新开始节流）
+        frameInvalidateScheduled = false
+        frameRetryPosted = false
         // it.8：capturable 视图对称注销，防跨窗口注册表滞留
         if (capturable) GlassCaptureEngine.unregister(id)
         // it.8：合成帧快照随窗口释放（重挂后首次 onDraw 重建）
@@ -1205,36 +1333,75 @@ class GlassKitView(context: Context) : View(context) {
         invalidate()
     }
 
-    /** 33ms 节流：到点直接 invalidate，未到点用 postInvalidateDelayed 排队到下一拍。
-     *  it.4：自激励环打断——本方法设置的 selfInvalidationPending 会让「由本调用引发的
-     *  traversal」的 PreDraw 不再续期（见 preDrawListener）。
-     *  it.9：延迟分支同样置位（旧实现漏置——延迟帧被误判为外部刺激，风暴通道之一）。 */
+    /**
+     * it.26：**16ms 节流 + VSYNC 对齐**的重绘调度（旧实现 `postInvalidateDelayed`）。
+     *
+     * 旧口径的两个问题：① `FRAME_INTERVAL_MS = 33` 在 120Hz 屏上只放行约 30fps，
+     * 120 帧里冻结 3/4；② `postInvalidateDelayed(n)` 走 Handler 定时，落点与 VSYNC
+     * 不对齐 ⇒ 每拍累积相位漂移，画面节奏抖动。
+     *
+     * 现口径：
+     * - 到窗口（elapsed ≥ FRAME_INTERVAL_MS）→ `postInvalidateOnAnimation()`，
+     *   由 View 自带机制对齐下一个 VSYNC（无需 import / 无需 Choreographer）；
+     * - 未到窗口 → 不重绘，但用 `postOnAnimation` 挂一次**下一帧复查**，保证
+     *   liveBackdrop 这类「靠自身激励维持」的视图不会因为一次「跳过」而永久停帧
+     *   （120Hz 上每两帧放行一次 ⇒ 稳定 ≈60fps，比 `postInvalidateDelayed` 的
+     *   相位漂移更平滑）；
+     * - 同一帧内重复调度只排队一次（[frameInvalidateScheduled]），避免叠加多次 invalidate。
+     *
+     * `lastInvalidateAt` 语义保持不变：记录**最近一次真正排队的时刻**，节流判定
+     * 仍以它为基准（不是「最近一次 onDraw」），故不会退化成完全不节流。
+     *
+     * it.4：自激励环打断——本方法设置的 selfInvalidationPending 会让「由本调用引发的
+     * traversal」的 PreDraw 不再续期（见 preDrawListener）。
+     * it.9：未到点分支曾漏置位导致延迟帧被误判为外部刺激，这里**只在真正排队重绘时**
+     * 置位（复查分支不置位——它没有产生 invalidate，置位会让下一次无关 traversal
+     * 被误吞一帧）。
+     */
     private fun scheduleThrottledInvalidate() {
         val now = SystemClock.uptimeMillis()
         val elapsed = now - lastInvalidateAt
         if (elapsed >= FRAME_INTERVAL_MS) {
+            // 同一帧内已有一次 VSYNC 排队：合并，不重复 post。
+            // 兜底：标记超时（>250ms 未走到 onDraw，例如视图被隐藏 / invalidate 被丢弃）
+            // 视为失效，允许重新排队 —— 否则标记永久为 true 会让本视图彻底停帧。
+            if (frameInvalidateScheduled && elapsed < INVALIDATE_STALE_MS) return
+            frameInvalidateScheduled = true
             lastInvalidateAt = now
             selfInvalidationPending = true
-            // it.9 取证：imm = 立即排队（自激励环入口）
+            // it.9 取证：vsync = VSYNC 对齐排队（自激励环入口）
             if (flickerSchedLogs < 600) {
                 flickerSchedLogs++
-                Log.i(FLICKER_LOG_TAG, "view=$id sched=imm elapsed=${elapsed}ms budget=$foreignRedrawBudget")
+                Log.i(FLICKER_LOG_TAG, "view=$id sched=vsync elapsed=${elapsed}ms budget=$foreignRedrawBudget")
             }
-            postInvalidate()
+            postInvalidateOnAnimation()
         } else {
-            selfInvalidationPending = true
-            // it.9 取证：delay = 延迟排队
+            // 未到节流窗口：本帧不重绘，挂一次下一帧复查（不置 selfInvalidationPending）
             if (flickerSchedLogs < 600) {
                 flickerSchedLogs++
-                Log.i(FLICKER_LOG_TAG, "view=$id sched=delay elapsed=${elapsed}ms budget=$foreignRedrawBudget")
+                Log.i(FLICKER_LOG_TAG, "view=$id sched=wait elapsed=${elapsed}ms budget=$foreignRedrawBudget")
             }
-            postInvalidateDelayed(FRAME_INTERVAL_MS - elapsed)
+            if (!frameRetryPosted) {
+                frameRetryPosted = true
+                postOnAnimation {
+                    frameRetryPosted = false
+                    scheduleThrottledInvalidate()
+                }
+            }
         }
     }
 
     private fun releaseBitmaps() {
         captureBitmap?.recycle()
         captureBitmap = null
+        // it.25：第二采集位图 / CPU 合成位图一并释放（shader 强引用位图，先断链）
+        dualIconBitmap?.let { if (!it.isRecycled) it.recycle() }
+        dualIconBitmap = null
+        dualCompositeShader = null
+        dualCompositeShaderBitmap = null
+        dualCompositeBitmap?.let { if (!it.isRecycled) it.recycle() }
+        dualCompositeBitmap = null
+        lastDualLogKey = null
         // it.11：半采样链中间位图一并释放（随降采样档 / 尺寸重建）
         for (chainBitmap in smallBlurChain) {
             if (!chainBitmap.isRecycled) chainBitmap.recycle()
@@ -1288,6 +1455,8 @@ class GlassKitView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // it.26：本帧的 VSYNC 峰值已消费 ⇒ 允许下一次调度再次排队（同帧合并标记复位）
+        frameInvalidateScheduled = false
         // it.9：真实屏幕绘制代数自增（仅 hw 画布；软画布 = 被下游采集 / 回录，非内容变化）
         if (canvas.isHardwareAccelerated) drawGeneration++
         // it.9 闪烁取证：帧序 / 帧间隔 / 短路与回录计数（前 600 帧逐帧，之后每 300 帧）
@@ -1313,23 +1482,24 @@ class GlassKitView(context: Context) : View(context) {
         // 视图维持空白短路（backdrop 自采集时排除自身的期望语义不变）。
         if (isCapturing) {
             flickerCaptureSkips++
-            if (capturable && !recordingFrameCache) {
-                frameCacheBitmap?.let { snap ->
-                    // it.19 P0-2：快照只含玻璃**本体**（不含 inset 环带）⇒ 回放目标矩形
-                    // 必须是本体矩形 (inset, inset)-(inset+bw, inset+bh)，不能用整视图
-                    val insetPx = glassInsetPx
-                    val bw = bodyWidthPx
-                    val bh = bodyHeightPx
-                    if (!snap.isRecycled && bw > 0 && bh > 0) {
-                        canvas.drawBitmap(
-                            snap,
-                            null,
-                            RectF(insetPx, insetPx, insetPx + bw, insetPx + bh),
-                            capturePaint,
-                        )
-                    }
-                }
-            }
+            if (capturable && !recordingFrameCache) replayFrameCache(canvas)
+            return
+        }
+        // it.22 图层回放（等价原版 `LayerBackdrop` 的「一份图层，多层采样」）：
+        //
+        // 软画布 + capturable ⇒ 本视图正被下游玻璃采集（it.25 起 dock 指示器改采
+        // [bar + 图标] 双源；it.26 又把指示器的**模糊背景源**改指 App 级背景，
+        // 本回放退为「指示器 backdropTag 回退锚点」场景使用）。原版 Compose 里 bar
+        // 把自己录进 `barBackdrop` 图层，指示器采样的是**已经合成好的屏幕帧**；
+        // 本引擎没有共享图层，若在这里重跑 drawGlassFrame，下游拿到的是「软画布
+        // 降级渲染」（透镜→模糊、模糊→半采样链，见下方 nested soft render 取证）
+        // ——既多跑一遍采集/模糊，画质也和屏幕上的 bar 对不上。
+        // ⚠️ it.26 根因记录：正因为这条软画布回放**拿不到真高斯**（drawBlurredLayer
+        // 的 RenderEffect 分支要求硬件画布），指示器不能再拿 bar 快照当模糊背景源。
+        // 回放最近一次屏幕帧 = 用零成本拿到与屏幕逐像素一致的图层。
+        if (capturable && !recordingFrameCache && !canvas.isHardwareAccelerated &&
+            replayFrameCache(canvas)
+        ) {
             return
         }
         drawGlassFrame(canvas)
@@ -1340,9 +1510,33 @@ class GlassKitView(context: Context) : View(context) {
     }
 
     /**
+     * it.22：把最近一次屏幕帧快照回放到本视图矩形（图层回放）。
+     *
+     * 只对 capturable 视图有意义（只有它们有 frameCacheBitmap，见 [recordFrameCache]）。
+     * 返回 false = 还没有快照（首帧 / 尺寸刚变），调用方应走完整管线而不是画空白。
+     *
+     * 回放矩形用**本体**矩形 (inset, inset)-(inset+bw, inset+bh)：快照只含本体，
+     * 不含 it.19 P0-2 的投影环带，用整视图矩形会让玻璃叠玻璃错位。
+     */
+    private fun replayFrameCache(canvas: Canvas): Boolean {
+        val snap = frameCacheBitmap ?: return false
+        val insetPx = glassInsetPx
+        val bw = bodyWidthPx
+        val bh = bodyHeightPx
+        if (snap.isRecycled || bw <= 0 || bh <= 0) return false
+        canvas.drawBitmap(
+            snap,
+            null,
+            RectF(insetPx, insetPx, insetPx + bw, insetPx + bh),
+            capturePaint,
+        )
+        return true
+    }
+
+    /**
      * it.8：回录当前合成帧到快照缓存（仅 capturable 视图、正常 onDraw 末尾调用）。
      * 完整重跑 drawGlassFrame（含重新采集 backdrop 子树）——capturable 视图数量
-     * 少（当前仅测试页 demo dock），且重绘受 33ms 节流约束，双倍成本可接受。
+     * 少（当前仅测试页 demo dock），且重绘受 16ms 节流约束，双倍成本可接受。
      * 透镜管线在回录期间走专用槽 2（不覆写屏幕帧的 ping-pong 槽位，见
      * lensShaderInputs 注释）；清晰路径（blurRadiusPx<0.5）零拷贝绑定 capture
      * 位图，回录重采样的变异窗口与既有「RenderThread 采样 captureBitmap 跨帧
@@ -1407,7 +1601,8 @@ class GlassKitView(context: Context) : View(context) {
                     " chromatic=$chromaticEnabled depth=$depthEffect vibrancy=$vibrancyEnabled" +
                     " capsuleContinuous=$capsuleContinuous indicatorBoostAlpha=$indicatorBoostAlpha" +
                     " blurEnabled=$blurEnabled backdropTag=$backdropTag size=${width}x$height" +
-                    " glassInsetDp=$glassInsetDp shadowAlpha=$shadowAlpha",
+                    " glassInsetDp=$glassInsetDp shadowAlpha=$shadowAlpha" +
+                    " blurBackdropTag=$blurBackdropTag iconBackdropTag=$iconBackdropTag",
             )
         }
         // it.19 P0-2：glassInsetDp = 0 时走原路径（逐位等价 it.18，12 个既有调用点零影响）
@@ -1586,56 +1781,150 @@ class GlassKitView(context: Context) : View(context) {
         val blurRadiusPx = blurDp * blurScale * density
         val lensActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             !lensShaderFailed && lensScale > 0f && (refractionPx > 0f || dispersionPx > 0f)
-        val capture = obtainCaptureBitmap(
-            w,
-            h,
-            allowDownsample = !(lensActive && canvas.isHardwareAccelerated),
-        )
-        // it.11 嵌套取证：软画布 + 透镜激活 = 本视图正被下游玻璃采集或回录快照，
-        // 透镜输入是「软画布降级渲染」（透镜→blur、blur→半采样链）——与屏幕帧的
-        // lens input=gpu 交替出现即为「dock 正常 / 指示器锯齿」差异链路证据
-        if (lensActive && !canvas.isHardwareAccelerated && !loggedNestedSoftRender) {
-            loggedNestedSoftRender = true
-            Log.i(
-                logTag,
-                "nested soft render: view=$id lensDowngraded=blur" +
-                    " inputCapture=${capture?.width}x${capture?.height} config=${capture?.config}" +
-                    " blurChain=BLUR_DOWNSAMPLE/$BLUR_DOWNSAMPLE(逐级半采样)",
-            )
-        }
-        val captureOk = try {
-            isCapturing = true
-            capture != null &&
-                targetView != null &&
-                GlassCaptureEngine.capture(
-                    targetView!!, this, capture!!,
-                    // it.19 P0-2：glassInsetDp > 0 时本体不是整个视图，采集源矩形必须
-                    // 同步内缩，否则背景被按 (W+2i)/W 放大、内容整体漂移
-                    insetPx = glassInsetPx,
-                )
-        } finally {
-            isCapturing = false
-        }
+        val allowDownsample = !(lensActive && canvas.isHardwareAccelerated)
 
-        if (blurEnabled && captureOk && capture != null) {
-            // ② 模糊 + ③ 透镜
-            // 软件画布不支持 RuntimeShader（快照回录用 Bitmap 软画布，it.8 真机崩溃实证），
-            // 回录帧透镜降级为模糊/清晰层；屏幕硬件加速路径不受影响
-            if (lensActive && canvas.isHardwareAccelerated) {
-                // it.4-R2：透镜输入真模糊化——固定 1/4 降采样 + 小图 CPU box blur ×3
-                //（it.3 的自适应降采样近似已废弃为锯齿源，见类头注释）
-                drawLensLayer(
-                    canvas, capture, w, h, cornerRadiusPx, blurRadiusPx, cornerExponentN,
-                )
-            } else if (blurRadiusPx >= 0.5f) {
-                drawBlurredLayer(canvas, capture, blurRadiusPx, w, h)
-            } else {
-                // 无模糊需求（blurDp=0 或 blurScale=0）：直接画清晰采集结果
-                drawCaptureScaled(canvas, capture, w, h)
+        // it.25 双纹理分流判定：两个 tag 都能解析到视图 + 模糊总开关打开时才走
+        // 新路径；其它玻璃 / 双源未就绪 / 降级一律**原样回退**到既有单纹理路径
+        //（零回归）。it.26：blurBackdropTag 由调用方指 App 级背景（未模糊的真实内容）
+        // 并在未就绪时显式传 -1 ⇒ dualBg == null ⇒ 落到回退路径，不会解引用空视图。
+        // find() 每帧惰性解析（SparseArray + 弱引用，成本极小；
+        // liveBackdrop 保证晚挂载 tag 下一帧即可命中），不缓存避免持有已卸载视图。
+        val dualBg = if (blurBackdropTag != View.NO_ID) {
+            GlassCaptureEngine.find(blurBackdropTag)
+        } else null
+        val dualIcon = if (iconBackdropTag != View.NO_ID) {
+            GlassCaptureEngine.find(iconBackdropTag)
+        } else null
+
+        if (dualBg != null && dualIcon != null && blurEnabled) {
+            // 两次软采集：共用同一个 glassView(this)、同一 insetPx、同一 outBitmap
+            // 尺寸 ⇒ offset / scale / inset 全部由 GlassCaptureEngine.capture 内部
+            // 按同一套几何换算得出，天然同帧一致（不各自算一遍）。
+            val captureBg = obtainCaptureBitmap(w, h, allowDownsample)
+            val captureIcon = obtainDualIconBitmap(w, h, allowDownsample)
+            var bgOk = false
+            var iconOk = false
+            try {
+                isCapturing = true
+                bgOk = captureBg != null &&
+                    GlassCaptureEngine.capture(dualBg, this, captureBg, insetPx = glassInsetPx)
+                iconOk = captureIcon != null &&
+                    GlassCaptureEngine.capture(dualIcon, this, captureIcon, insetPx = glassInsetPx)
+            } finally {
+                isCapturing = false
             }
-        } else if (!blurEnabled || !captureOk) {
-            // ① 失败兜底：半透明底色（总开关关闭时同样走兜底，不做任何采集）
-            canvas.drawColor(FALLBACK_COLOR)
+
+            // it.25 双源取证日志（两个 tag / 两次采集尺寸 / 合成尺寸 / blur 半径 /
+            // lens 输入 blur=0 / GPU 次数），沿用 GlassKitFlicker 同款 logTag；
+            // 值变化才重打一条，防随帧刷屏。
+            val bgW = captureBg?.width ?: -1
+            val bgH = captureBg?.height ?: -1
+            val icW = captureIcon?.width ?: -1
+            val icH = captureIcon?.height ?: -1
+            val dualLogKey =
+                "$blurBackdropTag/$iconBackdropTag ${bgW}x$bgH ${icW}x$icH " +
+                    "blur=$blurRadiusPx ok=$bgOk,$iconOk"
+            if (lastDualLogKey != dualLogKey) {
+                lastDualLogKey = dualLogKey
+                Log.i(
+                    FLICKER_LOG_TAG,
+                    "dual-texture: view=$id blurTag=$blurBackdropTag iconTag=$iconBackdropTag" +
+                        " bgCapture=${bgW}x$bgH iconCapture=${icW}x$icH composite=${bgW}x$bgH" +
+                        " blurRadiusPx=$blurRadiusPx lensInputBlur=0" +
+                        " gpuBlur=1 gpuLensInput=1 softDraw=2 ok=$bgOk,$iconOk",
+                )
+            }
+
+            if (bgOk && iconOk && captureBg != null && captureIcon != null) {
+                if (lensActive && canvas.isHardwareAccelerated) {
+                    // it.25：lens 输入 = 「背景糊 + 图标清晰」合成纹理。
+                    // blurRadiusPx 只作用于纯背景（唯一一次 GPU 高斯），合成纹理
+                    // 本身以 blur=0 进 lens ⇒ 图标绝不进卷积，但仍被 lens 的
+                    // 折射 / 放大逐像素采样（it.23 放大 / 折射能力保留）。
+                    drawLensLayer(
+                        canvas, captureBg, w, h, cornerRadiusPx, blurRadiusPx, cornerExponentN,
+                        iconCapture = captureIcon,
+                    )
+                } else if (blurRadiusPx >= 0.5f) {
+                    // 无透镜（折射拖到 0）：背景照常模糊，清晰图标 SRC_OVER 覆盖。
+                    drawBlurredLayer(canvas, captureBg, blurRadiusPx, w, h)
+                    drawCaptureScaled(canvas, captureIcon, w, h)
+                } else {
+                    // 无模糊需求：纯背景 + 清晰图标，直接叠（不产生任何卷积）。
+                    drawCaptureScaled(canvas, captureBg, w, h)
+                    drawCaptureScaled(canvas, captureIcon, w, h)
+                }
+            } else {
+                canvas.drawColor(FALLBACK_COLOR)
+            }
+        } else {
+            // ---- 既有单纹理路径（it.23 原样保留，其它玻璃面板零回归） ----
+            val capture = obtainCaptureBitmap(w, h, allowDownsample)
+            // it.11 嵌套取证：软画布 + 透镜激活 = 本视图正被下游玻璃采集或回录快照，
+            // 透镜输入是「软画布降级渲染」（透镜→blur、blur→半采样链）——与屏幕帧的
+            // lens input=gpu 交替出现即为「dock 正常 / 指示器锯齿」差异链路证据
+            if (lensActive && !canvas.isHardwareAccelerated && !loggedNestedSoftRender) {
+                loggedNestedSoftRender = true
+                Log.i(
+                    logTag,
+                    "nested soft render: view=$id lensDowngraded=blur" +
+                        " inputCapture=${capture?.width}x${capture?.height} config=${capture?.config}" +
+                        " blurChain=BLUR_DOWNSAMPLE/$BLUR_DOWNSAMPLE(逐级半采样)",
+                )
+            }
+            val captureOk = try {
+                isCapturing = true
+                capture != null &&
+                    targetView != null &&
+                    GlassCaptureEngine.capture(
+                        targetView!!, this, capture!!,
+                        // it.19 P0-2：glassInsetDp > 0 时本体不是整个视图，采集源矩形必须
+                        // 同步内缩，否则背景被按 (W+2i)/W 放大、内容整体漂移
+                        insetPx = glassInsetPx,
+                    )
+            } finally {
+                isCapturing = false
+            }
+
+            if (!loggedCaptureSource) {
+                loggedCaptureSource = true
+                val t = targetView
+                val vg = t as? android.view.ViewGroup
+                val px = if (captureOk && capture != null && !capture.isRecycled) {
+                    Integer.toHexString(
+                        capture.getPixel(capture.width / 2, capture.height / 2),
+                    )
+                } else {
+                    "n/a"
+                }
+                Log.i(
+                    logTag,
+                    "capture src: view=$id tag=$backdropTag target=${t?.id}" +
+                        " cls=${t?.javaClass?.simpleName} targetWH=${t?.width}x${t?.height}" +
+                        " children=${vg?.childCount ?: -1} glassWH=${w}x$h ok=$captureOk centerARGB=$px",
+                )
+            }
+
+            if (blurEnabled && captureOk && capture != null) {
+                // ② 模糊 + ③ 透镜
+                // 软件画布不支持 RuntimeShader（快照回录用 Bitmap 软画布，it.8 真机崩溃实证），
+                // 回录帧透镜降级为模糊/清晰层；屏幕硬件加速路径不受影响
+                if (lensActive && canvas.isHardwareAccelerated) {
+                    // it.4-R2：透镜输入真模糊化——固定 1/4 降采样 + 小图 CPU box blur ×3
+                    //（it.3 的自适应降采样近似已废弃为锯齿源，见类头注释）
+                    drawLensLayer(
+                        canvas, capture, w, h, cornerRadiusPx, blurRadiusPx, cornerExponentN,
+                    )
+                } else if (blurRadiusPx >= 0.5f) {
+                    drawBlurredLayer(canvas, capture, blurRadiusPx, w, h)
+                } else {
+                    // 无模糊需求（blurDp=0 或 blurScale=0）：直接画清晰采集结果
+                    drawCaptureScaled(canvas, capture, w, h)
+                }
+            } else if (!blurEnabled || !captureOk) {
+                // ① 失败兜底：半透明底色（总开关关闭时同样走兜底，不做任何采集）
+                canvas.drawColor(FALLBACK_COLOR)
+            }
         }
 
         // ④ tint：H1 硬约束——任何 tint 计算最后一步钳到上界（it.19 起 0.24）
@@ -1796,6 +2085,30 @@ class GlassKitView(context: Context) : View(context) {
         return bitmap
     }
 
+    /**
+     * it.25：第二采集位图（透明底图标层）。尺寸 / 降采样口径与 [obtainCaptureBitmap]
+     * **逐位一致** —— 两次 capture 必须用同一 outBitmap 尺寸，否则「已模糊背景」
+     * 与「清晰图标」合成时两张纹理不对齐（图标相对背景错位的唯一来源）。
+     * 几何换算仍全部走 GlassCaptureEngine.capture 内部（同 glassView / 同 insetPx）。
+     */
+    private fun obtainDualIconBitmap(w: Int, h: Int, allowDownsample: Boolean): Bitmap? {
+        if (w <= 0 || h <= 0) return null
+        val scale = if (allowDownsample) {
+            minOf(1f, GlassCaptureEngine.MAX_CAPTURE_WIDTH_PX.toFloat() / w.toFloat())
+        } else {
+            1f
+        }
+        val bw = Math.max(1, Math.round(w * scale))
+        val bh = Math.max(1, Math.round(h * scale))
+        var bitmap = dualIconBitmap
+        if (bitmap == null || bitmap.width != bw || bitmap.height != bh) {
+            if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+            bitmap = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+            dualIconBitmap = bitmap
+        }
+        return bitmap
+    }
+
     /** 采集位图 → 视图尺寸的等比缩放绘制（清晰 / 非模糊路径共用）。 */
     private fun drawCaptureScaled(canvas: Canvas, capture: Bitmap, w: Int, h: Int) {
         canvas.drawBitmap(capture, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), capturePaint)
@@ -1886,8 +2199,10 @@ class GlassKitView(context: Context) : View(context) {
         cornerRadiusPx: Float,
         blurRadiusPx: Float,
         cornerExponentN: Float,
+        /** it.25 双纹理分流：非空时 = 透明底图标层，合成进 lens 输入且绝不进卷积。 */
+        iconCapture: Bitmap? = null,
     ) {
-        val lensShaderInput = obtainLensInputShader(w, h, capture, blurRadiusPx)
+        val lensShaderInput = obtainLensInputShader(w, h, capture, blurRadiusPx, iconCapture)
         val shader = obtainLensShader(lensShaderInput, w, h, cornerRadiusPx, cornerExponentN) ?: return
         val refraction = refractionPx * lensScale
         // it.13 色散开关：关闭时置 0 → dispFade 分母 max(0,1)=1，三通道采样点
@@ -1964,14 +2279,23 @@ class GlassKitView(context: Context) : View(context) {
         h: Int,
         capture: Bitmap,
         blurRadiusPx: Float,
+        /** it.25 非空 = 双纹理路径：capture 是纯背景，本参数是透明底图标层。 */
+        iconCapture: Bitmap? = null,
     ): BitmapShader? {
         // ---- it.9 GPU 全分辨率离屏路径（真机默认） ----
         if (!forceDownsample && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val gpuShader = obtainGpuInputShader(w, h, capture, blurRadiusPx)
+            val gpuShader = obtainGpuInputShader(w, h, capture, blurRadiusPx, iconCapture)
             if (gpuShader != null) return gpuShader
             // GPU 链路任一环失败（reader/renderer 创建、renderFrame、wrap）：
             // 一次性日志后落 CPU 回退，不为失败帧中断玻璃渲染
             logBlurPathOnce("lens input=cpu(gpu-fallback)", blurRadiusPx, true)
+        }
+
+        // ---- it.25 双纹理 CPU 合成回退（forceDownsample / GPU 失败） ----
+        // 背景（可选近似模糊）+ 清晰图标 SRC_OVER 合成到软件位图，再喂透镜；
+        // 与 GPU 路径同语义，只是把唯一一次高斯换成半采样近似（降级帧专属）。
+        if (iconCapture != null) {
+            return obtainDualCompositeCpuShader(w, h, capture, iconCapture, blurRadiusPx)
         }
 
         // ---- blurScale≈0 回退：全分辨率清晰折射（零拷贝，it.4-R2 语义保留） ----
@@ -2080,6 +2404,8 @@ class GlassKitView(context: Context) : View(context) {
         h: Int,
         capture: Bitmap,
         blurRadiusPx: Float,
+        /** it.25 非空 = 双纹理路径：capture 是纯背景，本参数是透明底图标层。 */
+        iconCapture: Bitmap? = null,
     ): BitmapShader? {
         val cw = capture.width
         val ch = capture.height
@@ -2088,21 +2414,68 @@ class GlassKitView(context: Context) : View(context) {
         val node = obtainGpuNode(cw, ch)
         // sigma：视图 px 半径 × captureScale → 位图 px；Effect 缓存（半径/尺寸不变复用）
         val captureScaleX = cw.toFloat() / w.toFloat()
-        if (blurRadiusPx >= 0.5f) {
-            val sigma = (blurRadiusPx * captureScaleX).coerceAtLeast(0.5f)
-            node.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
+
+        if (iconCapture != null) {
+            // ===== it.25 双纹理分流（单 GPU 离屏 pass，唯一一次高斯在 bg 子节点） =====
+            // 结构：bgNode（背景 + 唯一一次高斯 / blur=0 时 vibrancy-only）
+            //      → node（主节点，setRenderEffect(null) ⇒ lens 输入 blur=0，
+            //              drawRenderNode(bgNode) 后 SRC_OVER 画清晰图标）
+            // RenderEffect 挂在子 RenderNode 上、经 drawRenderNode 生效，与
+            // drawBlurredLayer 的既有用法同构（View.setRenderEffect 内部同款）。
+            // 为什么不先 materialize 一张 captureComposite 软件位图再喂 drawLensLayer：
+            // GPU 离屏链路产出的是 HARDWARE 位图，软件 Canvas 无法可靠消费
+            // （drawing a hardware bitmap to a software canvas 不被支持）；若再开
+            // 第二个 GPU pass 保在硬件侧，则每帧两次 acquire 会双倍挤压
+            // gpuImageRing 保留预算，且触碰「绝不跑两次完整 GPU 高斯链」红线。
+            // 单 pass 内合成 = 一次高斯 + 一次 lens 输入，逐位达成设计的观感与预算。
+            val bgNode = obtainGpuBgNode(cw, ch)
+            if (blurRadiusPx >= 0.5f) {
+                val sigma = (blurRadiusPx * captureScaleX).coerceAtLeast(0.5f)
+                bgNode.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
+            } else {
+                // blurScale≈0：不挂 BlurEffect，只保留鲜活度（与单纹理清晰帧同款）
+                bgNode.setRenderEffect(obtainGpuVibrancyOnlyEffect())
+            }
+            val bgRecording = bgNode.beginRecording()
+            try {
+                bgRecording.drawBitmap(
+                    capture, null, RectF(0f, 0f, cw.toFloat(), ch.toFloat()), capturePaint,
+                )
+            } finally {
+                bgNode.endRecording()
+            }
+            // 主节点**不挂任何 RenderEffect**（= lens 输入 blur=0，不挂 BlurEffect）：
+            // 只做「已模糊背景 + 清晰图标」的 SRC_OVER 合成，图标绝不进卷积。
+            node.setRenderEffect(null)
+            val recordingCanvas = node.beginRecording()
+            try {
+                recordingCanvas.drawRenderNode(bgNode)
+                recordingCanvas.drawBitmap(
+                    iconCapture, null, RectF(0f, 0f, cw.toFloat(), ch.toFloat()), capturePaint,
+                )
+            } finally {
+                node.endRecording()
+            }
         } else {
-            // blurScale≈0（清晰折射）：不挂 BlurEffect，仅借离屏链路产独立硬件缓冲；
-            // it.19 P0-4 起鲜活度回归 ColorFilter 链 ⇒ 这里单独挂一个
-            // ColorFilterEffect（不引入任何模糊），与模糊路径的
-            // createChainEffect(blur, cf) 在「无模糊」时退化为同一个 cf。
-            node.setRenderEffect(obtainGpuVibrancyOnlyEffect())
-        }
-        val recordingCanvas = node.beginRecording()
-        try {
-            recordingCanvas.drawBitmap(capture, null, RectF(0f, 0f, cw.toFloat(), ch.toFloat()), capturePaint)
-        } finally {
-            node.endRecording()
+            // ===== 既有单纹理路径（it.23 原样，逐位不变） =====
+            if (blurRadiusPx >= 0.5f) {
+                val sigma = (blurRadiusPx * captureScaleX).coerceAtLeast(0.5f)
+                node.setRenderEffect(obtainGpuBlurEffect(sigma, cw, ch))
+            } else {
+                // blurScale≈0（清晰折射）：不挂 BlurEffect，仅借离屏链路产独立硬件缓冲；
+                // it.19 P0-4 起鲜活度回归 ColorFilter 链 ⇒ 这里单独挂一个
+                // ColorFilterEffect（不引入任何模糊），与模糊路径的
+                // createChainEffect(blur, cf) 在「无模糊」时退化为同一个 cf。
+                node.setRenderEffect(obtainGpuVibrancyOnlyEffect())
+            }
+            val recordingCanvas = node.beginRecording()
+            try {
+                recordingCanvas.drawBitmap(
+                    capture, null, RectF(0f, 0f, cw.toFloat(), ch.toFloat()), capturePaint,
+                )
+            } finally {
+                node.endRecording()
+            }
         }
         renderer.setContentRoot(node)
         // 同步渲染（AOSP ScreenshotHardwareRenderer 同款模式）：setWaitForPresent(true)
@@ -2207,6 +2580,21 @@ class GlassKitView(context: Context) : View(context) {
         return node
     }
 
+    /**
+     * it.25：双纹理的**背景子节点**复用（尺寸 = capture 位图，变化时重建）。
+     * 唯一一次 GPU 高斯（或 blur=0 时的 vibrancy-only）挂在这个子节点上，
+     * 主节点只做合成（无 RenderEffect），保证图标不被任何卷积模糊。
+     */
+    private fun obtainGpuBgNode(width: Int, height: Int): RenderNode {
+        var node = gpuBgNode
+        if (node == null || node.width != width || node.height != height) {
+            node = RenderNode("GlassKitDualBg")
+            node.setPosition(0, 0, width, height)
+            gpuBgNode = node
+        }
+        return node
+    }
+
     /** GPU 高斯 RenderEffect 缓存（sigma/尺寸/vibrancy 不变复用；CLAMP 不引入透明衰减）。 */
     private fun obtainGpuBlurEffect(sigma: Float, width: Int, height: Int): RenderEffect {
         val cached = gpuBlurEffect
@@ -2279,6 +2667,8 @@ class GlassKitView(context: Context) : View(context) {
         gpuBlurVibrancy = false
         gpuVibrancyOnlyEffect = null
         gpuNode = null
+        // it.25：背景子节点随 GPU 链路一并释放（尺寸变化 / detach 时重建）
+        gpuBgNode = null
         gpuRenderer?.let { renderer ->
             try {
                 renderer.setSurface(null)
@@ -2493,6 +2883,62 @@ class GlassKitView(context: Context) : View(context) {
         }
         Canvas(small).drawBitmap(src, null, RectF(0f, 0f, sw.toFloat(), sh.toFloat()), capturePaint)
         return small
+    }
+
+    /**
+     * it.25：双纹理的 **CPU 合成回退**（forceDownsample / GPU 链路失败时）。
+     *
+     * 与 GPU 路径同语义：先画「已模糊的纯背景」，再以 SRC_OVER 画清晰图标
+     * （不透明像素覆盖、透明像素保留背景），合成纹理喂透镜且 blur 不再作用于图标。
+     * 降级帧把唯一一次高斯换成 drawBlurredLayer 的半采样近似（软画布路径），
+     * 不新增任何 GPU 离屏；位图 / BitmapShader 按尺寸缓存，静止期零分配。
+     */
+    private fun obtainDualCompositeCpuShader(
+        w: Int,
+        h: Int,
+        bg: Bitmap,
+        icon: Bitmap,
+        blurRadiusPx: Float,
+    ): BitmapShader? {
+        var bitmap = dualCompositeBitmap
+        if (bitmap == null || bitmap.width != w || bitmap.height != h) {
+            if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+            bitmap = try {
+                Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            } catch (t: Throwable) {
+                Log.w(logTag, "dual composite bitmap alloc failed: ${t.message}")
+                return null
+            }
+            dualCompositeBitmap = bitmap
+            dualCompositeShader = null
+            dualCompositeShaderBitmap = null
+        }
+        val composite = bitmap ?: return null
+        composite.eraseColor(Color.TRANSPARENT)
+        val c = Canvas(composite)
+        val dst = RectF(0f, 0f, w.toFloat(), h.toFloat())
+        if (blurRadiusPx >= 0.5f) {
+            // 软画布 ⇒ drawBlurredLayer 走半采样近似分支（不触碰 RenderNode/GPU）
+            drawBlurredLayer(c, bg, blurRadiusPx, w, h)
+        } else {
+            c.drawBitmap(bg, null, dst, capturePaint)
+        }
+        // 图标：SRC_OVER（capturePaint 默认 xfermode），绝不进卷积模糊
+        c.drawBitmap(icon, null, dst, capturePaint)
+        var shader = dualCompositeShader
+        if (shader == null || dualCompositeShaderBitmap !== composite) {
+            val created = BitmapShader(composite, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            dualCompositeShader = created
+            dualCompositeShaderBitmap = composite
+            shader = created
+        }
+        val outShader = shader ?: return null
+        lensMatrix.setScale(
+            w.toFloat() / composite.width.toFloat(),
+            h.toFloat() / composite.height.toFloat(),
+        )
+        outShader.setLocalMatrix(lensMatrix)
+        return outShader
     }
 
     /** RenderNode 复用：尺寸变化时重建（setPosition 在此处统一设置）。 */

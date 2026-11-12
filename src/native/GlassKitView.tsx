@@ -18,6 +18,9 @@
  * - cornerRadiusDp 圆角半径 dp（it.13：引擎按连续曲率超椭圆生成 clip 与 SDF）
  * - dimmingAlpha  压暗层 alpha（#000，独立于 tint）
  * - backdropTag   背景容器 tag（findNodeHandle(GlassKitBackdrop ref)）
+ * - blurBackdropTag / iconBackdropTag  it.25 双纹理分流：纯背景源 / 透明底图标源
+ *   （两者都有效时 native 才走「背景一次高斯 + SRC_OVER 图标 + blur=0 的 lens」；
+ *    任一无效原样回退单纹理路径，其它玻璃面板零回归）
  * - blurScale / tintScale / lensScale / glowScale  四倍率（glowScale 作用于边缘
  *   高光宽/alpha，本轮迭代起进引擎；forceDownsample 切模糊路径，见下）
  * - forceDownsample 强制降采样模糊路径（模拟器 GPU 对 RenderEffect 支持缺陷时
@@ -103,6 +106,20 @@ export interface GlassKitViewProps extends ViewProps {
   dimmingAlpha?: number;
   /** 背景容器原生 tag（findNodeHandle(GlassKitBackdrop ref)）。 */
   backdropTag?: number;
+  /**
+   * it.25 双纹理分流：纯背景采集源 tag（bar 玻璃叶子，capturable + liveBackdrop）。
+   * native 只对这一张纹理做唯一一次 GPU 高斯；与 iconBackdropTag 同时有效时
+   * 才走「双源合成 → lens」新路径，任一无效则原样回退到单纹理路径（零回归）。
+   * 与 backdropTag 同量纲（findNodeHandle 拿到的原生 view id）；不传 = -1（NO_ID）。
+   */
+  blurBackdropTag?: number;
+  /**
+   * it.25 双纹理分流：透明底图标采集源 tag（只含图标/文字、背景 transparent）。
+   * native 以 SRC_OVER 把清晰图标覆盖到「已模糊背景」之上，图标不进卷积；
+   * 合成纹理再喂 lens（lens 输入 blur=0），放大/折射效果保留而图标不糊。
+   * 不传 = -1（NO_ID）。
+   */
+  iconBackdropTag?: number;
   /** 模糊倍率覆盖（未传时取 glass.ts store 的 blurScale）。 */
   blurScale?: number;
   /** tint / 膜层倍率覆盖（未传时取 store 的 tintScale）。 */
@@ -245,6 +262,9 @@ export const GlassKitView = forwardRef<NativeViewInstance, GlassKitViewProps>(
         forceDownsample={props.forceDownsample ?? false}
         capturable={props.capturable ?? false}
         liveBackdrop={props.liveBackdrop ?? false}
+        // it.25 双源 tag：未传时下发 -1（View.NO_ID）⇒ native 回退单纹理路径
+        blurBackdropTag={props.blurBackdropTag ?? -1}
+        iconBackdropTag={props.iconBackdropTag ?? -1}
         membraneAlpha={props.membraneAlpha ?? 0}
         capsuleContinuous={props.capsuleContinuous ?? false}
         glassInsetDp={props.glassInsetDp ?? 0}

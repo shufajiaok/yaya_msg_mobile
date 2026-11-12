@@ -33,6 +33,8 @@ import { useGlassStore, type GlassScaleKey } from './glass';
 import {
   GLASS_DEBUG_DEFAULTS,
   GLASS_EFFECT_DEFAULTS,
+  GLASS_INDICATOR_BLUR_DP,
+  GLASS_LENS_PROFILE,
   GLASS_PROFILE,
   GLASS_SWITCH_DEFAULTS,
 } from './glassProfile';
@@ -42,11 +44,16 @@ import {
  * ------------------------------------------------------------------ */
 
 /**
- * 15 个数值型可调参数的合法区间。
+ * 18 个数值型可调参数的合法区间。
  *
  * 出处：it.13 对齐项区间（SettingsScreenKt.java:1905-2128）+ 扩展调试项区间。
  * `dockRadiusDp` 滑块区间是 0–48，而默认值 999（= 真胶囊）**不走 setter**，
  * 因此不会被钳成 48：默认值只来自 `DOCK_SETTINGS_DEFAULTS`。
+ *
+ * it.22 新增指示器三项（`indicator*`）：用户要求「不要盲目锁，我还要调试」——
+ * 指示器是玻璃叠玻璃，blur / refraction / band 三个量必须能现场拖。
+ * 区间取「广到能还原原版、窄到不会拖崩」：原版换算 band 2.1333 / amount 2.6667，
+ * blur 0；上限留 20 / 8 / 12 足够做 A/B。
  */
 export const DOCK_RANGES = {
   topBarWidthScale: { min: 0.6, max: 1 },
@@ -64,9 +71,12 @@ export const DOCK_RANGES = {
   widthScale: { min: 0.5, max: 2 },
   heightScale: { min: 0.5, max: 2 },
   highlightScale: { min: 0, max: 1 },
+  indicatorBlurDp: { min: 0, max: 20 },
+  indicatorRefractionDp: { min: 0, max: 8 },
+  indicatorBandDp: { min: 0, max: 12 },
 } as const;
 
-/** 数值型可调字段名（15 项）。 */
+/** 数值型可调字段名（18 项）。 */
 export type DockNumericKey = keyof typeof DOCK_RANGES;
 
 /** 布尔型可调字段名（6 项）。 */
@@ -82,7 +92,7 @@ export type DockBooleanKey =
  * 二、默认值（全部引用 glassProfile.ts，不写第二份字面量）
  * ------------------------------------------------------------------ */
 
-/** 数值型字段（15 项）。 */
+/** 数值型字段（18 项）。 */
 export interface DockNumericValues {
   topBarWidthScale: number;
   topBarHeightDp: number;
@@ -99,6 +109,12 @@ export interface DockNumericValues {
   widthScale: number;
   heightScale: number;
   highlightScale: number;
+  /** it.22 指示器自身模糊 dp（默认 0；叠加在已模糊的 bar 图层之上）。 */
+  indicatorBlurDp: number;
+  /** it.22 指示器折射位移基准 dp（默认 0.5；最终 px = 本值 × density × lensScale）。 */
+  indicatorRefractionDp: number;
+  /** it.22 指示器折射带高基准 dp（默认 4.0；同上量纲）。 */
+  indicatorBandDp: number;
 }
 
 /** 布尔型字段（6 项）。 */
@@ -111,14 +127,14 @@ export interface DockBooleanValues {
   vibrancyEnabled: boolean;
 }
 
-/** 全部可调字段（22 项，含 dock 选中态）。 */
+/** 全部可调字段（25 项，含 dock 选中态）。 */
 export interface DockSettingsValues extends DockNumericValues, DockBooleanValues {
   /** dock 选中下标：本体底栏选中态由导航 props 驱动，本字段只给实验页对齐测试用。 */
   dockSelected: number;
 }
 
 /**
- * 22 个字段的默认值，逐项引用 `glassProfile.ts`（用户 2026-11-08 指定的
+ * 25 个字段的默认值，逐项引用 `glassProfile.ts`（用户 2026-11-08 指定的
  * HealthCheckIn 实测配置），本文件零字面量默认值。
  */
 export const DOCK_SETTINGS_DEFAULTS: DockSettingsValues = {
@@ -148,6 +164,10 @@ export const DOCK_SETTINGS_DEFAULTS: DockSettingsValues = {
   radiusScale: GLASS_DEBUG_DEFAULTS.radiusScale,
   widthScale: GLASS_DEBUG_DEFAULTS.widthScale,
   heightScale: GLASS_DEBUG_DEFAULTS.heightScale,
+  // —— 指示器（it.22 起可调，默认值 = it.21 已调过的那一版）——
+  indicatorBlurDp: GLASS_INDICATOR_BLUR_DP,
+  indicatorRefractionDp: GLASS_LENS_PROFILE.indicatorRefractionDp,
+  indicatorBandDp: GLASS_LENS_PROFILE.indicatorBandDp,
   // —— dock 选中态 ——
   dockSelected: 0,
 };
@@ -213,6 +233,9 @@ const NUMERIC_KEYS: readonly DockNumericKey[] = [
   'widthScale',
   'heightScale',
   'highlightScale',
+  'indicatorBlurDp',
+  'indicatorRefractionDp',
+  'indicatorBandDp',
 ] as const;
 
 function isBooleanKey(key: string): key is DockBooleanKey {
@@ -272,13 +295,13 @@ export const useGlassDockStore = create<GlassDockState>()(
           return changed ? merged : state;
         });
       },
-      /** 22 字段整包回默认（默认值来自 glassProfile.ts，不读持久化旧值）。 */
+      /** 25 字段整包回默认（默认值来自 glassProfile.ts，不读持久化旧值）。 */
       reset: () => set({ ...DOCK_SETTINGS_DEFAULTS }),
     }),
     {
       name: GLASS_DOCK_STORAGE_KEY,
       storage: createJSONStorage(() => AsyncStorage),
-      /** partialize 全部 22 字段（动作函数不落盘）。 */
+      /** partialize 全部 25 字段（动作函数不落盘）。 */
       partialize: (state) => ({
         blurEnabled: state.blurEnabled,
         forceDownsample: state.forceDownsample,
@@ -301,14 +324,18 @@ export const useGlassDockStore = create<GlassDockState>()(
         widthScale: state.widthScale,
         heightScale: state.heightScale,
         highlightScale: state.highlightScale,
+        indicatorBlurDp: state.indicatorBlurDp,
+        indicatorRefractionDp: state.indicatorRefractionDp,
+        indicatorBandDp: state.indicatorBandDp,
         dockSelected: state.dockSelected,
       }),
       /**
-       * version 1（本 store 首版）。保留 migrate 钩子：后续默认值 / 区间变化时
-       * bump 到 2 并返回 `{ ...DOCK_SETTINGS_DEFAULTS }`，语义与 glass.ts 一致
-       * （一次性覆盖旧持久化值，此后照常随滑块持久化）。
+       * version 2（it.23）：指示器三项默认值改成原版真值（折射 2.6667 / 带高 2.1333），
+       * 旧持久化里那组 it.21 调参值（0.5 / 4.0、甚至 3.74 / 2.42）会把新默认完全遮住
+       * ⇒ bump 一次把整包打回默认（用户 2026-11-09「前面的尝试可以不用考虑了」）。
+       * 语义与 glass.ts 一致：一次性覆盖旧值，此后照常随滑块持久化。
        */
-      version: 1,
+      version: 2,
       migrate: () => ({ ...DOCK_SETTINGS_DEFAULTS }),
     },
   ),

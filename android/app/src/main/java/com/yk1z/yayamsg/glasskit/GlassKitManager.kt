@@ -14,7 +14,8 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * cornerRadiusDp / dimmingAlpha / backdropTag / blurScale / tintScale / lensScale /
  * blurEnabled / glowScale / glow*Scale / forceDownsample / capturable / membraneAlpha /
  * highlightScale / chromaticEnabled / depthEffect / vibrancyEnabled /
- * capsuleContinuous / indicatorBoostAlpha / liveBackdrop / glassInsetDp / shadowAlpha。
+ * capsuleContinuous / indicatorBoostAlpha / liveBackdrop / glassInsetDp / shadowAlpha /
+ * blurBackdropTag / iconBackdropTag（it.25 双纹理分流）。
  * 所有 setter 对 JS 空值做兜底（default* 注解 + null 合并），倍率默认 1f，
  * blurEnabled 默认 true（H2 语义：能力门控在 JS 侧 canBlur/canLens 收口）。
  *
@@ -128,6 +129,22 @@ class GlassKitManager : SimpleViewManager<GlassKitView>() {
     @ReactProp(name = "backdropTag", defaultInt = View.NO_ID)
     fun setBackdropTag(view: GlassKitView, value: Int) {
         view.backdropTag = value
+    }
+
+    /**
+     * it.25 双纹理分流：纯背景采集源 tag（bar 玻璃叶子）。
+     * 视图侧 setter 走 markPropChanged()（四槽位代数指纹预算纪律：新增 prop
+     * 不标记会导致滑块/重挂载时该 tag 变化不刷新）。
+     */
+    @ReactProp(name = "blurBackdropTag", defaultInt = View.NO_ID)
+    fun setBlurBackdropTag(view: GlassKitView, value: Int) {
+        view.blurBackdropTag = value
+    }
+
+    /** it.25 双纹理分流：透明底图标采集源 tag（只含图标/文字）。同样走 markPropChanged()。 */
+    @ReactProp(name = "iconBackdropTag", defaultInt = View.NO_ID)
+    fun setIconBackdropTag(view: GlassKitView, value: Int) {
+        view.iconBackdropTag = value
     }
 
     /** 模糊倍率（JS store 已按 0.2–3.0 钳制，it.13 对齐 GlassTuning.java:21）。 */

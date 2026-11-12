@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Canvas
 import android.view.View
 import android.view.ViewGroup
+import com.facebook.react.uimanager.PointerEvents
+import com.facebook.react.uimanager.ReactPointerEventsView
 import com.facebook.react.uimanager.ThemedReactContext
 import com.facebook.react.uimanager.ViewGroupManager
 import com.facebook.react.uimanager.annotations.ReactProp
@@ -33,7 +35,21 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * onDetachedFromWindow 对称注销，防卸载后的跨窗口弱引用滞留；Manager.onAfterUpdateTransaction
  * 的注册保留作双保险（SparseArray put 幂等覆盖，晚到也无害）。
  */
-class GlassKitBackdropView(context: Context) : ViewGroup(context) {
+class GlassKitBackdropView(context: Context) : ViewGroup(context), ReactPointerEventsView {
+
+    /**
+     * it.19 hotfix：采集容器恒为 **box-none**（自身不吃触摸，子节点照常命中）。
+     *
+     * 根因同 [GlassKitView]：自定义 ViewGroupManager 没有 `pointerEvents` 这个 @ReactProp，
+     * JS 传的值被丢弃 ⇒ 按 AUTO 处理。AUTO 的 ViewGroup 在「子节点都没命中」时会
+     * **返回自身**当触摸目标，等价于 box-only —— dock 的采集容器是外扩 32dp 的
+     * （尺寸 ≈ 本体 1.6 倍），会把玻璃外围一圈空白区域的点击全部吃掉，
+     * 挡住下面页面的内容。
+     *
+     * 钉成 BOX_NONE 后：子节点（图标 / Pressable / 玻璃）照旧可交互，
+     * 空白处的事件正常下穿。
+     */
+    override val pointerEvents: PointerEvents = PointerEvents.BOX_NONE
 
     /**
      * it.9 闪烁修复：真实屏幕绘制代数指纹（玻璃面板 PreDraw 判定「背景源真变了」）。

@@ -116,11 +116,34 @@ export const GLASS_TINT_COLOR = { light: '#FFFFFF', dark: '#1B242B' } as const;
 export const GLASS_LENS_PROFILE = {
   barRefractionDp: 5,
   barBandDp: 3,
-  // = 10dp × 0.8 / 3.0（原版 INDICATOR amount 10dp、lockedRefraction 0.8、默认滑块 3.0）
+  /**
+   * ⚠️ it.22：这两项**不再是「锁死参数」，只是默认值**。
+   *
+   * 用户 2026-11-09：「原版锁死指示器折射是因为调试好跑了，你不要盲目锁，我还要调试」
+   * ⇒ 指示器的 blur / refraction / band 全部交给 `glassDockStore` 的 `indicator*`
+   * 三项（实验页三个滑块实时可调），本文件只提供初值：改这里 = 改默认观感。
+   *
+   * it.23 默认值回到原版真值（字节码核实 `GlassLevel.java:36`）：
+   *   `INDICATOR = (blurDp=0, refractionHeightDp=8, refractionAmountDp=10,
+   *                tint=0, depth=false, vibrancy=false, chromatic=true,
+   *                highlight=false, lockedRefraction=0.8)`
+   * 语义：amount（位移）**大于** height（带高）是原版刻意的剖面 —— 边缘隆起后向内
+   * 回落，同一段像素被压缩两次是设计本身，观感是「边缘放大镜」，不是重影。
+   *
+   * 换算（我们的 native 会再乘一次 lensScale，默认 3.0，density 3.5）：
+   *   - amount 10dp × 0.8 = 8dp = 28px ⇒ `2.6667 × 3.5 × 3 = 28`
+   *   - height  8dp × 0.8 = 6.4dp = 22.4px ⇒ `2.1333 × 3.5 × 3 = 22.4`
+   * 旧默认 0.5 / 4.0（it.21 那版）位移只有 5px、带高 42px ⇒ 透镜几乎不存在，
+   * 胶囊看着就是 bar 的 1:1 复制（用户反馈「像挖了个洞 / 最小模糊」）。已废弃。
+   */
   indicatorRefractionDp: 2.6667,
-  // = 8dp × 0.8 / 3.0（原版 INDICATOR band 8dp）
   indicatorBandDp: 2.1333,
-  // 恒等于 indicatorRefractionDp（原版色散无独立幅度，dispK 必须 = 滑块值）
+  /**
+   * 已停用（it.22）：色散基数**恒等于运行时的 `indicatorRefractionDp`**
+   * （`dispK = uDispersionPx / uRefractionPx` 必须等于色散滑块本身）。
+   * 折射一旦可调，色散若还钉在常量上，dispK 就会随滑块漂移 —— 保留常量仅作历史
+   * 换算记录，调用点请用 `indicatorRefractionDp × dispersionLevel`。
+   */
   indicatorDispersionDp: 2.6667,
   dispersionLevelBase: 1,
   controlRefractionDp: 8,
@@ -128,6 +151,46 @@ export const GLASS_LENS_PROFILE = {
   overlayRefractionDp: 5,
   overlayBandDp: 3,
 } as const;
+
+/**
+ * 指示器模糊半径**默认值** dp（it.22 起只是默认值，不再是硬锁）。
+ *
+ * 原版真值（字节码核实 `GlassLevel.java:36`）：
+ * `INDICATOR = (blurDp=0, refractionHeightDp=8, refractionAmountDp=10, tint=0,
+ * chromatic=true, highlight=false, lockedRefraction=0.8)`。
+ * 指示器是「玻璃叠玻璃」，采集源本身已经是模糊过的 bar，自己再模糊一次只会让
+ * 胶囊与相邻 bar 的清晰度断层。
+ *
+ * ⚠️ it.23 定位到的真坑：`GlassKitView.tsx` 会把**全局 blurScale** 注入每一个
+ * 玻璃（`blurScale ?? store.blurScale`），指示器也不例外 ⇒ 胶囊的最终模糊 =
+ * `indicatorBlurDp × blurScale × density`。默认 0 时乘积恒为 0，拖全局「模糊」
+ * 滑块胶囊纹丝不动（用户 2026-11-09：「依旧是最小模糊状态，不受滑块调节」）。
+ * 修法：指示器显式传 `blurScale={1}`（见 AppTabBar / GlassTestScreen），让它只受
+ * 自己那一个滑块控制，全局模糊只影响 bar —— 与「原版锁 0」的语义一致。
+ */
+export const GLASS_INDICATOR_BLUR_DP = 0;
+
+/**
+ * 全 App 统一的玻璃形状档（it.21「设计语言统一」唯一来源）。
+ *
+ * 起因（用户 2026-11-09）：「很多大小形状类似的按钮可以直接用玻璃版替换，主要是这些
+ * 按钮都用上我们同款曲率圆角，设计语言要统一」。
+ *
+ * 使用口径：
+ * - `capsule`：高 ≤64dp 的条状控件（顶栏 / chip / 分段 / dock）——
+ *   传 999 + `capsuleContinuous`，引擎按 r=min(w,h)/2 + n=3 超椭圆端帽绘制，
+ *   与 dock 的曲率完全同款；
+ * - `panel` / `card` / `control`：内容容器，引擎默认超椭圆（n≈4），
+ *   数值只在这里改一次，页面不再各自写 16 / 20 / 22 / 24。
+ */
+export const GLASS_SHAPE = {
+  panel: 28,
+  card: 22,
+  control: 16,
+  capsule: 999,
+} as const;
+
+export type GlassShapeKey = keyof typeof GLASS_SHAPE;
 
 /**
  * dock bar 降级实底（!canBlur() || !canLens() 时使用）。

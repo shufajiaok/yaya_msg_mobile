@@ -137,11 +137,27 @@ function scanRule(ruleId) {
   return { count, details };
 }
 
+/**
+ * R4 的显式豁免：**材质组件自身**。
+ *
+ * it.21 新增 GlassSurface（统一玻璃表面）与 GlassCard（转发到 GlassSurface）——
+ * 它们是「玻璃这种材质」的定义处，不是「内容层里塞玻璃」。R4 的近似判定靠文件名
+ * 关键字（Card/List/Row…），名字里带 Card 就会误判，故按路径显式豁免；
+ * 真正的判定对象仍是页面 / 列表文件。
+ */
+const MATERIAL_COMPONENT_FILES = new Set([
+  'src/components/GlassSurface.tsx',
+  'src/components/GlassCard.tsx',
+  'src/native/GlassKitView.tsx',
+  'src/native/GlassKitBackdrop.tsx',
+]);
+
 /** R4 内容层内的玻璃组件：静态近似（文件名提示 或 含滚动容器）+ 玻璃组件使用 */
 function scanContentLayerGlass() {
   const flagged = [];
   for (const file of files) {
     if (isThemeFile(file)) continue;
+    if (MATERIAL_COMPONENT_FILES.has(relative(file))) continue;
     const rel = relative(file);
     const source = fs.readFileSync(file, 'utf8');
     const hinted = CONTENT_LAYER_HINTS.test(path.basename(file)) || /<(?:ScrollView|FlatList|SectionList)\b/.test(source);

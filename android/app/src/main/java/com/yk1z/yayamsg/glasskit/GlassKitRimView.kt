@@ -12,6 +12,8 @@ import android.graphics.RuntimeShader
 import android.os.Build
 import android.util.Log
 import android.view.View
+import com.facebook.react.uimanager.PointerEvents
+import com.facebook.react.uimanager.ReactPointerEventsView
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -65,7 +67,29 @@ import kotlin.math.min
  * `ContinuousRoundRect.buildContinuousRoundRect`。两者与 `GlassKitView.kt:1305-1322`
  * **同源同参** —— 轮廓必须与玻璃边缘严格重合，差 1px 就会露出「双线」。
  */
-class GlassKitRimView(context: Context) : View(context) {
+class GlassKitRimView(context: Context) : View(context), ReactPointerEventsView {
+
+    /**
+     * it.19 hotfix：**触摸穿透的唯一有效实现**。
+     *
+     * Paper（newArchEnabled=false）下 `TouchTargetHelper.findTouchTargetViewWithPointerEvents`
+     * 的判定是：
+     * ```
+     * pointerEvents = if (view is ReactPointerEventsView) view.pointerEvents else PointerEvents.AUTO
+     * ```
+     * 而 `pointerEvents` 这个 JS prop 只有 `ReactViewManager` 会给 **ReactViewGroup** 设置
+     * （`ReactViewManager.kt:251-254`）—— 自定义 `SimpleViewManager` 根本没有这个 @ReactProp，
+     * JS 侧写的 `pointerEvents="none"` 会被**静默丢弃**。
+     *
+     * ⇒ 结果是本 View 按 `AUTO` 参与命中测试。`AUTO` 是叶子 View 时直接返回自身
+     * （`TouchTargetHelper.kt` AUTO 分支），于是这个铺满 dock 的透明轮廓层把整条 dock 的
+     * 触摸全部吃掉 —— 现象就是「dock 图标看得见、按下去毫无反应，切不了页」。
+     *
+     * 实现 [ReactPointerEventsView] 并恒为 [PointerEvents.NONE] 才是真正的穿透：
+     * NONE 分支直接 `return null`，连子节点都不递归。本 View 是纯绘制层，
+     * 永远不该成为触摸目标（原版 HighlightNode 也只是绘制节点）。
+     */
+    override val pointerEvents: PointerEvents = PointerEvents.NONE
 
     companion object {
         private const val LOG_TAG = "GlassKitBlur"
