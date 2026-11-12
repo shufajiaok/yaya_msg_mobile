@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-09T14:41:03.553Z",
+  "note": "P0 基线：既有内联值只登记、不批量改页面；守卫只拦截「新增」。it.21 更新：新增统一材质组件 src/components/GlassSurface.tsx、GlassCard 转发到它、HomeShortcuts.tsx（控件层玻璃入口）——glass-api-access 14 → 18 是这次刻意接入，已登记；其余计数按当前代码重算（blur-view 5→0、inline-rgba 91→90、surface-glass-naming 15→13、hardcoded-border-radius 274→273 均为历史修复后的收紧，不是放宽）。R4「内容层玻璃」新增 MATERIAL_COMPONENT_FILES 豁免：材质组件自身（GlassSurface / GlassCard / GlassKitView / GlassKitBackdrop）不再被文件名关键字误判。",
+  "counts": {
+    "inline-rgba-glass-bg": 90,
+    "blur-view": 0,
+    "hardcoded-border-radius": 273,
+    "font-size-10": 29,
+    "font-weight-invalid": 101,
+    "surface-glass-naming": 13,
+    "glass-api-access": 18
+  },
+  "contentLayerFiles": []
+}
