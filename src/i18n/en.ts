@@ -33,6 +33,7 @@ export const en: Record<string, string> = {
   '上次签到：{date}': 'Last check-in: {date}',
   尚未执行: 'Never',
   工具: 'Tools',
+  进入直播大厅: 'Enter live lobby',
   下载管理: 'Downloads',
   运行日志: 'Runtime log',
   成员数据: 'Member data',
