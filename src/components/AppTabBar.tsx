@@ -17,13 +17,22 @@
  *   blurDp 10 × blurScale、tintAlpha = resolveTintAlpha(0.10, tintScale)（H1 上界 0.24）、
  *   refraction 5dp × density、带高 3dp × density（native 再乘 lensScale 一次）、
  *   dispersion 0、highlightScale / glow 三倍率来自 store。
- * - 指示器：backdropTag 指向 bar 原生 handle（玻璃叠玻璃）、内缩 = dockInnerPadDp、
- *   capsuleContinuous、indicatorBoostAlpha 0.05（Kotlin GlassKitKt.java:1434-1435,1451
- *   的 White@0.05）、highlightScale 0（INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
- *   blur 2dp × blurScale、refraction 2.6667dp × density、带高 2.1333dp × density（= 原版
- *   10dp/8dp × lockedRefraction 0.8 ÷ 默认滑块 3.0，见 GLASS_LENS_PROFILE 推导）、
- *   dispersion 2.6667dp × density × (dispersionLevel/1.0)（三者都由 native 再乘 lensScale；
- *   与实验页同一公式）。
+ * - 指示器：it.25 起 backdropTag 主 tag 指 bar 玻璃，另加 blurBackdropTag /
+ *   iconBackdropTag 双源，native 双源合成后喂 lens（只糊背景、图标保持清晰
+ *   且仍被放大/折射）。
+ *   **it.26 改口径**：blurBackdropTag 不再指 bar 玻璃（bar 的快照是软件画布回放，
+ *   只有 1/6 降采样近似、无真高斯，见 drawBlurredLayer 的 isHardwareAccelerated
+ *   门槛），改为指 **App 级 backdrop**（bar 下方真实内容、未模糊）⇒ bar 一次高斯
+ *   + 指示器再一次高斯 = 真正的「两层高斯串行叠加」。指示器 blurDp 随之传
+ *   **叠加半径** √(barBlurDp² + indicatorBlurDp²)（两次串行高斯 σ 合成公式），
+ *   故 indicatorBlurDp=0 时指示器与 bar 同糊、拉满时严格比 bar 更糊；
+ *   内缩 = dockInnerPadDp、capsuleContinuous、indicatorBoostAlpha
+ *   0.05（Kotlin GlassKitKt.java:1434-1435,1451 的 White@0.05）、highlightScale 0
+ *   （INDICATOR 不画 18dp 顶缘，GlassLevel.java:37）、
+ *   blur / refraction / band 三项 **it.22 起取 store（实验页滑块实时可调）**，
+ *   默认 0 / 0.5dp / 4.0dp；dispersion 基数恒等于 refraction 基数。
+ *   透镜量纲：`dp × density`，native 再乘 lensScale 一次。
+ *   liveBackdrop = true ⇒ 每帧（native 16ms 节流 ≈60fps 上限）重采双源，不会停在旧快照。
  *   spring 目标 x = 内缩 + activeIndex × tabWidth（绝对定位，it.10 漂移修复口径，
  *   绝不用累加增量）。
  *
@@ -46,10 +55,11 @@
  * src/navigation/index.tsx 零改动。tab 选中态仍由 props 的 activeKey 驱动
  * （导航真相源），**不**用 store 的 dockSelected 覆盖（后者只给实验页对齐测试用）。
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   findNodeHandle,
+  PanResponder,
   PixelRatio,
   Pressable,
   StyleSheet,
@@ -63,7 +73,6 @@ import { typography } from '../theme/typography';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import GlassKitView from '../native/GlassKitView';
 import GlassKitBackdrop from '../native/GlassKitBackdrop';
-import GlassKitRimView from '../native/GlassKitRimView';
 import { useBackdropTag } from '../native/backdropTagStore';
 import { canBlur, canLens, resolveTintAlpha, TINT_ALPHA_BASE } from '../theme/glass';
 import {
@@ -92,11 +101,16 @@ export interface AppTabBarProps {
 const DOCK_SPRING = { stiffness: 380, damping: 33.14, mass: 1 } as const;
 
 /**
- * it.19 P0-2：dock bar 外投影的内缩环带（dp）。
- * 24dp 模糊 + 4dp 下移 ⇒ 至少 28dp 才不切边；32dp 留 4dp 余量。
- * 只有 dock bar 与顶栏开启 inset，其余玻璃调用点默认 0（零回归）。
+ * it.20 P0-回退：dock 外投影与轮廓光**全部撤销**（用户 2026-11-09 21:45 裁决）。
+ *
+ * 撤销原因（用户原话）：「投影是你接手后擅自改动的，为什么会影响到之前的尺寸？
+ * 只要保留现在的新曲率圆角就行」—— 32dp inset 外扩是为了让 24dp 模糊的影子不被
+ * Android View 边界裁掉，代价是整个 dock 的宿主矩形被撑到本体 1.6 倍，布局基线与
+ * 触摸区都跟着漂。它不该以「改几何」为代价，直接撤掉。
+ *
+ * 保留：`capsuleContinuous` 的 Kyant0 连续曲率胶囊圆角（用户明确要求保留）。
+ * 撤销：`GlassKitRimView`（轮廓光，it.19 新增）、`glassInsetDp` 外扩、外投影。
  */
-const DOCK_SHADOW_INSET_DP = 32;
 
 /** bar 的基准模糊半径 dp（Kotlin BAR 档 = 10dp，最终半径 = 10 × blurScale × density）。 */
 const BAR_BLUR_DP = 10;
@@ -161,7 +175,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const backdropTag = useBackdropTag();
   // 四倍率实时值（订阅收敛在 .ts，守卫 glass-api-access 只对 .tsx 计数）。
   const { blurScale, tintScale, glowScale } = useGlassScales();
-  // 22 项可调参数（开关 / 几何 / 高光 / 扩展调试）：与实验页同一份 store。
+  // 25 项可调参数（开关 / 几何 / 高光 / 指示器 / 扩展调试）：与实验页同一份 store。
   const {
     blurEnabled,
     forceDownsample,
@@ -179,6 +193,9 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
     glowWidth,
     glowBottom,
     dispersionLevel,
+    indicatorBlurDp,
+    indicatorRefractionDp,
+    indicatorBandDp,
   } = useDockSettings();
 
   const winWidth = useWindowDimensions().width;
@@ -226,30 +243,52 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   // 原生侧最终 alpha = min(tintAlpha × tintScale, 0.24)＝若再传 tintScale 会二次乘算，
   // 故显式传 tintScale={1}，让 JS 的 resolveTintAlpha 成为唯一一次乘算。
   const barTintAlpha = resolveTintAlpha(TINT_ALPHA_BASE, tintScale);
-  const indicatorBlurDp = Math.round(2 * blurScale);
   /**
-   * it.19 折射 / 色散 / 带高量纲修正（dp → px）。
+   * it.22 指示器 blur / 折射 / 带高**全部解除硬锁**，改取 store（用户 2026-11-09：
+   * 「原版锁死指示器折射是因为调试好跑了，你不要盲目锁，我还要调试」）。
    *
-   * 口径：**JS 只做 dp × density，lensScale 由 native 统一乘一次**
-   * （GlassKitView.drawLensLayer 内 `refractionPx * lensScale`）。
-   * 修正前 JS 传的是 `round(5 × lensScale)`，native 又乘一次 lensScale ⇒
-   * 最终 = 5 × lensScale²，与设备的 density 无关：
-   * - 默认 lensScale=3、density=3 时恰好 = 45px（= 原版 BAR 15dp），所以**默认观感是对的**；
-   * - 但 lensScale=1 时只有 5px（原版 15px），density=2 的机型上又偏大 ⇒
-   *   滑块响应非线性、跨机型不一致。
-   * 修正后 = `dp × density × lensScale`，跨机型一致且与滑块线性。
+   * it.23 修掉两处语义错位（用户：「依旧是最小模糊状态，不受滑块调节；调 bar 的
+   * 模糊也不影响指示器」）：
+   * ① 默认值回到原版真值（blur 0 / refraction 2.6667 / band 2.1333 =
+   *    `GlassLevel.INDICATOR` 的 0 / 8 / 10 dp × lockedRefraction 0.8 ÷ lensScale 3）。
+   *    it.21 那版 0.5 / 4.0 位移只有 5px，胶囊就是 bar 的 1:1 复制（挖洞观感来源）。
+   * ② 指示器显式 `blurScale={1}`（见 JSX），不再被全局「模糊」倍率隐式相乘 —— 默认
+   *    0 时乘积恒为 0，这才是「拖什么都没有反应」的真正原因。
+   *
+   * 量纲口径不变：JS 只做 dp × density，lensScale 由 native 乘一次。色散基数**恒等于**
+   * 折射基数（`dispK = dispersionPx / refractionPx` 必须等于色散滑块本身）：折射变、
+   * 色散必须同步变，否则 dispK 会随折射滑块漂移。
    */
-  // ⚠️ 透镜 px **不取整**（it.19 指示器基准校准）：2.1333dp × 3 = 6.3999，若 round
-  // 成 6 再 ×lensScale 只有 18px（原版 19.2px，丢 1.2px）。桥接层收 Float，直传即可。
   const density = PixelRatio.get();
   const barRefractionPx = GLASS_LENS_PROFILE.barRefractionDp * density;
   const barLensBandPx = GLASS_LENS_PROFILE.barBandDp * density;
-  const indicatorRefractionPx = GLASS_LENS_PROFILE.indicatorRefractionDp * density;
-  const indicatorLensBandPx = GLASS_LENS_PROFILE.indicatorBandDp * density;
+  const indicatorRefractionPx = indicatorRefractionDp * density;
+  const indicatorLensBandPx = indicatorBandDp * density;
   const indicatorDispersionPx =
-    GLASS_LENS_PROFILE.indicatorDispersionDp *
-    density *
-    (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
+    indicatorRefractionDp * density * (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
+
+  /**
+   * it.26 指示器模糊 = **叠加在 bar 之上**（用户实测：「bar 拉满、指示器最低」时
+   * 指示器几乎无模糊，没有叠加观感）。
+   *
+   * 根因：it.25 的 blurBackdropTag 指 bar 玻璃，靠 replayFrameCache 回放 bar 的屏幕帧；
+   * 但快照是在 `Canvas(frameCacheBitmap)` 软画布上重跑的，drawBlurredLayer 的真高斯
+   * 分支要求 `canvas.isHardwareAccelerated`，软画布只能走 1/6 降采样近似 ⇒ 指示器
+   * 拿到的背景本身就只弱糊，blur=0 时看着「几乎无模糊」。
+   *
+   * 改法（两次高斯串行叠加）：blurBackdropTag 改指 App 级 backdrop（未模糊的真实
+   * 背景），指示器的 blurDp 传**叠加半径**。两次串行高斯的合成标准差
+   * σ = √(σ₁² + σ₂²)，故：
+   *   barBlurDp = BAR_BLUR_DP × blurScale（bar 档的实际 dp 半径）
+   *   indicatorOverlayBlurDp = √(barBlurDp² + indicatorBlurDp²)
+   * ⇒ indicatorBlurDp = 0 时指示器与 bar 同糊（不做二次弱化），拉满时严格比 bar 更糊。
+   * 与 it.23 不冲突：指示器仍 `blurScale={1}`，全局「模糊」只通过 barBlurDp 进这条
+   * 公式一次，不会被二次相乘。
+   */
+  const barBlurDp = BAR_BLUR_DP * blurScale;
+  const indicatorOverlayBlurDp = Math.sqrt(
+    barBlurDp * barBlurDp + indicatorBlurDp * indicatorBlurDp,
+  );
 
   // 指示器只做「绝对目标 x」的 spring，不累加增量（it.10 漂移根因）。
   useEffect(() => {
@@ -266,12 +305,98 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
     if (handle != null) setBarGlassTag(handle);
   };
 
+  /**
+   * it.25 双纹理分流：把 it.21 的「复合采集层」拆成两个互不污染的采集源。
+   *
+   * 根因（用户实测）：指示器把整棵 [bar 玻璃 + 图标文字] 子树录进一张纹理，
+   * `drawLensLayer` 的前置高斯把图标也卷积糊掉，而 `:2006` 的满矩形 lens 输出
+   * 又把屏幕上那份清晰图标盖住 ⇒ 胶囊覆盖的那个 tab 图标发糊。
+   *
+   * 分流后：
+   * ① 背景源 = **App 级 backdrop**（it.26 起；it.25 曾指 bar 玻璃）：未模糊的真实
+   *    背景，native 对这条纹理做唯一一次 GPU 高斯，半径 = 叠加半径
+   *    √(barBlurDp² + indicatorBlurDp²)，与 bar 自己那次高斯串行叠加。
+   *    `barGlassTag` 仍作 backdropTag 保留（双源未就绪时的回退锚点）。
+   * ② `iconLayerTag`（= attachIconLayer，新的 GlassKitBackdrop）只包
+   *    `dockBody`（tabsRow / TabCell），非 degraded 时背景 **transparent**，
+   *    是**透明底图标源**；native 以 SRC_OVER 覆盖到模糊背景之上，
+   *    图标不透明像素覆盖、透明像素保留背景 ⇒ 图标永不进卷积。
+   * ③ 两张纹理合成后一起喂 lens（单 uBlurred 约束，不改 AGSL）：
+   *    lens 折射放大的是「背景糊 + 图标清晰」，it.23 的放大/折射效果保留。
+   *
+   * 结构约束（顺序不能改）：
+   * - 两层都在**外层 excludeFromCapture 容器内** ⇒ 不进入 App 级采集纹理；
+   * - bar 玻璃在图标层**之前**（压在图标下方，视觉层级不变）；
+   * - 指示器在两层**之后**（同级、其后）⇒ 采不到自己上一帧（无拖影），
+   *   且绘制顺序压在图标上方（放大镜观感）；
+   * - `panResponder.panHandlers` 仍挂在 dockBody 上，触摸命中链逐位不动。
+   */
+  const attachIconLayer = useCallback((node: any) => {
+    if (node == null) return;
+    const handle = findNodeHandle(node);
+    if (handle != null) setIconLayerTag(handle);
+  }, []);
+  const [iconLayerTag, setIconLayerTag] = useState<number | undefined>(undefined);
+
   const onFrameLayout = (evt: LayoutChangeEvent) => {
     setDockWidth(evt.nativeEvent.layout.width);
   };
 
-  // 指示器真实渲染条件：有透镜能力 + 玻璃叠玻璃开关打开 + bar 采集源就绪。
-  const showIndicatorGlass = !degraded && glassOnGlass && barGlassTag != null;
+  // 指示器真实渲染条件：有透镜能力 + 玻璃叠玻璃开关打开 + 双采集源（纯背景 / 图标）都就绪。
+  const showIndicatorGlass = !degraded && glassOnGlass && barGlassTag != null && iconLayerTag != null;
+
+  /**
+   * it.21 指示器可拖动（用户 2026-11-09：「改成可以滑动指示胶囊，而不是只能点按」）。
+   *
+   * 手感对齐 iOS 分段控件：
+   * - 只在「明显横向」的手势上接管（|dx| > 6 且 |dx| > |dy|）⇒ 页面纵向滚动不受影响；
+   * - 接管瞬间 stopAnimation 取当前动画值为起点（弹簧未收敛时不会跳变）；
+   * - 拖动期间 setValue 跟手，松手取最近 tab 吸附并回调 onSelect；
+   * - `onStartShouldSetPanResponder = false` ⇒ 轻点仍由 tab 的 Pressable 处理，
+   *   手势层不会吃掉点击。
+   */
+  const dragOriginX = useRef(0);
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_evt, gesture) =>
+          tabWidth > 0 &&
+          Math.abs(gesture.dx) > 6 &&
+          Math.abs(gesture.dx) > Math.abs(gesture.dy),
+        onPanResponderGrant: () => {
+          dockIndicatorX.stopAnimation((value: number) => {
+            dragOriginX.current = value;
+          });
+        },
+        onPanResponderMove: (_evt, gesture) => {
+          if (tabWidth <= 0) return;
+          const min = innerPad;
+          const max = innerPad + (items.length - 1) * tabWidth;
+          dockIndicatorX.setValue(Math.min(max, Math.max(min, dragOriginX.current + gesture.dx)));
+        },
+        onPanResponderRelease: (_evt, gesture) => {
+          if (tabWidth <= 0) return;
+          const raw = (dragOriginX.current + gesture.dx - innerPad) / tabWidth;
+          const index = Math.min(items.length - 1, Math.max(0, Math.round(raw)));
+          onSelect(items[index].key);
+          Animated.spring(dockIndicatorX, {
+            toValue: innerPad + index * tabWidth,
+            ...DOCK_SPRING,
+            useNativeDriver: true,
+          }).start();
+        },
+        onPanResponderTerminate: () => {
+          // 手势被上层（如页面滚动）抢走：回到当前选中 tab，不留半途位置。
+          Animated.spring(dockIndicatorX, {
+            toValue: innerPad + activeIndex * tabWidth,
+            ...DOCK_SPRING,
+            useNativeDriver: true,
+          }).start();
+        },
+      }),
+    [tabWidth, innerPad, items, activeIndex, onSelect, dockIndicatorX],
+  );
 
   /**
    * it.19 P0-2：dock bar 外投影的内缩环带（dp）。
@@ -281,43 +406,37 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
    * outer 的 paddingBottom 同步 −inset（否则 dock 会整体上移 inset）。
    * `dockWidth`（onLayout 在内容层量）→ `tabWidth` → 弹簧目标 x **全部不动**。
    */
-  const dockInsetDp = DOCK_SHADOW_INSET_DP;
-
-  // outer 的 paddingBottom 减掉 inset：frame 长高 2×inset 且 outer 是 bottom 锚定，
-  // 不补偿的话 dock 会整体上移 inset（视觉几何必须一点不变）。
   return (
-    <View
-      pointerEvents="box-none"
-      style={[styles.outer, { paddingBottom: Math.max(0, dockFloatDp - dockInsetDp) }]}
-    >
+    <View pointerEvents="box-none" style={[styles.outer, { paddingBottom: dockFloatDp }]}>
       <View
         pointerEvents="box-none"
         style={[
           styles.frame,
           {
-            width: frameWidth + dockInsetDp * 2,
-            height: frameHeight + dockInsetDp * 2,
+            width: frameWidth,
+            height: frameHeight,
             alignSelf: 'center',
           },
         ]}
       >
-        {/* bar 玻璃层：capturable = 指示器的采集源（玻璃叠玻璃）。
+        {/* bar 玻璃层：capturable = 保留「玻璃叠玻璃」被采集能力（it.26 起指示器的
+            模糊背景源已改指 App 级 backdrop，bar 仍作 backdropTag 回退锚点）。
             it.17 起 backdropTag 回到 App 级采集源 ⇒ 透视玻璃（不再是卡纸底衬）。 */}
         {/* it.18 采集排除子树：dock（bar 玻璃 + 指示器 + 图标）整体不进入 App 级
             backdrop 的采集纹理 ⇒ bar 采到的是 dock **下方**的真实内容：
             ① 透视实时背景 ② 图标/文字不会被自己的透镜折射（旧行为是自采样：
             bar 采 App backdrop 时把自己的图标与上一帧玻璃烘进纹理）。
-            注意：指示器采集 bar（目标在本容器内）时照常绘制，玻璃叠玻璃不受影响。 */}
+            注意：指示器采集 App backdrop（目标在本容器之外）时，本容器同样被排除 ⇒
+            指示器也采不到自己与 bar，玻璃叠玻璃的叠加语义不受影响。 */}
         <GlassKitBackdrop excludeFromCapture style={StyleSheet.absoluteFill} pointerEvents="box-none">
-        {/* it.19 P0-2 几何契约（唯一权威，hotfix 2076028）：
-            GlassKitView 铺满**外扩后的 frame**（视觉 + 2×inset），native 负责把玻璃
-            本体画在 inset 环带以内。**绝不能再在外面套一层内缩容器** —— 那样 view
-            拿到的是视觉尺寸、native 再减 2×inset ⇒ bodyH 变负数、玻璃静默不画。 */}
+        {/* it.25 ① bar 玻璃：叶子 GlassKitView，不含任何图标/文字。
+            capturable + liveBackdrop ⇒ 可被下游采集、且始终采当前背景（不停在首帧）。
+            it.26：指示器模糊的背景源已改为 App 级 backdrop，本视图的 blur 只决定
+            bar 自己的观感（指示器的叠加半径由 JS 侧 √(barBlurDp² + 滑块²) 算出）。 */}
         {!degraded && (
           <GlassKitView
             ref={attachBarGlass}
             style={StyleSheet.absoluteFill}
-            glassInsetDp={dockInsetDp}
             onLayout={onBarLayout}
             backdropTag={backdropTag}
             capturable={true}
@@ -345,16 +464,23 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
           />
         )}
 
-        {/* it.19 P0-2 内容层：四边内缩 inset ⇒ 尺寸 = 视觉尺寸（dockWidth 在这里量，
-            指示器 track / tabsRow 仍按这个矩形布局，与 it.18 逐位一致）。 */}
+        {/* it.25 ② 图标采集源：只含 dockBody（tabsRow / TabCell），非 degraded
+            背景为 transparent。native 采到透明底图标，以 SRC_OVER 覆盖到
+            「模糊背景」之上：不透明像素覆盖、透明像素保留背景。 */}
+        <GlassKitBackdrop
+          ref={attachIconLayer}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="box-none"
+        >
+        {/* it.20：内容层 == 本体矩形（投影撤销后不再有 inset 环带）。 */}
         <View
           style={[
             styles.dockBody,
             {
-              left: dockInsetDp,
-              top: dockInsetDp,
-              right: dockInsetDp,
-              bottom: dockInsetDp,
+              left: 0,
+              top: 0,
+              right: 0,
+              bottom: 0,
               borderRadius: frameRadius,
               backgroundColor: degraded
                 ? isDark
@@ -364,8 +490,36 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             },
           ]}
           onLayout={onFrameLayout}
+          {...panResponder.panHandlers}
         >
-        {/* 指示器：track 宽 = (dockWidth − 2×内缩)/N，弹簧平移目标绝对定位 */}
+
+        {/* tabs：flex:1 居中，padding = 内缩，与指示器 track 同宽同中心 */}
+        <View style={[styles.tabsRow, { padding: innerPad }]} pointerEvents="box-none">
+          {items.map((item) => (
+            <TabCell
+              key={item.key}
+              item={item}
+              active={item.key === activeKey}
+              onSelect={() => onSelect(item.key)}
+            />
+          ))}
+        </View>
+
+        {/* it.20：轮廓光（GlassKitRimView）已撤销 —— 用户 2026-11-09 裁决
+            「高光只删除你接手以后自己添加的部分」。玻璃自带的 highlightScale /
+            glassScale 顶缘高光（it.19 之前就有）保留，仍由上面 GlassKitView 的
+            highlightScale / glowScale 三个倍率控制。 */}
+        </View>{/* /it.20 内容层（== 本体矩形） */}
+        </GlassKitBackdrop>{/* /it.25 图标采集层（透明底，仅图标文字） */}
+
+        {/* it.25 指示器：位置在两层**之后**（压住图标），双采集源分别指向
+            ① App 级背景（it.26 起，未模糊的真实背景）② 透明底图标层。
+            ① 绘制顺序 ⇒ 胶囊盖在图标上方，图标经透镜放大/折射（原版观感）；
+            ② 采集源在外部 ⇒ 胶囊不会把自己上一帧采进纹理（无拖影）；
+            ③ backdropTag 主 tag 保留指向 bar 玻璃：双源未就绪 / 其它降级场景
+               时 native 原样回退到单纹理路径（干净的玻璃帧），零回归。
+            ④ it.26：blurBackdropTag 若为 -1（App 级 backdrop 未就绪）⇒ native
+               `dualBg == null` 直接走 ③ 的回退路径，不解引用空视图、不 NPE。 */}
         {dockWidth > 0 && (
           <Animated.View
             style={[
@@ -390,7 +544,17 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
                   },
                 ]}
                 backdropTag={barGlassTag}
-                blurDp={indicatorBlurDp}
+                // it.26 双纹理分流：背景源改指 App 级 backdrop（未模糊的真实背景，
+                // 两次高斯串行叠加的语义基础；bar 快照只有软件画布的 1/6 近似）。
+                // 未就绪时显式传 -1（View.NO_ID）⇒ native 回退单纹理路径。
+                blurBackdropTag={backdropTag ?? -1}
+                iconBackdropTag={iconLayerTag}
+                blurDp={indicatorOverlayBlurDp}
+                // it.23：断开全局「模糊」倍率的隐式相乘（见 glassProfile 同名字段注释）。
+                // 不传的话 wrapper 会注入 store 的 blurScale ⇒ 胶囊实际模糊 =
+                // indicatorBlurDp × blurScale，默认 0 时恒为 0（滑块怎么拖都没反应）。
+                // 原版 INDICATOR 的 blur 是独立档，全局模糊只该影响 bar。
+                blurScale={1}
                 cornerRadiusDp={dockRadiusDp}
                 capsuleContinuous={true}
                 indicatorBoostAlpha={INDICATOR_BOOST_ALPHA}
@@ -398,6 +562,9 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
                 lensBandPx={indicatorLensBandPx}
                 dispersionPx={indicatorDispersionPx}
                 highlightScale={0}
+                // it.22 关键：双采集源每帧都在变，本视图必须跟着重采，
+                // 否则静止后停在最后一次捕获（切换 tab 那几帧的冻结截图）。
+                liveBackdrop={true}
                 chromaticEnabled={chromaticEnabled}
                 depthEffect={depthEffect}
                 vibrancyEnabled={vibrancyEnabled}
@@ -426,31 +593,6 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
             )}
           </Animated.View>
         )}
-
-        {/* tabs：flex:1 居中，padding = 内缩，与指示器 track 同宽同中心 */}
-        <View style={[styles.tabsRow, { padding: innerPad }]} pointerEvents="box-none">
-          {items.map((item) => (
-            <TabCell
-              key={item.key}
-              item={item}
-              active={item.key === activeKey}
-              onSelect={() => onSelect(item.key)}
-            />
-          ))}
-        </View>
-
-        {/*
-          it.19 P0-1 轮廓光（rim）接到 dock bar。
-          ⚠️ 几何：必须放在 **dockBody**（= 玻璃本体 1026×199）里，而不是外扩后的
-          frame（1250×423）—— 否则边光会浮在玻璃外 32dp 处形成鬼影。
-          放在 dockBody 内 ⇒ view 尺寸天然 = 本体尺寸，无需再传 inset（比加
-          insetDp prop 少一个可能漂移的参数）。
-          必须最后一个子节点：原版 HighlightNode 在内容之后绘制，要盖住图标/文字。
-        */}
-        {!degraded && (
-          <GlassKitRimView cornerRadiusDp={dockRadiusDp} capsuleContinuous />
-        )}
-        </View>{/* /it.19 P0-2 内容层 */}
         </GlassKitBackdrop>
       </View>
     </View>

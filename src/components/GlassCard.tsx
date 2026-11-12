@@ -1,69 +1,49 @@
 /**
- * iOS 26 Liquid Glass 卡片（无原生 backdrop-filter 时的纯色 + 内描边 + 微阴影模拟）
- * - 玻璃表面：半透明 + 1px 内描边模拟透光感
- * - 双主题：跟随 usePalette 自动切换 light/dark
- * - 强/弱两种强度
+ * GlassCard —— 通用卡片（it.21 起 = 真玻璃的薄封装）。
  *
- * 注：原生 blur 需要 expo-blur 之类的原生包。本工程刻意不装新依赖，
- *     Android 上用纯色 + innerStroke 渲染出"近似"玻璃感，效果优于毛玻璃模糊，且 0 性能开销。
+ * 历史：本组件最初是「半透明纯色 + 1px 内描边」的玻璃**近似**（当时工程里没有
+ * 原生模糊）。it.19 起我们有了自绘的 GlassKitView 引擎，it.21 用户要求
+ * 「其他组件都用上玻璃版、曲率统一」，于是这里直接委托给 `GlassSurface`：
+ *
+ * - 材质：真 backdrop 采集 + GPU 高斯模糊 + tint（与 dock 同一套引擎参数）；
+ * - 曲率：`shape="card"`（GLASS_SHAPE.card = 22dp，引擎超椭圆 n≈4），与 dock 的
+ *   连续曲率胶囊属于同一套形状语言；
+ * - 边界：GlassSurface 自带 hairline 内描边（玻璃在浅色页上没有边界，靠它定形）；
+ * - 降级：API<31/33 自动退 `palette.surfaceGlassStrong` 实底（GlassSurface 内部处理）。
+ *
+ * 兼容性：props 签名不变。`strong` / `tint` 保留但不再区分 —— 真玻璃只有一种材质，
+ * 强弱由全局「模糊 / 膜层」滑块统一控制（it.17 定下的「全局统一调节」口径）。
  */
 import React from 'react';
-import { StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
-import { usePalette, radiiAlias, makeShadows } from '../theme';
+import { StyleProp, ViewStyle } from 'react-native';
+import { radiiAlias } from '../theme';
 import { spacing } from '../theme/spacing';
+import { GlassSurface } from './GlassSurface';
 
 export interface GlassCardProps {
   children?: React.ReactNode;
-  /** 强玻璃（更高不透明度，背景模糊场景下需要看清文字） */
+  /** @deprecated it.21 起真玻璃只有一种材质，本参数不再生效（保留仅为不改调用点） */
   strong?: boolean;
   /** 自定义 padding */
   padding?: number;
-  /** 自定义圆角，默认 card (16) */
+  /** 自定义圆角，默认 card (20) */
   radius?: number;
   style?: StyleProp<ViewStyle>;
-  /** 内部强制染色（慎用） */
+  /** @deprecated 同 strong：真玻璃不区分染色，保留仅为不改调用点 */
   tint?: 'pink' | 'plain';
 }
 
 export function GlassCard({
   children,
-  strong = false,
   padding = spacing.md,
   radius = radiiAlias.card,
   style,
-  tint = 'plain',
 }: GlassCardProps) {
-  const palette = usePalette();
-  const shadows = makeShadows(palette.name === 'dark');
-  const surface = strong ? palette.surfaceGlassStrong : palette.surfaceGlass;
-  const bg = tint === 'pink' && palette.name === 'dark' ? 'rgba(28,28,30,0.78)' : surface;
   return (
-    <View
-      style={[
-        styles.card,
-        shadows.sm,
-        {
-          backgroundColor: bg,
-          borderRadius: radius,
-          borderColor: palette.innerStroke,
-          padding,
-        },
-        style,
-      ]}
-    >
-      {/* 1px 内描边 + 顶部高光，营造"玻璃边缘" */}
-      <View
-        pointerEvents="none"
-        style={[StyleSheet.absoluteFillObject, { borderRadius: radius, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.innerStroke }]}
-      />
+    <GlassSurface shape="card" radius={radius} padding={padding} style={style}>
       {children}
-    </View>
+    </GlassSurface>
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
-  },
-});
+export default GlassCard;

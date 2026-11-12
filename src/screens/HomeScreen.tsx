@@ -10,7 +10,7 @@
  * 业务逻辑 / API / 数据流 / 路由 / i18n 原文一律不动，仅重组布局结构。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, AppState, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNavigation } from '@react-navigation/native';
@@ -31,6 +31,8 @@ import { Pill } from '../components/Pill';
 import { Button } from '../components/Button';
 import { Skeleton } from '../components/Skeleton';
 import { FadeInView, ScalePressable } from '../components/Motion';
+import { HomeQuickEntries, HomeTools } from '../components/HomeShortcuts';
+import { SectionHeader } from '../components/SectionHeader';
 import { NetworkImage } from '../components/NetworkImage';
 import { useI18n } from '../i18n';
 import { pocketApi } from '../api/pocket48';
@@ -145,26 +147,6 @@ function normalizeLiveList(res: any): LiveCardItem[] {
 }
 
 /** 区块标题：4×18 tint 竖条 + headline 标题 + 可选「全部 ›」 */
-function SectionHeader({ title, action_label, onAction }: { title: string; action_label?: string; onAction?: () => void }) {
-  const palette = usePalette();
-  return (
-    <View style={styles.sectionHead}>
-      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        <View style={[styles.sectionDot, { backgroundColor: palette.tint }]} />
-        <Text style={[typography.headline, { color: palette.label, marginLeft: 8 }]}>{title}</Text>
-      </View>
-      {action_label && onAction ? (
-        <ScalePressable onPress={onAction} pressedScale={0.94}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Text style={[typography.footnote, { color: palette.tint, fontWeight: '700' }]}>{action_label}</Text>
-            <MaterialCommunityIcons name="chevron-right" color={palette.tint} size={16} />
-          </View>
-        </ScalePressable>
-      ) : null}
-    </View>
-  );
-}
-
 /** 首页全宽沉浸直播 banner（16:9）：渐变 + 白字上浮 + 直播中红标 */
 function LiveBanner({ item, onPress }: { item: LiveCardItem; onPress: () => void }) {
   const { t } = useI18n();
@@ -223,10 +205,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { t } = useI18n();
   const token = settings.p48Token;
-  // 屏幕宽度驱动快捷入口像素宽度：横竖屏切换（如 B 站直播自动横屏后返回）时立即重算，
-  // 避免 flexBasis 百分比在旋转后残留横屏宽度（按钮被拉长不恢复）
-  const { width: winW } = useWindowDimensions();
-  const quickCellW = (winW - spacing.md * 2 - 24) / 4;
+  // it.20：快捷入口改为 flex 等分（Hero + 三列），不再按屏宽算像素宽度。
 
   const [lives, setLives] = useState<LiveCardItem[]>([]);
   const [livesOk, setLivesOk] = useState(false);
@@ -749,37 +728,7 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* 快捷入口：单行 4 个胶囊 */}
-        <View style={styles.sectionOuter}>
-          <SectionHeader title={t('快捷入口')} />
-          <View style={styles.quickRow}>
-            {quick.map((item, index) => (
-              <FadeInView key={item.title} delay={index < 12 ? 60 + index * 25 : 0} duration={280} distance={8} style={[styles.quickCell, { width: quickCellW }]}>
-                <ScalePressable
-                  onPress={() => handleNav(item)}
-                  pressedScale={0.94}
-                  style={styles.quickCellInner}
-                >
-                    <View
-                      style={[
-                        styles.chip,
-                        shadows.xs,
-                        {
-                          backgroundColor: palette.surfaceGlassStrong,
-                          borderColor: palette.innerStroke,
-                        },
-                      ]}
-                    >
-                      <View style={[styles.chipIcon, { backgroundColor: palette.tintSoft }]}>
-                        <MaterialCommunityIcons name={item.icon} color={palette.tint} size={16} />
-                      </View>
-                      <Text style={[typography.footnote, { color: palette.label, fontWeight: '600' }]} numberOfLines={1}>{item.title}</Text>
-                    </View>
-                  </ScalePressable>
-                </FadeInView>
-              ))}
-            </View>
-        </View>
+        <HomeQuickEntries quick={quick} onNavigate={handleNav} />
 
         {/* 最近播放 */}
         {currentTrack && trackTitle ? (
@@ -835,32 +784,7 @@ export default function HomeScreen() {
           </View>
         ) : null}
 
-        {/* 工具：单行横向 chips */}
-        <View style={styles.sectionOuter}>
-          <SectionHeader title={t('工具')} />
-          <FadeInView delay={190} duration={320}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.toolChipsContent}
-              style={{ marginHorizontal: -spacing.md }}
-            >
-              {toolChips.map((item) => (
-                <ScalePressable
-                  key={item.title}
-                  onPress={() => handleNav(item)}
-                  pressedScale={0.94}
-                  style={[styles.toolChip, shadows.xs, { backgroundColor: palette.surfaceGlassStrong, borderColor: palette.innerStroke }]}
-                >
-                  <View style={[styles.toolChipIcon, { backgroundColor: palette.tintSoft }]}>
-                    <MaterialCommunityIcons name={item.icon} color={palette.tint} size={16} />
-                  </View>
-                  <Text style={[typography.footnote, { color: palette.label, fontWeight: '600' }]} numberOfLines={1}>{item.title}</Text>
-                </ScalePressable>
-              ))}
-            </ScrollView>
-          </FadeInView>
-        </View>
+        <HomeTools toolChips={toolChips} onNavigate={handleNav} />
 
         <Text
           style={[
@@ -999,51 +923,46 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   liveStateText: { flex: 1, fontSize: 13, lineHeight: 18 },
-  // 快捷入口胶囊
-  chip: {
-    flexDirection: 'row',
+  // —— it.20 快捷入口：通栏 Hero 卡 + 三列等宽卡 ——
+  // it.21：卡片底交给 GlassSurface（真玻璃），这里只留几何与内容布局
+  heroSurface: { minHeight: 96 },
+  heroRow: { flexDirection: 'row', alignItems: 'center' },
+  heroIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingRight: 12,
-    paddingVertical: 7,
   },
-  quickRow: { flexDirection: 'row', gap: 8 },
-  quickCell: {},
-  quickCellInner: { width: '100%' },
-  chipIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+  heroText: { flex: 1, marginLeft: 14, marginRight: 8, minWidth: 0 },
+  quickGrid: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  quickCell: { flex: 1 },
+  quickSurface: { minHeight: 88 },
+  quickContent: { alignItems: 'center', justifyContent: 'center', minHeight: 64 },
+  quickCardIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
-    marginLeft: 6,
   },
   musicCover: { width: 52, height: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  toolChipsContent: {
-    paddingRight: 8,
-    gap: 8,
-    paddingHorizontal: spacing.md,
-    // 防横向 ScrollView 高度塌缩：显式 minHeight + 垂直居中，保证图标不被截断
-    alignItems: 'center',
-    minHeight: 46,
-  },
-  toolChip: {
+  // —— it.20 工具：卡片内 4 列图标网格（inset grouped grid） ——
+  toolGrid: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
+    flexWrap: 'wrap',
+    paddingVertical: 4,
   },
-  toolChipIcon: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+  toolCell: {
+    width: '25%',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  toolIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 6,
   },
 });

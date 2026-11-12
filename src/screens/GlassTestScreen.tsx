@@ -161,6 +161,13 @@ type GlassScheme = keyof typeof THEME_COLORS;
  *  选中色按主题语义对位 GlassTheme accent（真值 glasskit Accent 被守卫 D7 禁落地）。 */
 const DOCK_TAB_INACTIVE_COLOR = '#9CA8BC';
 
+/**
+ * it.26 dock bar 的基准模糊 dp（Kotlin BAR 档 = 10dp）。
+ * 抽成常量是为了让「指示器叠加半径」与 bar 自己的 blurDp 共用同一基数：
+ * bar 实际半径 = 本值 × blurScale，指示器 = √((本值×blurScale)² + 滑块²)。
+ */
+const DOCK_BAR_BLUR_DP = 10;
+
 /** 圆角 / 页面几何（反编译实证；变量形式传 borderRadius 以过守卫 R3）。 */
 const SHAPE_CONTAINER = 24; // GlassShape.java:11 container=24
 /** it.12 sheet 圆角（GlassShape.java:12 sheet=28）：测试页无 sheet 演示件，仅登记。 */
@@ -442,7 +449,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const [backdropTag, setBackdropTag] = useState<number | undefined>(undefined);
 
   /**
-   * it.17：22 项可调参数全部来自全局 store（`glassDockStore`），与 App 本体
+   * it.17：25 项可调参数全部来自全局 store（`glassDockStore`），与 App 本体
    * `AppTabBar` 共用同一份运行时状态 ⇒「实验页拖滑块 = 本体底栏同步变」。
    * 本页不再持有任何参数 useState；折叠区开合属本页 UI 局部状态，留在本地。
    *
@@ -473,6 +480,9 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
     widthScale,
     heightScale,
     highlightScale,
+    indicatorBlurDp,
+    indicatorRefractionDp,
+    indicatorBandDp,
     dockSelected,
     setNumber,
     setBoolean,
@@ -484,6 +494,19 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const dockIndicatorX = useRef(new Animated.Value(0)).current;
   const dockGlassRef = useRef(null);
   const [dockGlassTag, setDockGlassTag] = useState<number | undefined>(undefined);
+  /**
+   * it.25 双纹理分流（与 AppTabBar 同口径）：删掉 it.21 的复合采集层，
+   * 改由「背景源 + `dockIconLayerTag`（只含 dockTabsRow 的透明底图标层）」分别采集，
+   * native 合成后喂 lens ⇒ 图标保持清晰且仍被放大/折射。
+   * it.26：背景源由 `dockGlassTag`（bar 玻璃）改为本页 App 级 `backdropTag`（未模糊的
+   * 真实背景），指示器模糊半径改传叠加值 √(barBlurDp² + 滑块²)（见下方派生值）。
+   */
+  const [dockIconLayerTag, setDockIconLayerTag] = useState<number | undefined>(undefined);
+  const attachDockIconLayer = useCallback((node: any) => {
+    if (node == null) return;
+    const handle = findNodeHandle(node);
+    if (handle != null) setDockIconLayerTag(handle);
+  }, []);
 
   // 四倍率（仍在 glass.ts 的 useGlassStore；订阅出口收敛在 .ts，守卫 S3 不计数）
   const { blurScale, tintScale, lensScale, glowScale } = useGlassScales();
@@ -528,12 +551,26 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const density = PixelRatio.get();
   const barRefractionPx = GLASS_LENS_PROFILE.barRefractionDp * density;
   const barLensBandPx = GLASS_LENS_PROFILE.barBandDp * density;
-  const indicatorRefractionPx = GLASS_LENS_PROFILE.indicatorRefractionDp * density;
-  const indicatorLensBandPx = GLASS_LENS_PROFILE.indicatorBandDp * density;
+  // it.22：指示器三项不再取 profile 的常量（用户：「不要盲目锁，我还要调试」），
+  // 全部取 store，实验页滑块实时可调；默认值仍在 glassProfile.ts。
+  // 色散基数恒等于折射基数（dispK 必须 = 色散滑块本身），折射变则色散同步变。
+  const indicatorRefractionPx = indicatorRefractionDp * density;
+  const indicatorLensBandPx = indicatorBandDp * density;
   const indicatorDispersionPx =
-    GLASS_LENS_PROFILE.indicatorDispersionDp *
-    density *
-    (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
+    indicatorRefractionDp * density * (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
+  /**
+   * it.26 指示器模糊 = 叠加在 bar 之上（与 AppTabBar 同一套公式 / 同一口径）。
+   *
+   * bar 屏幕上那次高斯的半径是 `DOCK_BAR_BLUR_DP × blurScale`；指示器背景源改为
+   * App 级 backdrop（未模糊的真实背景）后，自己再跑一次高斯，两次串行高斯的合成
+   * 标准差 σ = √(σ₁² + σ₂²) ⇒ 指示器传叠加半径：
+   *   dockIndicatorOverlayBlurDp = √(dockBarBlurDp² + indicatorBlurDp²)
+   * 于是「指示器模糊 = 0」与 bar 同糊，「拉满」严格比 bar 更糊（真正的叠一层观感）。
+   */
+  const dockBarBlurDp = DOCK_BAR_BLUR_DP * blurScale;
+  const dockIndicatorOverlayBlurDp = Math.sqrt(
+    dockBarBlurDp * dockBarBlurDp + indicatorBlurDp * indicatorBlurDp,
+  );
   /**
    * it.19 2076030：实验页 5 个演示面板（Hero / 顶栏演示件 / Chip / 工具条 / clear）
    * **显式传原版 CONTROL 档**：amount = `GlassLevel.CONTROL.refractionAmountDp` = 8dp、
@@ -550,7 +587,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
   const panelLensBandPx = GLASS_LENS_PROFILE.controlBandDp * density;
   const panelDispersionPx =
     panelRefractionPx * (dispersionLevel / GLASS_LENS_PROFILE.dispersionLevelBase);
-  const indicatorBlurDp = Math.round(2 * blurScale);
+  // it.22：指示器 blur 也回到滑块（默认 0 = 原版 INDICATOR.blur，与 bar 同清晰度）。
   // Q3：指示器仍随全局 lensScale 变化，不按 GlassLevel.java:37 的
   // INDICATOR lockedRefraction=0.8f 锁死（it.10 用户要求「指示器受滑块调节」）。
   // it.17：dock bar 的 tint 与 AppTabBar 同一口径 —— resolveTintAlpha 是 glass.ts 的
@@ -601,7 +638,7 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
       <ScrollView contentContainerStyle={styles.foreground}>
         <Text style={[styles.hero, { color: C.contentPrimary }]}>玻璃引擎测试</Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
-          {`${APP_VERSION}-it.19 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
+          {`${APP_VERSION}-it.26 · API ${apiLevel} · canBlur=${canBlur()} · canLens=${canLens()} · blur=${blurOn}`}
         </Text>
         <Text style={[styles.statusLine, { color: C.contentSecondary }]}>
           {`采样路径：${forceDown ? '强制降采样（模拟器用）' : 'GPU 全分辨率高斯（真机）'} · 连续曲率 · 面板可拖动`}
@@ -729,13 +766,17 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             ]}
             onLayout={onDockFrameLayout}
           >
+            {/* it.25 ① bar 玻璃叶子（capturable + liveBackdrop），不含任何图标/文字。
+                it.26：指示器模糊的背景源已改指本页 App 级 backdrop（见下方指示器），
+                本视图的 blur 只决定 bar 自己的观感。 */}
             <GlassKitView
               ref={dockGlassRef}
               style={StyleSheet.absoluteFill}
               onLayout={onDockGlassLayout}
               backdropTag={backdropTag}
               capturable={true}
-              blurDp={10}
+              liveBackdrop={true}
+              blurDp={DOCK_BAR_BLUR_DP}
               blurScale={blurScale}
               tintAlpha={dockBarTintAlpha}
               tintScale={1}
@@ -756,7 +797,40 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
               blurEnabled={blurOn}
               forceDownsample={forceDown}
             />
-            {dockWidth > 0 && dockGlassTag != null && (
+            {/* it.25 ② 图标采集源：只含 dockTabsRow，本身无背景（透明）。
+                native 采到透明底图标，以 SRC_OVER 覆盖到「模糊背景」之上。 */}
+            <GlassKitBackdrop ref={attachDockIconLayer} style={StyleSheet.absoluteFill} pointerEvents="box-none">
+            <View style={[styles.dockTabsRow, { padding: dockInnerPad }]} pointerEvents="box-none">
+              {DOCK_TABS.map((tab, i) => (
+                <Pressable
+                  key={tab.label}
+                  style={styles.dockTab}
+                  onPress={() => setDockSelected(i)}
+                >
+                  <View style={styles.dockTabIconWrap}>
+                    <Text
+                      style={[
+                        styles.dockTabIcon,
+                        dockSelected === i && { color: C.accent },
+                      ]}
+                    >
+                      {tab.icon}
+                    </Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.dockTabLabel,
+                      dockSelected === i && styles.dockTabActive,
+                      dockSelected === i && { color: C.accent },
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            </GlassKitBackdrop>{/* /it.25 图标采集层（透明底，仅图标文字） */}
+            {dockWidth > 0 && dockGlassTag != null && dockIconLayerTag != null && (
               <Animated.View
                 style={[
                   styles.dockIndicatorTrack,
@@ -794,7 +868,13 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                       },
                     ]}
                     backdropTag={dockGlassTag}
-                    blurDp={indicatorBlurDp}
+                    // it.26 双纹理分流：背景源改指 App 级 backdrop（与 AppTabBar 同口径），
+                    // 指示器模糊才是「叠在 bar 之上」的第二次高斯；未就绪传 -1 回退单纹理。
+                    blurBackdropTag={backdropTag ?? -1}
+                    iconBackdropTag={dockIconLayerTag}
+                    blurDp={dockIndicatorOverlayBlurDp}
+                    // it.23：同 AppTabBar —— 指示器不吃全局 blurScale，只吃自己的滑块
+                    blurScale={1}
                     cornerRadiusDp={dockRadius}
                     capsuleContinuous={true}
                     indicatorBoostAlpha={0.05}
@@ -802,6 +882,9 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                     lensBandPx={indicatorLensBandPx}
                     dispersionPx={indicatorDispersionPx}
                     highlightScale={0}
+                    // it.22：双采集源每帧都在变，必须按帧重采，否则静止后停在最后一次
+                    // 捕获（真机症状：只有切 tab 那几帧跟手，之后是冻结截图）。
+                    liveBackdrop={true}
                     chromaticEnabled={chromaticEnabled}
                     depthEffect={depthEffect}
                     vibrancyEnabled={vibrancyEnabled}
@@ -824,35 +907,6 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
                 )}
               </Animated.View>
             )}
-            <View style={[styles.dockTabsRow, { padding: dockInnerPad }]} pointerEvents="box-none">
-              {DOCK_TABS.map((tab, i) => (
-                <Pressable
-                  key={tab.label}
-                  style={styles.dockTab}
-                  onPress={() => setDockSelected(i)}
-                >
-                  <View style={styles.dockTabIconWrap}>
-                    <Text
-                      style={[
-                        styles.dockTabIcon,
-                        dockSelected === i && { color: C.accent },
-                      ]}
-                    >
-                      {tab.icon}
-                    </Text>
-                  </View>
-                  <Text
-                    style={[
-                      styles.dockTabLabel,
-                      dockSelected === i && styles.dockTabActive,
-                      dockSelected === i && { color: C.accent },
-                    ]}
-                  >
-                    {tab.label}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
           </View>
         </DraggableGlass>
 
@@ -872,6 +926,54 @@ export default function GlassTestScreen(props: { navigation: { navigate: (route:
             label="玻璃叠玻璃（指示器透镜）"
             value={glassOnGlass}
             onChange={(next) => setBoolean('glassOnGlass', next)}
+          />
+          {/*
+            it.22 指示器三项独立可调（用户 2026-11-09：「原版锁死指示器折射是因为
+            调试好跑了，你不要盲目锁，我还要调试」）。
+            - 模糊：叠加在「已模糊的 bar 图层」之上的第二次模糊，默认 0 = 与 bar 同清晰度；
+            - 折射 / 带高：量纲同 bar（dp × density，native 再乘 lensScale 一次）。
+            色散基数恒等于折射基数，故不单列滑块。
+          */}
+          <Text style={[styles.groupCaption, { color: C.accent }]}>指示器（玻璃叠玻璃）</Text>
+          <SliderRow
+            label="指示器模糊 dp（叠加在 bar 上）"
+            value={indicatorBlurDp}
+            min={DOCK_RANGES.indicatorBlurDp.min}
+            max={DOCK_RANGES.indicatorBlurDp.max}
+            onChange={(next) =>
+              setNumber(
+                'indicatorBlurDp',
+                clampRange(next, DOCK_RANGES.indicatorBlurDp.min, DOCK_RANGES.indicatorBlurDp.max),
+              )
+            }
+          />
+          <SliderRow
+            label="指示器折射 dp"
+            value={indicatorRefractionDp}
+            min={DOCK_RANGES.indicatorRefractionDp.min}
+            max={DOCK_RANGES.indicatorRefractionDp.max}
+            onChange={(next) =>
+              setNumber(
+                'indicatorRefractionDp',
+                clampRange(
+                  next,
+                  DOCK_RANGES.indicatorRefractionDp.min,
+                  DOCK_RANGES.indicatorRefractionDp.max,
+                ),
+              )
+            }
+          />
+          <SliderRow
+            label="指示器带高 dp"
+            value={indicatorBandDp}
+            min={DOCK_RANGES.indicatorBandDp.min}
+            max={DOCK_RANGES.indicatorBandDp.max}
+            onChange={(next) =>
+              setNumber(
+                'indicatorBandDp',
+                clampRange(next, DOCK_RANGES.indicatorBandDp.min, DOCK_RANGES.indicatorBandDp.max),
+              )
+            }
           />
 
           {/* it.13 对齐项：顺序 / 标签 / 区间 / 默认值逐字照抄
